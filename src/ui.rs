@@ -96,7 +96,10 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
 }
 
 pub fn title_width(term_width: usize) -> usize {
-    let used = id_prefix_width(term_width) + SOURCE_WIDTH + MSGS_WIDTH + UPDATED_WIDTH
+    let used = id_prefix_width(term_width)
+        + SOURCE_WIDTH
+        + MSGS_WIDTH
+        + UPDATED_WIDTH
         + COL_GUTTER * 4
         + TABLE_CHROME;
     term_width.saturating_sub(used).max(MIN_TITLE_WIDTH)
