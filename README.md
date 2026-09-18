@@ -35,6 +35,7 @@ cargo install --path .
 ```bash
 cursor-session list
 cursor-session show f4eea6d2-d2d3-41ad-b290-824445295a15
+cursor-session show f4eea6d2-d2d3-41ad-b290-824445295a15 --all
 cursor-session export --format md --session-id f4eea6d2-d2d3-41ad-b290-824445295a15
 cursor-session healthcheck
 ```

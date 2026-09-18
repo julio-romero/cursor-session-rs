@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use cursor_session::detect::StoragePaths;
 use cursor_session::export::{self, Format};
 use cursor_session::model::Session;
+use cursor_session::ui::{self, stdout_is_tty, terminal_width};
 use cursor_session::{filter_workspace, find_session, load_sessions};
 
 #[derive(Parser)]
@@ -33,9 +34,12 @@ enum Commands {
     /// Show messages from a session
     Show {
         session_id: String,
-        /// Maximum number of messages to print
-        #[arg(long)]
+        /// Maximum number of messages to print (from the end)
+        #[arg(long, conflicts_with = "all")]
         limit: Option<usize>,
+        /// Print the full transcript
+        #[arg(long)]
+        all: bool,
     },
     /// Export sessions to files
     Export {
@@ -64,7 +68,11 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::List => cmd_list(&paths),
-        Commands::Show { session_id, limit } => cmd_show(&paths, &session_id, limit),
+        Commands::Show {
+            session_id,
+            limit,
+            all,
+        } => cmd_show(&paths, &session_id, limit, all),
         Commands::Export {
             format,
             out,
@@ -90,50 +98,21 @@ fn resolve_paths(storage: Option<&std::path::Path>) -> Result<StoragePaths> {
 
 fn cmd_list(paths: &StoragePaths) -> Result<()> {
     let sessions = load_sessions(paths)?;
-    if sessions.is_empty() {
-        println!("No sessions found");
-        return Ok(());
-    }
-    println!("Found {} session(s)\n", sessions.len());
-    println!(
-        "{:<36}  {:<6}  {:>5}  {:<16}  TITLE",
-        "ID", "SOURCE", "MSGS", "UPDATED"
+    print!(
+        "{}",
+        ui::render_list(&sessions, stdout_is_tty(), terminal_width())
     );
-    println!("{}", "-".repeat(100));
-    for session in &sessions {
-        let title = truncate(&session.title, 48);
-        println!(
-            "{:<36}  {:<6}  {:>5}  {:<16}  {}",
-            session.id,
-            session.source.as_str(),
-            session.message_count(),
-            session.updated_display(),
-            title
-        );
-    }
     Ok(())
 }
 
-fn cmd_show(paths: &StoragePaths, session_id: &str, limit: Option<usize>) -> Result<()> {
+fn cmd_show(paths: &StoragePaths, session_id: &str, limit: Option<usize>, all: bool) -> Result<()> {
     let sessions = load_sessions(paths)?;
     let Some(session) = find_session(&sessions, session_id) else {
         bail!("session not found: {session_id}\nUse `cursor-session list` to see IDs.");
     };
-    print_session_header(session);
-    let messages = if let Some(n) = limit {
-        let start = session.messages.len().saturating_sub(n);
-        &session.messages[start..]
-    } else {
-        session.messages.as_slice()
-    };
-    for message in messages {
-        let ts = message
-            .timestamp
-            .as_deref()
-            .map(|t| format!(" ({t})"))
-            .unwrap_or_default();
-        println!("\n[{}{}]\n{}", message.role, ts, message.content);
-    }
+    let tty = stdout_is_tty();
+    let (messages, hidden) = ui::select_messages(&session.messages, tty, limit, all);
+    print!("{}", ui::render_show(session, messages, hidden, tty));
     Ok(())
 }
 
@@ -199,28 +178,4 @@ fn cmd_healthcheck(paths: &StoragePaths) -> Result<()> {
         println!("warning: no sessions were parsed");
     }
     Ok(())
-}
-
-fn print_session_header(session: &Session) {
-    println!("{}", session.title);
-    println!("id:        {}", session.id);
-    println!("source:    {}", session.source.as_str());
-    if let Some(workspace) = &session.workspace {
-        println!("workspace: {workspace}");
-    }
-    if let Some(model) = &session.model {
-        println!("model:     {model}");
-    }
-    println!("created:   {}", session.created_display());
-    println!("updated:   {}", session.updated_display());
-    println!("messages:  {}", session.message_count());
-}
-
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }

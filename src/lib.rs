@@ -4,6 +4,7 @@ pub mod export;
 pub mod ide;
 pub mod model;
 mod sqlite;
+pub mod ui;
 
 use anyhow::Result;
 
