@@ -1,0 +1,24 @@
+[package]
+name = "cursor-session"
+version = "0.1.0"
+edition = "2024"
+description = "List, show, and export Cursor IDE and Agent CLI chat sessions"
+license = "MIT"
+
+[lib]
+name = "cursor_session"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cursor-session"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+md-5 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
