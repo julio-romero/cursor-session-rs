@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -230,10 +231,41 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+struct TranscriptCandidate {
+    messages: Vec<Message>,
+    modified: Option<SystemTime>,
+    path: PathBuf,
+}
+
+impl TranscriptCandidate {
+    fn rank(&self) -> (usize, Option<SystemTime>, &Path) {
+        (self.messages.len(), self.modified, &self.path)
+    }
+}
+
+fn select_transcript(
+    candidates: &mut HashMap<String, TranscriptCandidate>,
+    id: String,
+    candidate: TranscriptCandidate,
+) {
+    use std::collections::hash_map::Entry;
+
+    match candidates.entry(id) {
+        Entry::Occupied(mut entry) => {
+            if candidate.rank() > entry.get().rank() {
+                entry.insert(candidate);
+            }
+        }
+        Entry::Vacant(entry) => {
+            entry.insert(candidate);
+        }
+    }
+}
+
 fn scan_transcripts(projects_dir: &Path) -> Result<HashMap<String, Vec<Message>>> {
-    let mut out: HashMap<String, Vec<Message>> = HashMap::new();
+    let mut candidates = HashMap::new();
     let Ok(projects) = fs::read_dir(projects_dir) else {
-        return Ok(out);
+        return Ok(HashMap::new());
     };
     for project in projects.flatten() {
         let transcripts = project.path().join("agent-transcripts");
@@ -245,17 +277,37 @@ fn scan_transcripts(projects_dir: &Path) -> Result<HashMap<String, Vec<Message>>
         };
         for session in sessions.flatten() {
             let dir = session.path();
-            let id = session.file_name().to_string_lossy().to_string();
+            let id =
+                if dir.is_file() && dir.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                    dir.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                } else {
+                    session.file_name().to_string_lossy().to_string()
+                };
             let jsonl = transcript_path(&dir, &id);
             if let Some(path) = jsonl
                 && let Ok(messages) = read_jsonl(&path)
                 && !messages.is_empty()
             {
-                out.insert(id, messages);
+                let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+                select_transcript(
+                    &mut candidates,
+                    id,
+                    TranscriptCandidate {
+                        messages,
+                        modified,
+                        path,
+                    },
+                );
             }
         }
     }
-    Ok(out)
+    Ok(candidates
+        .into_iter()
+        .map(|(id, candidate)| (id, candidate.messages))
+        .collect())
 }
 
 fn transcript_path(dir: &Path, id: &str) -> Option<PathBuf> {
@@ -366,5 +418,60 @@ mod tests {
     fn strips_user_query_wrapper() {
         let raw = "<timestamp>Tue</timestamp>\n<user_query>\nhello world\n</user_query>";
         assert_eq!(clean_user_text(raw), "hello world");
+    }
+
+    fn candidate(count: usize, modified: Option<u64>, path: &str) -> TranscriptCandidate {
+        TranscriptCandidate {
+            messages: (0..count)
+                .map(|index| Message {
+                    role: "user".into(),
+                    content: format!("message {index}"),
+                    timestamp: None,
+                })
+                .collect(),
+            modified: modified
+                .map(|seconds| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
+            path: path.into(),
+        }
+    }
+
+    #[test]
+    fn duplicate_transcripts_are_selected_independently_of_discovery_order() {
+        let cases = [
+            // More messages wins even when the shorter copy is newer.
+            ((13, Some(20), "z"), (40, Some(10), "a")),
+            ((2, Some(10), "z"), (2, Some(20), "a")),
+            ((2, None, "z"), (2, Some(10), "a")),
+            ((2, Some(10), "a"), (2, Some(10), "z")),
+            ((2, None, "a"), (2, None, "z")),
+        ];
+        for (lower, higher) in cases {
+            for order in [[lower, higher], [higher, lower]] {
+                let mut candidates = HashMap::new();
+                for (count, modified, path) in order {
+                    select_transcript(
+                        &mut candidates,
+                        "session".into(),
+                        candidate(count, modified, path),
+                    );
+                }
+                let expected = candidate(higher.0, higher.1, higher.2);
+                assert_eq!(candidates["session"].rank(), expected.rank());
+                assert_eq!(candidates.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn identical_transcripts_do_not_duplicate_messages() {
+        let mut candidates = HashMap::new();
+        for _ in 0..2 {
+            select_transcript(
+                &mut candidates,
+                "session".into(),
+                candidate(3, Some(10), "same.jsonl"),
+            );
+        }
+        assert_eq!(candidates["session"].messages.len(), 3);
     }
 }

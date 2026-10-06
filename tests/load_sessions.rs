@@ -118,3 +118,48 @@ fn exports_markdown_and_jsonl() {
     assert!(jsonl.contains("\"role\":\"user\""));
     assert!(jsonl.lines().count() >= 3);
 }
+
+#[test]
+fn duplicate_project_transcripts_keep_the_complete_conversation() {
+    let root = std::env::temp_dir().join(format!(
+        "cursor-session-duplicate-transcripts-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let nested = root.join("project-a/agent-transcripts/session-1");
+    let flat = root.join("project-b/agent-transcripts");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&flat).unwrap();
+    let short = concat!(
+        "{\"role\":\"user\",\"message\":{\"content\":\"hello\"}}\n",
+        "{\"role\":\"assistant\",\"message\":{\"content\":\"first reply\"}}\n",
+    );
+    let long = format!(
+        "{short}{}\n",
+        r#"{"role":"assistant","message":{"content":"later reply"}}"#
+    );
+    let paths = StoragePaths {
+        projects_dir: Some(root.clone()),
+        ..Default::default()
+    };
+
+    // Either storage layout may hold the complete copy.
+    for (nested_text, flat_text) in [(short, long.as_str()), (long.as_str(), short)] {
+        std::fs::write(nested.join("session-1.jsonl"), nested_text).unwrap();
+        std::fs::write(flat.join("session-1.jsonl"), flat_text).unwrap();
+        let sessions = load_sessions(&paths).unwrap();
+        assert_eq!(sessions.len(), 1);
+        let session = find_session(&sessions, "session-1").unwrap();
+        assert_eq!(session.messages.len(), 3);
+        assert_eq!(session.messages[0].content, "hello");
+        assert_eq!(session.messages[1].content, "first reply");
+        assert_eq!(session.messages[2].content, "later reply");
+
+        let mut exported = Vec::new();
+        export::export_session(session, Format::Jsonl, &mut exported).unwrap();
+        let exported = String::from_utf8(exported).unwrap();
+        assert_eq!(exported.lines().count(), 3);
+        assert!(exported.contains("later reply"));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

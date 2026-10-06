@@ -15,6 +15,16 @@ Agent sessions (macOS and Linux):
 
 `store.db` is only used for extra metadata (`name`, `lastUsedModel`). Blobs are not decrypted.
 
+When a session has transcripts in multiple projects, the copy with the most
+parsed text messages is used. Ties prefer the most recently modified file, then
+the lexicographically greatest path, so directory iteration order does not
+affect the result. Copies are not concatenated. Flat `<session-id>.jsonl` files
+are also supported.
+
+Only user and assistant text is included; tool calls, tool results, and plans
+stored inside tool calls are not rendered. `show --all` displays all loaded text
+messages, not these excluded records or database-only conversation content.
+
 IDE composer sessions:
 
 ```text
