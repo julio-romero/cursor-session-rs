@@ -3,6 +3,7 @@ pub mod detect;
 mod error;
 pub mod export;
 pub mod ide;
+mod json;
 pub mod model;
 mod sqlite;
 pub mod ui;

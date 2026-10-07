@@ -10,6 +10,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::detect::StoragePaths;
+use crate::json;
 use crate::model::{Message, Session, Source};
 use crate::sqlite::with_readonly;
 use crate::{Error, Result};
@@ -424,7 +425,7 @@ fn parse_object<T: DeserializeOwned>(json: &str) -> Option<T> {
     if !json.trim_start().starts_with('{') {
         return None;
     }
-    serde_json::from_str(json).ok()
+    json::from_str(json).ok()
 }
 
 fn warn_skipped(warnings: &mut Vec<String>, skipped: usize, kind: &str, db_path: &Path) {
@@ -519,7 +520,7 @@ fn extract_bubble_text(bubble: Bubble) -> String {
     if parts.is_empty()
         && let Some(rich) = bubble.rich_text.as_deref()
         && !rich.is_empty()
-        && let Ok(value) = serde_json::from_str::<Value>(rich)
+        && let Ok(value) = json::from_str::<Value>(rich)
     {
         let extracted = collect_json_text(&value);
         if !extracted.is_empty() {

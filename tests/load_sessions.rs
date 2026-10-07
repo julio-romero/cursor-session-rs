@@ -601,6 +601,47 @@ fn transcripts_whose_roles_were_renamed_are_an_unrecognized_format() {
 }
 
 #[test]
+fn text_cut_inside_an_emoji_costs_only_that_character() {
+    // JavaScript writes a string cut inside an emoji with a lone surrogate.
+    let cut = format!("{}ud83d", '\\');
+    let fixture = Fixture::new();
+    let row = |key: &str, json: String| (key.to_string(), rusqlite::types::Value::Text(json));
+    fixture.write_ide_db(
+        Journal::Delete,
+        &[
+            row(
+                "composerData:cut-ide",
+                format!(
+                    r#"{{"composerId":"cut-ide","name":"Fix the build {cut}",
+                        "fullConversationHeadersOnly":[{{"bubbleId":"b1","type":1}},{{"bubbleId":"b2","type":2}}]}}"#
+                ),
+            ),
+            row("bubbleId:cut-ide:b1", format!(r#"{{"type":1,"text":"Done {cut}"}}"#)),
+            row("bubbleId:cut-ide:b2", r#"{"type":2,"text":"ok"}"#.to_string()),
+        ],
+    );
+    write(
+        &fixture
+            .projects_dir()
+            .join("Users-demo-project-x")
+            .join("agent-transcripts")
+            .join("cut-agent.jsonl"),
+        &format!(
+            "{}\n{{\"role\":\"assistant\",\"message\":{{\"content\":\"Sure {cut}\"}}}}\n",
+            plain_message("user", "hi")
+        ),
+    );
+
+    let loaded = fixture.load();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    let ide = get(&loaded.sessions, "cut-ide");
+    assert_eq!(ide.title, "Fix the build \u{fffd}");
+    assert_eq!(contents(ide), ["Done \u{fffd}", "ok"]);
+    let agent = get(&loaded.sessions, "cut-agent");
+    assert_eq!(contents(agent), ["hi", "Sure \u{fffd}"]);
+}
+
+#[test]
 fn load_options_default_to_both_stores() {
     let fixture = standard();
     let both = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();

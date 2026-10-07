@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::detect::{ChatsScope, StoragePaths};
+use crate::json;
 use crate::model::{Message, Session, Source};
 use crate::sqlite::with_readonly;
 use crate::{Error, Result};
@@ -306,7 +307,7 @@ fn load_chat_session(
                 return None;
             }
         };
-        serde_json::from_str(&raw).unwrap_or_else(|err| {
+        json::from_str(&raw).unwrap_or_else(|err| {
             meta_files.add(&meta_path, err);
             MetaJson::default()
         })
@@ -430,11 +431,12 @@ fn is_missing_schema(err: &Error) -> bool {
 }
 
 fn decode_meta_json(raw: &[u8]) -> Option<Value> {
-    if let Ok(value) = serde_json::from_slice::<Value>(raw) {
+    let text = std::str::from_utf8(raw).ok()?;
+    if let Ok(value) = json::from_str(text) {
         return Some(value);
     }
-    let bytes = decode_hex(std::str::from_utf8(raw).ok()?)?;
-    serde_json::from_slice(&bytes).ok()
+    let bytes = decode_hex(text)?;
+    json::from_str(std::str::from_utf8(&bytes).ok()?).ok()
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
@@ -615,7 +617,7 @@ fn read_transcript(path: &Path) -> Result<Transcript> {
         if line.is_empty() {
             continue;
         }
-        let entry = serde_json::from_str::<TranscriptLine>(line).ok();
+        let entry = json::from_str::<TranscriptLine>(line).ok();
         let Some((role, message)) = entry.and_then(|entry| Some((entry.role?, entry.message)))
         else {
             expected += 1;
