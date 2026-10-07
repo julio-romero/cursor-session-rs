@@ -113,12 +113,12 @@ impl Mode {
     /// WAL database with no `-wal`, or an empty one, has every commit in its
     /// main file, and a non-empty `-wal` was left behind by a crash.
     ///
-    /// On a `shared` filesystem the locks and `-shm` of a writer on the other
-    /// side cannot be seen, so a database there is never read in place: it is
-    /// read immutable while its journal is empty, and copied with it otherwise.
-    fn of(path: &Path, shared: bool) -> io::Result<Mode> {
+    /// On a `lockless` filesystem (see [`is_lockless_fs`]) a database is never
+    /// read in place: it is read immutable while its journal is empty, and
+    /// copied with it otherwise.
+    fn of(path: &Path, lockless: bool) -> io::Result<Mode> {
         let wal = is_wal(path)?;
-        if !shared && (!wal || has_sidecars(path)) {
+        if !lockless && (!wal || has_sidecars(path)) {
             return Ok(Mode::InPlace);
         }
         Ok(if journal_len(path, wal)? == 0 {
@@ -139,18 +139,19 @@ impl Mode {
 /// read-only directory. One whose `-wal` a crash left behind is copied, with
 /// that `-wal`, to a private temporary directory and the copy is opened; so is
 /// one whose path a `file:` URI cannot carry, unless it has both sidecars. A
-/// database on a filesystem shared with another machine or VM is never read in
-/// place (see [`Mode::of`]). With `copy`, the database is read from a copy
-/// that SQLite may write to, to roll back a journal a crash left.
+/// database on a filesystem shared with another machine or VM, or mounted
+/// read-only, is never read in place (see [`Mode::of`]). With `copy`, the
+/// database is read from a copy that SQLite may write to, to roll back a
+/// journal a crash left.
 fn open_readonly(path: &Path, copy: bool) -> Result<Db> {
     let file = sqlite_path(path).map_err(|source| Error::access(path, source))?;
-    let shared = is_shared_fs(&file);
+    let lockless = is_lockless_fs(&file);
     for _ in 0..3 {
         let before = stamp(&file).map_err(|source| Error::access(path, source))?;
         let mode = if copy {
             Mode::Snapshot
         } else {
-            Mode::of(&file, shared).map_err(|source| Error::access(path, source))?
+            Mode::of(&file, lockless).map_err(|source| Error::access(path, source))?
         };
         let uri = match mode {
             Mode::InPlace => break,
@@ -167,7 +168,7 @@ fn open_readonly(path: &Path, copy: bool) -> Result<Db> {
             });
         }
         // With both sidecars present, reading in place creates no files.
-        if mode == Mode::Immutable && !shared && has_sidecars(&file) {
+        if mode == Mode::Immutable && !lockless && has_sidecars(&file) {
             break;
         }
         let snapshot = Snapshot::copy(&file, path)?;
@@ -175,7 +176,8 @@ fn open_readonly(path: &Path, copy: bool) -> Result<Db> {
         AFTER_COPY.with_borrow_mut(|hook| hook.as_mut().map(|hook| hook(&file)));
         // Cursor may have opened the file during the copy, which can tear it.
         // Copy again, or read in place once its -wal and -shm exist.
-        if stamp(&file).ok() == Some(before) && (copy || Mode::of(&file, shared).ok() == Some(mode))
+        if stamp(&file).ok() == Some(before)
+            && (copy || Mode::of(&file, lockless).ok() == Some(mode))
         {
             // The copy is private, so SQLite may recover it.
             let conn = connect(&snapshot.db, path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
@@ -186,7 +188,7 @@ fn open_readonly(path: &Path, copy: bool) -> Result<Db> {
             });
         }
     }
-    if shared || copy {
+    if lockless || copy {
         return Err(Error::Changed {
             path: path.to_path_buf(),
         });
@@ -225,66 +227,102 @@ fn sqlite_path(path: &Path) -> io::Result<PathBuf> {
 
 #[cfg(test)]
 thread_local! {
-    /// Overrides [`is_shared_fs`] on this thread.
-    static SHARED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// Overrides [`is_lockless_fs`] on this thread.
+    static LOCKLESS: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     /// Runs on this thread after each copy, before the original is checked again.
     #[allow(clippy::type_complexity)]
     static AFTER_COPY: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// Whether `path` is on a filesystem that another machine or VM may write to
-/// at the same time: a network share, or the Windows drives WSL mounts.
-/// SQLite's locks and the shared memory of WAL mode do not reach across it.
-fn is_shared_fs(path: &Path) -> bool {
+/// Whether reading `path` in place cannot rely on SQLite's locks and the
+/// shared memory (`-shm`) of WAL mode. On a filesystem that another machine or
+/// VM may write to at the same time, such as a network share or the Windows
+/// drives WSL mounts, they do not reach across. A read-only filesystem has no
+/// writer to share them with, and SQLite on macOS cannot open a `-shm` there.
+fn is_lockless_fs(path: &Path) -> bool {
     #[cfg(test)]
-    if let Some(shared) = SHARED.get() {
-        return shared;
+    if let Some(lockless) = LOCKLESS.get() {
+        return lockless;
     }
-    shared_fs(path)
+    lockless_fs(path)
 }
 
 /// Filesystem types (`statfs` magic numbers) that are served from elsewhere.
 #[cfg(any(target_os = "linux", test))]
-const SHARED_FS_TYPES: [u32; 11] = [
+const SHARED_FS_TYPES: [u32; 19] = [
     0x0102_1997, // 9p: WSL 2's /mnt/c, VM shares
     0x5346_4846, // WSL 1
     0xFF53_4D42, // CIFS
     0xFE53_4D42, // SMB 2
     0x0000_517B, // SMB
     0x0000_6969, // NFS
-    0x6573_5546, // FUSE: sshfs, virtiofs, rclone
+    0x6573_5546, // FUSE: sshfs, virtiofs, rclone, vmhgfs-fuse
     0x5346_414F, // AFS
+    0x6B41_4653, // kAFS
     0x00C3_6400, // Ceph
     0x786F_4256, // VirtualBox shared folders
+    0x7C7C_6673, // Parallels shared folders
+    0xBACB_ACBC, // VMware shared folders
     0x4750_4653, // GPFS
+    0x7375_7245, // Coda
+    0x0BD0_0BD0, // Lustre
+    0x7461_636F, // OCFS2
+    0x0116_1970, // GFS2
+    0x0000_564C, // NCP
 ];
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn shared_fs(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
+fn lockless_fs(path: &Path) -> bool {
+    c_path(path)
+        .and_then(|path| fs_stat(&path, libc::statfs))
+        .is_some_and(|stat| is_lockless(&stat))
+}
 
-    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: `path` is NUL-terminated and `stat` is valid for writes.
-    if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
-        return false;
-    }
-    // SAFETY: statfs succeeded, so it filled `stat`.
-    is_shared(&unsafe { stat.assume_init() })
+/// Network filesystems lack `MNT_LOCAL`; read-only ones have `MNT_RDONLY`.
+#[cfg(target_os = "macos")]
+fn is_lockless(stat: &libc::statfs) -> bool {
+    let flags = stat.f_flags;
+    flags & (libc::MNT_LOCAL as u32) == 0 || flags & (libc::MNT_RDONLY as u32) != 0
 }
 
 #[cfg(target_os = "linux")]
-fn is_shared(stat: &libc::statfs) -> bool {
-    // The field's type differs between targets; the magic numbers fit 32 bits.
-    is_shared_fs_type(stat.f_type as u32)
+fn lockless_fs(path: &Path) -> bool {
+    let Some(path) = c_path(path) else {
+        return false;
+    };
+    // `statfs` gives the type and `statvfs` the mount flags.
+    let stat = fs_stat(&path, libc::statfs);
+    let vfs = fs_stat(&path, libc::statvfs);
+    stat.zip(vfs)
+        .is_some_and(|(stat, vfs)| is_lockless(&stat, &vfs))
 }
 
-#[cfg(target_os = "macos")]
-fn is_shared(stat: &libc::statfs) -> bool {
-    stat.f_flags & (libc::MNT_LOCAL as u32) == 0
+#[cfg(target_os = "linux")]
+fn is_lockless(stat: &libc::statfs, vfs: &libc::statvfs) -> bool {
+    // The field's type differs between targets; the magic numbers fit 32 bits.
+    is_shared_fs_type(stat.f_type as u32) || vfs.f_flag & libc::ST_RDONLY != 0
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn c_path(path: &Path) -> Option<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
+}
+
+/// What `statfs` or `statvfs` reports for `path`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fs_stat<T>(
+    path: &std::ffi::CStr,
+    stat: unsafe extern "C" fn(*const libc::c_char, *mut T) -> libc::c_int,
+) -> Option<T> {
+    let mut buf = std::mem::MaybeUninit::<T>::uninit();
+    // SAFETY: `path` is NUL-terminated and `buf` is valid for writes of a `T`.
+    if unsafe { stat(path.as_ptr(), buf.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: the call succeeded, so it filled `buf`.
+    Some(unsafe { buf.assume_init() })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -293,12 +331,12 @@ fn is_shared_fs_type(magic: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn shared_fs(path: &Path) -> bool {
+fn lockless_fs(path: &Path) -> bool {
     path.to_str().is_some_and(is_unc)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn shared_fs(_: &Path) -> bool {
+fn lockless_fs(_: &Path) -> bool {
     false
 }
 
@@ -735,6 +773,12 @@ mod tests {
         assert_eq!(copies(), copied + 1);
         let copy = db._snapshot.as_ref().map(|s| s.dir.clone()).unwrap();
         assert!(copy.join("state.vscdb").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&copy).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
         assert_eq!(rows(&db).unwrap().len(), 2);
         drop(db);
         assert!(!copy.exists());
@@ -902,9 +946,9 @@ mod tests {
 
     /// Runs `open` as if the database were on a filesystem another machine shares.
     fn shared<T>(open: impl FnOnce() -> T) -> T {
-        SHARED.set(Some(true));
+        LOCKLESS.set(Some(true));
         let opened = open();
-        SHARED.set(None);
+        LOCKLESS.set(None);
         opened
     }
 
@@ -1129,12 +1173,48 @@ mod tests {
         ] {
             assert!(!is_unc(path), "{path}");
         }
-        assert!(!is_shared_fs(tempfile::tempdir().unwrap().path()));
-        // WSL 2's /mnt/c and an SMB share are; ext4, btrfs and tmpfs are not.
-        assert!(is_shared_fs_type(0x0102_1997) && is_shared_fs_type(0xFF53_4D42));
+        assert!(!is_lockless_fs(tempfile::tempdir().unwrap().path()));
+        // WSL 2's /mnt/c, an SMB share and a Parallels shared folder are; ext4,
+        // btrfs and tmpfs are not.
+        for shared in [0x0102_1997, 0xFF53_4D42, 0x7C7C_6673] {
+            assert!(is_shared_fs_type(shared));
+        }
         for local in [0xEF53, 0x9123_683E, 0x0102_1994] {
             assert!(!is_shared_fs_type(local));
         }
+        #[cfg(windows)]
+        assert!(lockless_fs(Path::new(r"\\server\share\state.vscdb")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn network_and_read_only_mounts_are_lockless() {
+        let mount = |flags: libc::c_int| {
+            // SAFETY: statfs is plain data, for which all zeros is valid.
+            let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+            stat.f_flags = flags as u32;
+            is_lockless(&stat)
+        };
+        assert!(!mount(libc::MNT_LOCAL));
+        assert!(mount(0));
+        assert!(mount(libc::MNT_LOCAL | libc::MNT_RDONLY));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn network_and_read_only_mounts_are_lockless() {
+        let mount = |fs_type: u32, flags: libc::c_ulong| {
+            // SAFETY: statfs and statvfs are plain data, for which all zeros is valid.
+            let (mut stat, mut vfs): (libc::statfs, libc::statvfs) =
+                unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+            stat.f_type = fs_type as _;
+            vfs.f_flag = flags;
+            is_lockless(&stat, &vfs)
+        };
+        // ext4, 9p (WSL 2's /mnt/c), and ext4 mounted read-only.
+        assert!(!mount(0xEF53, 0));
+        assert!(mount(0x0102_1997, 0));
+        assert!(mount(0xEF53, libc::ST_RDONLY));
     }
 
     #[test]

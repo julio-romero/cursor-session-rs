@@ -452,12 +452,15 @@ there. A database in WAL mode is read depending on the files next to it:
   and quitting Cursor once avoids the copy. If cursor-session is killed during
   such a read, its copy stays behind until a later run removes it, an hour on.
 
-A database on a filesystem that another machine or VM serves, such as a network
-share or the Windows drives WSL mounts under `/mnt`, is never read in place,
-because SQLite's locks and its `-shm` do not reach across it: it is read as
-immutable while its journal is empty, and from a copy of it and its journal
-otherwise. If Cursor writes to it during every attempt, the command stops with
-`changed while it was being read`.
+A database where SQLite's locks cannot do their job is never read in place. That
+is one on a filesystem that another machine or VM serves, such as a network
+share or the Windows drives WSL mounts under `/mnt`, because the locks and the
+`-shm` of a Cursor on the other side do not reach across it. It is also one on a
+read-only volume, such as a Time Machine backup or a disk image mounted
+read-only, where no Cursor can be writing. Such a database is read as immutable
+while its journal is empty, and from a copy of it and its journal otherwise. If
+Cursor writes to it during every attempt, the command stops with `changed while
+it was being read`.
 
 One case can still leave files next to the database: when Cursor quits in the
 moment between cursor-session finding it open and starting to read, the read
