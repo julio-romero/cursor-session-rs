@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use md5::{Digest, Md5};
 
+use crate::model::Source;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Default)]
@@ -267,6 +268,14 @@ impl StoragePaths {
             chats_scope: scope,
             projects_dir,
             global_storage_db: None,
+        }
+    }
+
+    /// Whether a location of `source` was found.
+    pub fn has(&self, source: Source) -> bool {
+        match source {
+            Source::Agent => self.chats_dir.is_some() || self.projects_dir.is_some(),
+            Source::Ide => self.global_storage_db.is_some(),
         }
     }
 

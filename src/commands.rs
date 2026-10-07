@@ -37,6 +37,18 @@ fn load(
     verbose: bool,
     err: &mut dyn Write,
 ) -> Result<Vec<Session>> {
+    if let Some(source) = opts.source
+        && !paths.has(source)
+        && paths.has(source.other())
+    {
+        let warning = format!(
+            "no {} storage was found, and `--source {}` leaves the {} sessions unread",
+            source.name(),
+            source.as_str(),
+            source.other().name()
+        );
+        print_warnings(&[warning], true, err)?;
+    }
     let loaded = load_sessions(paths, opts)?;
     print_warnings(&loaded.notices, true, err)?;
     print_warnings(&loaded.warnings, verbose, err)?;
@@ -119,7 +131,7 @@ fn cmd_show(
         source: args.source,
     };
     let sessions = load(paths, &load_opts, args.verbose, err)?;
-    let session = find_session(&sessions, &args.session_id)?;
+    let session = find(&sessions, &args.session_id, args.source, paths)?;
     if args.json {
         let (messages, _) = ui::select_messages(&session.messages, false, args.limit, args.all);
         return write_json(out, &session.detail(messages));
@@ -148,7 +160,7 @@ fn cmd_export(
     let sessions = load(paths, &load_opts, args.verbose, err)?;
     let workspace = args.workspace.as_deref().map(resolve_workspace);
     let mut selected: Vec<&Session> = if let Some(id) = &args.session_id {
-        vec![find_session(&sessions, id)?]
+        vec![find(&sessions, id, args.source, paths)?]
     } else if let Some(workspace) = &workspace {
         filter_workspace(&sessions, workspace)
     } else {
@@ -185,6 +197,23 @@ fn cmd_export(
         }
     }
     Ok(())
+}
+
+/// The session `query` names (see [`find_session`]). When it is not found,
+/// the error names the store that `source` left unsearched, if it was found.
+fn find<'a>(
+    sessions: &'a [Session],
+    query: &str,
+    source: Option<Source>,
+    paths: &StoragePaths,
+) -> cursor_session::Result<&'a Session> {
+    find_session(sessions, query).map_err(|error| match error {
+        Error::SessionNotFound { query, .. } => Error::SessionNotFound {
+            query,
+            unsearched: source.map(Source::other).filter(|other| paths.has(*other)),
+        },
+        error => error,
+    })
 }
 
 /// `workspace` as an absolute path when it is written relative to the
@@ -419,11 +448,7 @@ pub fn hints(error: &anyhow::Error, paths: &StoragePaths, healthcheck: bool) -> 
     };
     let mut hints = error.hints();
     if let Some(store) = error.skippable() {
-        let other_found = match store {
-            Source::Agent => paths.global_storage_db.is_some(),
-            Source::Ide => paths.chats_dir.is_some() || paths.projects_dir.is_some(),
-        };
-        if !other_found {
+        if !paths.has(store.other()) {
             hints.remove(0);
         } else if healthcheck {
             hints[0] = format!("`list`, `show` and `export` accept {}", store.skip_option());

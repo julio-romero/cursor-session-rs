@@ -20,6 +20,14 @@ impl Source {
         }
     }
 
+    /// The store this one is not.
+    pub fn other(self) -> Source {
+        match self {
+            Source::Agent => Source::Ide,
+            Source::Ide => Source::Agent,
+        }
+    }
+
     /// The store's name in messages.
     pub fn name(self) -> &'static str {
         match self {

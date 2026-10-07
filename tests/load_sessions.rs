@@ -346,7 +346,10 @@ fn find_session_reports_unknown_empty_and_ambiguous_ids() {
     let sessions = standard().load().sessions;
 
     let err = find_session(&sessions, "ffff").unwrap_err();
-    assert!(matches!(&err, Error::SessionNotFound { query } if query == "ffff"));
+    assert!(matches!(
+        &err,
+        Error::SessionNotFound { query, unsearched: None } if query == "ffff"
+    ));
     assert_eq!(err.to_string(), "session not found: ffff");
     assert_eq!(
         err.hints(),

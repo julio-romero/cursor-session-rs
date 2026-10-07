@@ -351,9 +351,34 @@ fn show_json_has_the_documented_keys() {
     ));
     assert_eq!(ide["source"], "ide");
     assert_eq!(ide["messages"][0]["timestamp"], "1757200000000");
+    // The hint names the store --source left unsearched.
     assert_eq!(
         fails(&fixture, &["show", "c0ffee00", "--source", "agent"]),
-        "error: session not found: c0ffee00\nrun `cursor-session list` to see session IDs\n"
+        "error: session not found: c0ffee00\n\
+         rerun without `--source agent` to search IDE sessions too\n"
+    );
+    // With only the IDE database to read, `--source agent` reads nothing.
+    let db = fixture.ide_db_path();
+    let storage = ["--storage", db.to_str().unwrap()];
+    let output = run(
+        &fixture,
+        &[&["list", "--source", "agent"][..], &storage].concat(),
+    );
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), "No sessions found\n");
+    assert_eq!(
+        stderr(&output),
+        "warning: no Agent CLI storage was found, and `--source agent` leaves the IDE \
+         sessions unread\n"
+    );
+    assert_eq!(
+        fails(
+            &fixture,
+            &[&["show", "c0ffee00", "--source", "agent"][..], &storage].concat()
+        ),
+        "warning: no Agent CLI storage was found, and `--source agent` leaves the IDE \
+         sessions unread\nerror: session not found: c0ffee00\n\
+         rerun without `--source agent` to search IDE sessions too\n"
     );
 }
 

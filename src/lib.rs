@@ -72,6 +72,7 @@ pub fn find_session<'a>(sessions: &'a [Session], query: &str) -> Result<&'a Sess
     match (matches.as_slice(), exact.as_slice()) {
         ([], _) => Err(Error::SessionNotFound {
             query: query.to_string(),
+            unsearched: None,
         }),
         ([only], _) | (_, [only]) => Ok(only),
         _ => Err(Error::AmbiguousId {

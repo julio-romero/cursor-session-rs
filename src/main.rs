@@ -405,6 +405,7 @@ mod tests {
 
         let not_found = || Error::SessionNotFound {
             query: "abc".into(),
+            unsearched: None,
         };
         let error = Err::<(), _>(not_found())
             .context("could not show session")

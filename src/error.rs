@@ -21,7 +21,11 @@ pub enum Error {
     UnsupportedStorage { path: PathBuf },
 
     #[error("session not found: {query}")]
-    SessionNotFound { query: String },
+    SessionNotFound {
+        query: String,
+        /// A store that was found but, by `--source`, not searched.
+        unsearched: Option<Source>,
+    },
 
     #[error("session ID prefix \"{query}\" is ambiguous ({} matches)", matches.len())]
     AmbiguousId {
@@ -132,6 +136,14 @@ impl Error {
                  store.db or state.vscdb file, or the directory that holds state.vscdb"
                     .to_string(),
             ],
+            Error::SessionNotFound {
+                unsearched: Some(store),
+                ..
+            } => vec![format!(
+                "rerun without `--source {}` to search {} sessions too",
+                store.other().as_str(),
+                store.name()
+            )],
             Error::SessionNotFound { .. } | Error::EmptyId => {
                 vec!["run `cursor-session list` to see session IDs".to_string()]
             }
@@ -212,7 +224,14 @@ mod tests {
         let errors = [
             Error::NoHome,
             Error::UnsupportedStorage { path: path.clone() },
-            Error::SessionNotFound { query: "x".into() },
+            Error::SessionNotFound {
+                query: "x".into(),
+                unsearched: None,
+            },
+            Error::SessionNotFound {
+                query: "x".into(),
+                unsearched: Some(Source::Agent),
+            },
             Error::EmptyId,
             Error::AmbiguousId {
                 query: "a".into(),

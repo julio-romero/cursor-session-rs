@@ -125,7 +125,8 @@ a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4  2026-10-05 14:12  Add retry
 ```
 
 - `--source agent` or `--source ide` reads only that store. The other one is
-  never opened, so a broken store cannot get in the way.
+  never opened, so a broken store cannot get in the way. When the store named
+  was not found but the other one was, a `warning:` line says so.
 - `--limit N` (N ≥ 1) keeps the N most recently updated sessions.
 
 ### Show a session
@@ -159,7 +160,8 @@ Done. `WEBHOOK_MAX_ATTEMPTS` (default 5) is read in `Config::from_env`, and the 
 - In a terminal, `show` prints the last 20 messages. Piped, it prints all of them.
   `--limit N` prints the last N and `--all` prints everything. The two flags
   cannot be combined.
-- `--source agent|ide` works here too.
+- `--source agent|ide` works here too. When it leaves the session unfound, the
+  hint says which store was not searched.
 - The time next to a message is local-time text as the Agent CLI stored it,
   or for IDE messages a UTC time such as `2026-10-04 16:21 UTC`.
 
