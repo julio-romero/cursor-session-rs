@@ -184,9 +184,9 @@ fn cmd_export(
     // The files are the result and the `wrote` lines only report progress, so
     // a reader that goes away (`| head`) stops the lines, not the export.
     let mut progress = true;
-    let mut paths = export::ExportPaths::default();
+    let mut files = export::ExportPaths::default();
     for session in selected {
-        let path = paths.next(&out_dir, session, args.format);
+        let path = files.next(&out_dir, session, args.format);
         write_export(session, args.format, &path)
             .with_context(|| format!("could not write {}", path.display()))?;
         if progress && let Err(error) = writeln!(out, "wrote {}", path.display()) {
