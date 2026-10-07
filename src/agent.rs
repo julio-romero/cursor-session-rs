@@ -832,6 +832,7 @@ mod tests {
         let (sessions, warnings) = load(&chats, ChatsScope::All, None);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         if readable {
+            eprintln!("skipped: permissions are not enforced for this user (root)");
             return;
         }
 

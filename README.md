@@ -139,7 +139,7 @@ messages:  4
 
 2 earlier message(s) omitted. Use --limit N or --all to see more.
 
-[user (Sunday, Oct 5, 2026, 9:05 AM (UTC-5))]
+[user (Monday, Oct 5, 2026, 9:05 AM (UTC-5))]
 Make the attempt count configurable.
 
 [assistant]

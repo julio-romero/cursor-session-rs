@@ -720,6 +720,7 @@ mod tests {
             fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
         }
         if readable {
+            eprintln!("skipped: permissions are not enforced for this user (root)");
             return;
         }
 

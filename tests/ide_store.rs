@@ -741,6 +741,7 @@ fn unreadable_database_is_an_access_error() {
     let healthcheck = fixture.cmd().arg("healthcheck").output().unwrap();
     fs::set_permissions(&db, fs::Permissions::from_mode(0o644)).unwrap();
     if readable {
+        eprintln!("skipped: permissions are not enforced for this user (root)");
         return;
     }
 
