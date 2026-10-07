@@ -309,6 +309,41 @@ fn read_sessions(
             _ => format!("none of its {messages} messages has a known type"),
         }));
     }
+    // Not one chat or message row: either there are no chats, or their rows
+    // are all under keys this version does not know.
+    if sessions.is_empty() && read + skipped + skipped_bubbles == 0 {
+        let mut others = key_prefixes(conn).map_err(|source| Error::Database {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        others.retain(|prefix| prefix != "composerData" && prefix != "bubbleId");
+        // Rows named like chats or messages are most likely those, moved.
+        let (alike, unlike): (Vec<String>, Vec<String>) = others.into_iter().partition(|prefix| {
+            let prefix = prefix.to_ascii_lowercase();
+            prefix.contains("composer") || prefix.contains("bubble")
+        });
+        let named = |prefixes: &[String]| {
+            prefixes
+                .iter()
+                .map(|prefix| format!("`{prefix}:`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if !alike.is_empty() {
+            notices.push(format!(
+                "{} has no composerData or bubbleId rows, but rows under {}, which are left \
+                 out. Cursor may have changed its storage format.",
+                db_path.display(),
+                named(&alike)
+            ));
+        } else if !unlike.is_empty() {
+            warnings.push(format!(
+                "{} has no composerData or bubbleId rows, only rows under {}",
+                db_path.display(),
+                named(&unlike)
+            ));
+        }
+    }
     warn_skipped(warnings, skipped_bubbles, "message", db_path);
     warn_skipped(warnings, skipped, "composer", db_path);
     if orphans.left.chats > 0 {

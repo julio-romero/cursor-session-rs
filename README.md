@@ -568,10 +568,12 @@ When only part of the data changed, as when Cursor writes new chats in a new
 format and leaves older ones as they are, what can be read still lists and a
 `warning:` line says what is left out, also without `-v`, and `healthcheck`
 marks the store `(incomplete)`. That is the case for chats whose rows are under
-another key (`left out 2 chat(s) with 10 message row(s) in …`) and for messages
-of a type this version does not know, which are shown as `unknown`. Messages of
-a chat that has no row at all and that no other row names, as a deleted chat
-leaves them, are only a `-v` warning.
+another key (`left out 2 chat(s) with 10 message row(s) in …`), for messages of
+a type this version does not know, which are shown as `unknown`, and for a
+database with no chat or message rows but rows under keys named like them, such
+as `composerV2:`. Messages of a chat that has no row at all and that no other row
+names, as a deleted chat leaves them, are only a `-v` warning, and so are rows
+of other kinds in a database without chats.
 
 The Agent CLI gets the same treatment. When transcripts hold lines but none of
 them yields a message, for example because their roles are no longer `user` and

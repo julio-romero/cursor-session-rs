@@ -675,6 +675,52 @@ fn chats_whose_rows_moved_are_a_notice_and_deleted_ones_a_warning() {
 }
 
 #[test]
+fn chat_and_message_rows_under_new_keys_are_a_notice() {
+    let fixture = Fixture::new();
+    let other = |key: &str| (key.to_string(), SqlValue::Text("{}".into()));
+    let db = fixture.write_ide_db(
+        Journal::Delete,
+        &[
+            other("composerV2:x"),
+            other("bubbleV2:x:b0"),
+            other("checkpointId:x:1"),
+        ],
+    );
+    let (sessions, warnings, notices) = load_db_noticed(&db);
+    assert!(sessions.unwrap().is_empty());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let notice = format!(
+        "{} has no composerData or bubbleId rows, but rows under `bubbleV2:`, `composerV2:`, \
+         which are left out. Cursor may have changed its storage format.",
+        db.display()
+    );
+    assert_eq!(notices, std::slice::from_ref(&notice));
+    let output = fixture.cmd().arg("list").output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), "No sessions found\n");
+    assert_eq!(stderr(&output), format!("warning: {notice}\n"));
+    let healthcheck = fixture.cmd().arg("healthcheck").output().unwrap();
+    assert!(
+        stdout(&healthcheck).contains(&format!("ide db: {} (incomplete)\n", db.display())),
+        "{}",
+        stdout(&healthcheck)
+    );
+
+    // Rows of other kinds alone may well be a store without chats.
+    let fixture = Fixture::new();
+    let db = fixture.write_ide_db(Journal::Delete, &[other("checkpointId:x:1")]);
+    let (sessions, warnings) = load_db(&db);
+    assert!(sessions.unwrap().is_empty());
+    assert_eq!(
+        warnings,
+        [format!(
+            "{} has no composerData or bubbleId rows, only rows under `checkpointId:`",
+            db.display()
+        )]
+    );
+}
+
+#[test]
 fn chats_of_only_tool_calls_and_images_load_without_messages() {
     let fixture = Fixture::new();
     let tool = |name: &str| json!({"type": 2, "text": "", "toolFormerData": {"name": name}});
