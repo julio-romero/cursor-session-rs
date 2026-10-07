@@ -36,7 +36,8 @@ Exit codes:
     next_help_heading = "Global Options"
 )]
 pub struct Cli {
-    /// Path to ~/.cursor/chats, a session directory, store.db, or state.vscdb
+    /// Read only this location: a home, .cursor, chats or session directory, store.db, or
+    /// state.vscdb
     #[arg(long, global = true, value_name = "PATH")]
     pub storage: Option<PathBuf>,
 
