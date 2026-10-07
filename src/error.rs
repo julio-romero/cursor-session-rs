@@ -97,7 +97,11 @@ impl Error {
             Error::SchemaMismatch { store, .. } => Some(*store),
             Error::AgentAccess { .. } => Some(Source::Agent),
             Error::Database { source, .. } if is_busy(source) => None,
-            Error::Database { path, .. } | Error::Io { path, .. } if is_ide_db(path) => {
+            Error::Database { path, .. }
+            | Error::Io { path, .. }
+            | Error::Snapshot { path, .. }
+                if is_ide_db(path) =>
+            {
                 Some(Source::Ide)
             }
             _ => None,
@@ -171,11 +175,18 @@ fn is_busy(source: &rusqlite::Error) -> bool {
     )
 }
 
-/// Whether `path` is an IDE database, which `--source agent` leaves unread.
+/// Whether `path` is an IDE database or its journal, which `--source agent`
+/// leaves unread.
 fn is_ide_db(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".vscdb") || name.ends_with(".vscdb.backup"))
+        .is_some_and(|name| {
+            let db = ["-wal", "-journal"]
+                .iter()
+                .find_map(|suffix| name.strip_suffix(suffix))
+                .unwrap_or(name);
+            db.ends_with(".vscdb") || db.ends_with(".vscdb.backup")
+        })
 }
 
 #[cfg(test)]
@@ -248,6 +259,22 @@ mod tests {
             ),
         };
         assert_eq!(not_a_database.hints(), [skip_ide]);
+        // A crash left a journal that cannot be read, or the copy failed.
+        let journal = Error::Io {
+            path: PathBuf::from("/Cursor/User/globalStorage/state.vscdb-wal"),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        assert_eq!(journal.hints(), [skip_ide]);
+        let copy = Error::Snapshot {
+            path: PathBuf::from("state.vscdb"),
+            source: io::Error::other("disk full"),
+        };
+        assert_eq!(copy.hints()[0], skip_ide);
+        let store_db_journal = Error::Io {
+            path: PathBuf::from("store.db-journal"),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        assert_eq!(store_db_journal.skippable(), None);
 
         for error in errors.iter().chain([&ide_db, &chats]) {
             let hints = error.hints();
