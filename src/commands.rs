@@ -149,7 +149,7 @@ fn cmd_export(
     let selected: Vec<&Session> = if let Some(id) = &args.session_id {
         vec![find_session(&sessions, id)?]
     } else if let Some(workspace) = &args.workspace {
-        filter_workspace(&sessions, workspace)
+        filter_workspace(&sessions, &resolve_workspace(workspace))
     } else {
         sessions.iter().collect()
     };
@@ -176,6 +176,51 @@ fn cmd_export(
         }
     }
     Ok(())
+}
+
+/// `workspace` as an absolute path when it is written relative to the
+/// current directory (`.`, `..`, `./x`, `../x`) or the home directory (`~`,
+/// `~/x`); anything else is matched as given.
+fn resolve_workspace(workspace: &str) -> Cow<'_, str> {
+    let relative = [".", "..", "~"].contains(&workspace)
+        || ["./", "../", "~/", ".\\", "..\\", "~\\"]
+            .iter()
+            .any(|prefix| workspace.starts_with(prefix));
+    if !relative {
+        return Cow::Borrowed(workspace);
+    }
+    let path = match workspace.strip_prefix('~') {
+        Some(rest) => match Env::current().home {
+            Some(home) => home.join(rest.trim_start_matches(['/', '\\'])),
+            None => return Cow::Borrowed(workspace),
+        },
+        None => PathBuf::from(workspace),
+    };
+    // The path Cursor recorded is the one the process ran in, symlinks resolved.
+    let resolved = fs::canonicalize(&path)
+        .ok()
+        .filter(|_| !cfg!(windows))
+        .or_else(|| std::path::absolute(&path).ok().map(|path| normalize(&path)));
+    match resolved {
+        Some(path) => Cow::Owned(path.to_string_lossy().into_owned()),
+        None => Cow::Borrowed(workspace),
+    }
+}
+
+/// `path` with its `.` and `..` components resolved without the filesystem.
+fn normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Writes one export file. Its I/O failures are `Error::Write`, which the
@@ -646,6 +691,31 @@ mod tests {
             error.to_string(),
             format!("could not write {}", blocked.display())
         );
+    }
+
+    #[test]
+    fn relative_workspaces_resolve_against_the_current_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let resolved = if cfg!(windows) {
+            cwd.clone()
+        } else {
+            fs::canonicalize(&cwd).unwrap()
+        };
+        assert_eq!(resolve_workspace("."), resolved.to_string_lossy());
+        assert_eq!(
+            resolve_workspace("./missing/../elsewhere"),
+            cwd.join("elsewhere").to_string_lossy()
+        );
+        if let Some(home) = Env::current().home {
+            assert_eq!(
+                resolve_workspace("~/no-such-workspace/api"),
+                home.join("no-such-workspace").join("api").to_string_lossy()
+            );
+        }
+        // Directory names and absolute paths are matched as given.
+        for given in ["api", "src/api", "/Users/dana/src/api", ".hidden"] {
+            assert_eq!(resolve_workspace(given), given);
+        }
     }
 
     #[test]

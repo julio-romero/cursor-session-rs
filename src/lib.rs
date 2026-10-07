@@ -80,7 +80,7 @@ pub fn find_session<'a>(sessions: &'a [Session], query: &str) -> Result<&'a Sess
                 .map(|s| {
                     format!(
                         "{}  {:<5}  {}",
-                        s.id,
+                        ui::one_line(&s.id),
                         s.source.as_str(),
                         ui::truncate_chars(&ui::one_line(&s.title), CANDIDATE_TITLE_WIDTH)
                     )
@@ -95,20 +95,47 @@ fn has_prefix_ignore_case(id: &str, prefix: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
+/// The sessions of a workspace, which `workspace` names by its path or a
+/// directory above it (absolute), by whole directory names in its path
+/// (`api`, `src/api`), or by the MD5 hash of its path that names its
+/// directory under `~/.cursor/chats`. `/` and `\` both separate directories,
+/// and a trailing one is ignored.
 pub fn filter_workspace<'a>(sessions: &'a [Session], workspace: &str) -> Vec<&'a Session> {
+    let wanted = separated(workspace);
     sessions
         .iter()
         .filter(|session| {
             session
                 .workspace
                 .as_deref()
-                .is_some_and(|cwd| cwd == workspace || cwd.contains(workspace))
+                .is_some_and(|cwd| in_workspace(&separated(cwd), &wanted))
                 || session
                     .workspace_hash
                     .as_deref()
                     .is_some_and(|hash| hash == workspace)
         })
         .collect()
+}
+
+/// `path` with `/` as its only separator and without a trailing one, unless
+/// it is the root.
+fn separated(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    match path.trim_end_matches('/') {
+        "" if path.starts_with('/') => "/".to_string(),
+        trimmed => trimmed.to_string(),
+    }
+}
+
+fn in_workspace(cwd: &str, wanted: &str) -> bool {
+    let absolute = wanted.starts_with('/')
+        || wanted.as_bytes().get(1) == Some(&b':') && wanted.as_bytes()[0].is_ascii_alphabetic();
+    if absolute {
+        let below = format!("{}/", wanted.trim_end_matches('/'));
+        cwd == wanted || cwd.starts_with(&below)
+    } else {
+        !wanted.is_empty() && format!("/{cwd}/").contains(&format!("/{wanted}/"))
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +205,49 @@ mod tests {
         assert_eq!(found("F4EEA6D2-D2D3").unwrap(), sessions[0].id);
         assert_eq!(found("  f4eea6d2\n").unwrap(), sessions[0].id);
         assert_eq!(found("ABC").unwrap(), "abc");
+
+        // An exact match beats one that differs only in case.
+        let cased = [session("abcd", Source::Ide), session("ABCD", Source::Ide)];
+        assert_eq!(find_session(&cased, "ABCD").unwrap().id, "ABCD");
+        assert_eq!(find_session(&cased, "abcd").unwrap().id, "abcd");
+        assert!(matches!(
+            find_session(&cased, "AbCd"),
+            Err(Error::AmbiguousId { .. })
+        ));
+    }
+
+    #[test]
+    fn workspaces_match_by_whole_directories() {
+        let at = |id: &str, cwd: &str| Session {
+            workspace: Some(cwd.to_string()),
+            workspace_hash: Some(format!("hash-{id}")),
+            ..session(id, Source::Agent)
+        };
+        let sessions = [
+            at("api", "/Users/dana/src/api"),
+            at("nested", "/Users/dana/src/api/tools"),
+            at("gateway", "/Users/dana/src/api-gateway"),
+            at("dotted", "/Users/dana/v1.2"),
+            at("windows", r"C:\Users\dana\api"),
+        ];
+        let found = |workspace: &str| -> Vec<&str> {
+            filter_workspace(&sessions, workspace)
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect()
+        };
+        assert_eq!(found("/Users/dana/src/api"), ["api", "nested"]);
+        // A tab-completed directory ends in a separator.
+        assert_eq!(found("/Users/dana/src/api/"), ["api", "nested"]);
+        assert_eq!(found("api"), ["api", "nested", "windows"]);
+        assert_eq!(found("src/api"), ["api", "nested"]);
+        assert_eq!(found("/Users/dana/src/ap"), Vec::<&str>::new());
+        assert_eq!(found(r"C:\Users\dana\"), ["windows"]);
+        assert_eq!(found("/"), ["api", "nested", "gateway", "dotted"]);
+        assert_eq!(found("hash-gateway"), ["gateway"]);
+        for nothing in [".", "", "v1", "dana/src/ap"] {
+            assert_eq!(found(nothing), Vec::<&str>::new(), "{nothing:?}");
+        }
     }
 
     #[test]

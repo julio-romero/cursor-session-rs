@@ -19,6 +19,29 @@ Examples:
   cursor-session show f4eea6d2 --json | jq -r '.messages[].content'
   cursor-session export --format md --session-id f4eea6d2";
 
+const LIST_EXAMPLES: &str = "\
+Examples:
+  cursor-session list
+  cursor-session list --source ide --limit 5
+  cursor-session list --json | jq -r '.[].id'";
+
+const SHOW_EXAMPLES: &str = "\
+Examples:
+  cursor-session show f4eea6d2
+  cursor-session show f4eea6d2 --all
+  cursor-session show f4eea6d2 --json --limit 5";
+
+const EXPORT_EXAMPLES: &str = "\
+Examples:
+  cursor-session export
+  cursor-session export --format json --session-id f4eea6d2 --out sessions
+  cursor-session export --workspace ~/src/billing-api";
+
+const HEALTHCHECK_EXAMPLES: &str = "\
+Examples:
+  cursor-session healthcheck
+  cursor-session -v healthcheck";
+
 const EXIT_CODES: &str = "\
 Exit codes:
   0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
@@ -69,12 +92,28 @@ pub enum ColorChoice {
 #[derive(Subcommand)]
 pub enum Commands {
     /// List sessions, most recently updated first
+    #[command(
+        after_help = LIST_EXAMPLES,
+        after_long_help = format!("{LIST_EXAMPLES}\n\n{EXIT_CODES}")
+    )]
     List(ListArgs),
     /// Show messages from a session
+    #[command(
+        after_help = SHOW_EXAMPLES,
+        after_long_help = format!("{SHOW_EXAMPLES}\n\n{EXIT_CODES}")
+    )]
     Show(ShowArgs),
     /// Export sessions to files
+    #[command(
+        after_help = EXPORT_EXAMPLES,
+        after_long_help = format!("{EXPORT_EXAMPLES}\n\n{EXIT_CODES}")
+    )]
     Export(ExportArgs),
     /// Check that session stores can be found and loaded
+    #[command(
+        after_help = HEALTHCHECK_EXAMPLES,
+        after_long_help = format!("{HEALTHCHECK_EXAMPLES}\n\n{EXIT_CODES}")
+    )]
     Healthcheck(HealthcheckArgs),
 }
 
@@ -101,11 +140,12 @@ pub struct ListArgs {
 #[derive(Args)]
 pub struct ShowArgs {
     /// Session ID, or a unique prefix of one (case-insensitive)
+    #[arg(value_parser = not_blank)]
     pub session_id: String,
     /// Only read this store; the other one is never opened
     #[arg(long, value_enum)]
     pub source: Option<Source>,
-    /// Print only the last N messages [default: 20 in a terminal, all when piped]
+    /// Print only the last N messages [default: 20 in a terminal, all when piped or with --json]
     #[arg(
         long,
         value_name = "N",
@@ -133,10 +173,11 @@ pub struct ExportArgs {
     #[arg(long, value_name = "DIR", default_value = "exports")]
     pub out: PathBuf,
     /// Export only this session (ID or unique prefix)
-    #[arg(long, conflicts_with = "workspace")]
+    #[arg(long, conflicts_with = "workspace", value_parser = not_blank)]
     pub session_id: Option<String>,
-    /// Filter by workspace path or MD5 hash
-    #[arg(long)]
+    /// Export the sessions of a workspace: its path or a directory above it,
+    /// directory names in its path, or the MD5 hash of its path
+    #[arg(long, value_parser = not_blank)]
     pub workspace: Option<String>,
     /// Only read this store; the other one is never opened
     #[arg(long, value_enum)]
@@ -153,13 +194,24 @@ pub struct HealthcheckArgs {
     pub storage: Option<PathBuf>,
 }
 
+/// A whole number of at least 1. One too large to store asks for everything.
 fn at_least_one(value: &str) -> Result<usize, String> {
-    match value.parse::<usize>() {
-        Ok(0) => Err("must be at least 1".to_string()),
-        Ok(n) => Ok(n),
-        Err(_) if value.starts_with('-') => Err("must be at least 1".to_string()),
-        Err(err) => Err(err.to_string()),
+    let invalid = || "expected a whole number of at least 1".to_string();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
     }
+    match value.parse::<usize>() {
+        Ok(0) => Err(invalid()),
+        Ok(n) => Ok(n),
+        Err(_) => Ok(usize::MAX),
+    }
+}
+
+fn not_blank(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("must not be empty".to_string());
+    }
+    Ok(value.to_string())
 }
 
 #[cfg(test)]
@@ -198,15 +250,56 @@ mod tests {
                     .chain(["--limit", limit])
                     .collect::<Vec<_>>()
             };
-            for limit in ["0", "-1"] {
+            for limit in ["0", "-1", "", " 3", "+3", "abc", "1.5", "000"] {
                 let err = Cli::try_parse_from(args(limit)).err().unwrap();
                 assert_eq!(
                     err.kind(),
                     clap::error::ErrorKind::ValueValidation,
-                    "{command} {limit}"
+                    "{command} {limit:?}"
+                );
+                assert!(
+                    err.to_string()
+                        .contains(": expected a whole number of at least 1"),
+                    "{err}"
                 );
             }
             assert!(Cli::try_parse_from(args("3")).is_ok());
+        }
+        assert_eq!(at_least_one("007"), Ok(7));
+        assert_eq!(at_least_one("18446744073709551616"), Ok(usize::MAX));
+    }
+
+    #[test]
+    fn blank_ids_and_workspaces_are_usage_errors() {
+        for argv in [
+            &["cursor-session", "show", ""][..],
+            &["cursor-session", "show", " \t"],
+            &["cursor-session", "export", "--session-id", ""],
+            &["cursor-session", "export", "--workspace", " "],
+        ] {
+            let err = Cli::try_parse_from(argv).err().unwrap();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{argv:?}"
+            );
+            assert_eq!(err.exit_code(), 2);
+        }
+    }
+
+    #[test]
+    fn every_subcommand_has_examples_and_exit_codes() {
+        let mut command = Cli::command();
+        for sub in command.get_subcommands_mut() {
+            let name = sub.get_name().to_string();
+            let short = sub.render_help().to_string();
+            let long = sub.render_long_help().to_string();
+            assert!(
+                short.contains(&format!("Examples:\n  cursor-session {name}")),
+                "{short}"
+            );
+            assert!(!short.contains("Exit codes:"), "{name}");
+            assert!(long.contains("Exit codes:\n  0  Success"), "{long}");
         }
     }
 }

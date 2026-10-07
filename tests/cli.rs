@@ -139,6 +139,8 @@ fn usage_errors_exit_2() {
         &["show", AGENT_ID, "--limit", "1", "--all"],
         &["export", "--format", "pdf"],
         &["export", "--session-id", "f4ee", "--workspace", PROJECT_X],
+        &["export", "--workspace", ""],
+        &["list", "--limit", ""],
         &["--color", "sometimes", "list"],
     ] {
         let output = run(&fixture, args);
@@ -167,12 +169,17 @@ fn unknown_id_exits_1_with_a_hint() {
 }
 
 #[test]
-fn empty_id_exits_1_with_a_hint() {
+fn empty_id_is_a_usage_error() {
     let fixture = standard();
     for id in ["", "   "] {
-        assert_eq!(
-            fails(&fixture, &["show", id]),
-            "error: session id is empty\nrun `cursor-session list` to see session IDs\n"
+        let output = run(&fixture, &["show", id]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            stderr(&output).starts_with(&format!(
+                "error: invalid value '{id}' for '<SESSION_ID>': must not be empty\n"
+            )),
+            "{}",
+            stderr(&output)
         );
     }
 }
@@ -849,6 +856,28 @@ fn export_selects_by_id_workspace_and_source() {
         "error: no sessions matched\n"
     );
     assert!(!fixture.home().join("none").exists());
+
+    // Whole directories match, with or without a trailing separator.
+    let tab_completed = format!("{PROJECT_X}/");
+    for workspace in [tab_completed.as_str(), "project-x", "demo/project-x"] {
+        let out = ok(
+            &fixture,
+            &["export", "--workspace", workspace, "--out", "matched"],
+        );
+        assert_eq!(out.lines().count(), 1, "{workspace}: {out}");
+    }
+    // Part of a name is not a directory, and `.` is the current one (the
+    // fixture home), not any path with a dot in it.
+    for workspace in ["/Users/demo/project", "project", "."] {
+        assert_eq!(
+            fails(
+                &fixture,
+                &["export", "--workspace", workspace, "--out", "none"]
+            ),
+            "error: no sessions matched\n",
+            "{workspace}"
+        );
+    }
 }
 
 #[test]
