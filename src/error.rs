@@ -109,7 +109,7 @@ impl Error {
                 vec!["Cursor may be writing to it right now; try again in a moment.".to_string()]
             }
             Error::Snapshot { .. } => vec![format!(
-                "Make sure {} is writable and has free space, or point TMPDIR (TEMP on Windows) \
+                "Make sure {} is writable and has free space, or point TMPDIR (TMP on Windows) \
                  elsewhere.",
                 std::env::temp_dir().display()
             )],
