@@ -337,12 +337,8 @@ fn read_rows(
         path: db_path.to_path_buf(),
         source,
     };
-    let mut stmt = conn
-        .prepare(&format!(
-            "SELECT key, value FROM {KV_TABLE} WHERE key LIKE ?1 AND value IS NOT NULL"
-        ))
-        .map_err(db_err)?;
-    let mut rows = stmt.query([format!("{prefix}%")]).map_err(db_err)?;
+    let mut stmt = conn.prepare(&rows_query()).map_err(db_err)?;
+    let mut rows = stmt.query([prefix, &prefix_end(prefix)]).map_err(db_err)?;
     let mut skipped = 0;
     while let Some(row) = rows.next().map_err(db_err)? {
         let decoded = match (as_text(row.get_ref(0)), as_text(row.get_ref(1))) {
@@ -354,6 +350,18 @@ fn read_rows(
         }
     }
     Ok(skipped)
+}
+
+/// The rows whose key is in `?1..?2`, a range that, unlike `LIKE`, SQLite
+/// finds through the index on `key`.
+fn rows_query() -> String {
+    format!("SELECT key, value FROM {KV_TABLE} WHERE key >= ?1 AND key < ?2 AND value IS NOT NULL")
+}
+
+/// The first key after all those that start with `prefix`, which ends in `:`
+/// as every key prefix does: `bubbleId;` for `bubbleId:`.
+fn prefix_end(prefix: &str) -> String {
+    format!("{};", prefix.strip_suffix(':').unwrap_or(prefix))
 }
 
 fn as_text(value: rusqlite::Result<ValueRef<'_>>) -> Option<&str> {
@@ -639,6 +647,37 @@ mod tests {
         let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["c1"]);
         assert_eq!(load(&path).0.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn rows_are_found_through_the_key_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        let mut rows = well_formed(false);
+        rows.extend([
+            ("bubbleId", SqlValue::Text("{}".into())),
+            ("bubbleId;", SqlValue::Text("{}".into())),
+            ("bubbleIdX:c1:b1", SqlValue::Text("{}".into())),
+        ]);
+        create_db(&path, &rows);
+        let conn = Connection::open(&path).unwrap();
+        let plan: String = conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {}", rows_query()),
+                ["a", "b"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("USING INDEX"), "{plan}");
+
+        assert_eq!(prefix_end("bubbleId:"), "bubbleId;");
+        let mut keys = Vec::new();
+        read_rows(&conn, &path, "bubbleId:", |key, _| {
+            keys.push(key.to_string());
+            true
+        })
+        .unwrap();
+        assert_eq!(keys, ["bubbleId:c1:b1", "bubbleId:c1:b2"]);
     }
 
     #[test]
