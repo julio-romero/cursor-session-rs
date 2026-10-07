@@ -280,7 +280,7 @@ mod tests {
         let err = find_session(&sessions, "AB").unwrap_err();
         assert_eq!(
             err.to_string(),
-            r#"session id prefix "AB" is ambiguous (12 matches)"#
+            r#"session ID prefix "AB" is ambiguous (12 matches)"#
         );
         let hints = err.hints();
         assert_eq!(hints.len(), 12);

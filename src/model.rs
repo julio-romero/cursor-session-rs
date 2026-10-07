@@ -20,6 +20,14 @@ impl Source {
         }
     }
 
+    /// The store's name in messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Source::Agent => "Agent CLI",
+            Source::Ide => "IDE",
+        }
+    }
+
     /// The Cursor product that writes this store.
     pub fn product(self) -> &'static str {
         match self {

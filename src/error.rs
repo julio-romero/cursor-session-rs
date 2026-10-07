@@ -15,7 +15,7 @@ pub enum Error {
     NoHome,
 
     #[error("storage path does not exist: {}", path.display())]
-    StorageNotFound { path: PathBuf, source: io::Error },
+    StorageNotFound { path: PathBuf },
 
     #[error("unrecognized storage location: {}", path.display())]
     UnsupportedStorage { path: PathBuf },
@@ -23,7 +23,7 @@ pub enum Error {
     #[error("session not found: {query}")]
     SessionNotFound { query: String },
 
-    #[error("session id prefix \"{query}\" is ambiguous ({} matches)", matches.len())]
+    #[error("session ID prefix \"{query}\" is ambiguous ({} matches)", matches.len())]
     AmbiguousId {
         query: String,
         /// One `id  source  title` line per matching session, most recent first.
@@ -41,7 +41,7 @@ pub enum Error {
         detail: String,
     },
 
-    #[error("failed to read sqlite database: {}", path.display())]
+    #[error("could not read SQLite database {}", path.display())]
     Database {
         path: PathBuf,
         source: rusqlite::Error,
@@ -75,7 +75,7 @@ pub enum Error {
     #[error("no Cursor session storage found")]
     NoStorage,
 
-    #[error("session id is empty")]
+    #[error("session ID is empty")]
     EmptyId,
 }
 
@@ -84,7 +84,7 @@ impl Error {
     pub(crate) fn access(path: &Path, source: io::Error) -> Self {
         let path = path.to_path_buf();
         if source.kind() == io::ErrorKind::NotFound {
-            Error::StorageNotFound { path, source }
+            Error::StorageNotFound { path }
         } else {
             Error::Io { path, source }
         }
@@ -122,7 +122,7 @@ impl Error {
 
     fn advice(&self) -> Vec<String> {
         match self {
-            Error::NoHome => vec!["set HOME or pass --storage <path>".to_string()],
+            Error::NoHome => vec!["set HOME or pass `--storage <path>`".to_string()],
             Error::UnsupportedStorage { .. } => vec![
                 "pass a home or .cursor directory, ~/.cursor/chats, a session directory, store.db, \
                  state.vscdb, or the directory that contains state.vscdb"
@@ -161,7 +161,7 @@ impl Error {
                     .to_string(),
             ],
             Error::NoStorage => {
-                vec!["pass --storage <path> if your Cursor data lives elsewhere".to_string()]
+                vec!["pass `--storage <path>` if your Cursor data lives elsewhere".to_string()]
             }
             _ => Vec::new(),
         }

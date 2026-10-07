@@ -555,7 +555,7 @@ ide db: /Users/dana/Library/Application Support/Cursor/User/globalStorage/state.
 warning: skipped 1 unreadable composer row in /Users/dana/Library/Application Support/Cursor/User/globalStorage/state.vscdb
 ```
 
-**`failed to read sqlite database`** with the hint `try again in a moment`:
+**`could not read SQLite database`** with the hint `try again in a moment`:
 Cursor held a lock for more than 5 seconds. Run the command again.
 
 **`could not copy … to a temporary directory for reading`**: the temporary

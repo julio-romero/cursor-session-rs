@@ -12,7 +12,6 @@ use std::process::{Output, Stdio};
 use common::*;
 use cursor_session::model::{Message, Session};
 use cursor_session::ui;
-use predicates::prelude::*;
 use serde_json::Value;
 
 const SUBCOMMANDS: [&str; 4] = ["list", "show", "export", "healthcheck"];
@@ -213,7 +212,7 @@ fn ambiguous_fixture() -> Fixture {
 #[test]
 fn ambiguous_prefix_exits_1_and_lists_the_candidates() {
     let fixture = ambiguous_fixture();
-    let expected = "error: session id prefix \"ABCD\" is ambiguous (2 matches)\n  \
+    let expected = "error: session ID prefix \"ABCD\" is ambiguous (2 matches)\n  \
                     abcd2222-0000-4000-8000-000000000002  ide    Newer abcd\n  \
                     abcd1111-0000-4000-8000-000000000001  ide    Older abcd\n\
                     use more characters of the ID\n";
@@ -368,7 +367,7 @@ fn empty_home_lists_nothing() {
         assert_eq!(
             fails(&fixture, args),
             "error: no Cursor session storage found\n\
-             pass --storage <path> if your Cursor data lives elsewhere\n"
+             pass `--storage <path>` if your Cursor data lives elsewhere\n"
         );
     }
 }
@@ -715,7 +714,7 @@ fn healthcheck_fails_without_any_store() {
     assert_eq!(
         stderr(&output),
         "error: no Cursor session storage found\n\
-         pass --storage <path> if your Cursor data lives elsewhere\n"
+         pass `--storage <path>` if your Cursor data lives elsewhere\n"
     );
 }
 
@@ -736,7 +735,7 @@ fn healthcheck_fails_when_a_store_is_broken() {
     )));
     assert!(out.contains("agent-transcripts (ok)\n"));
     assert!(out.contains("sessions loaded: 4 (agent: 4, ide: 0)\n"));
-    assert!(out.contains("ide store failed: unrecognized Cursor IDE storage format in "));
+    assert!(out.contains("IDE store failed: unrecognized Cursor IDE storage format in "));
     // The store's own advice follows its failure.
     // healthcheck takes no --source, so its advice names the commands that do.
     assert!(out.ends_with(
@@ -747,7 +746,7 @@ fn healthcheck_fails_when_a_store_is_broken() {
     ));
     assert_eq!(
         stderr(&output),
-        "error: healthcheck failed: the ide store could not be loaded\n"
+        "error: healthcheck failed: the IDE store could not be loaded\n"
     );
 }
 
@@ -981,10 +980,10 @@ fn storage_reads_only_the_given_location() {
         .assert()
         .code(1)
         .stdout("")
-        .stderr(predicate::str::starts_with(format!(
-            "error: storage path does not exist: {}\n  caused by: ",
+        .stderr(format!(
+            "error: storage path does not exist: {}\n",
             missing.display()
-        )));
+        ));
 }
 
 #[cfg(unix)]

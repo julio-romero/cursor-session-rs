@@ -326,7 +326,7 @@ mod tests {
         });
         assert_eq!(
             reported(&error),
-            "error: failed to read sqlite database: store.db\n  \
+            "error: could not read SQLite database store.db\n  \
              caused by: file is not a database\n"
         );
 

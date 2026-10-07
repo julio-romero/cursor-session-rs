@@ -251,6 +251,7 @@ fn cmd_healthcheck(
     let chats = check_readable(paths.chats_dir.as_deref());
     let transcripts = check_readable(paths.projects_dir.as_deref());
     let agent_store = load(Source::Agent);
+    let agent_loaded = agent_store.is_ok();
     let ide_store =
         check_readable(paths.global_storage_db.as_deref()).and_then(|()| load(Source::Ide));
     let status = |ok: bool| if ok { "ok" } else { "failed" };
@@ -288,8 +289,8 @@ fn cmd_healthcheck(
     match &paths.projects_dir {
         Some(dir) => writeln!(
             out,
-            "transcripts: {}/{{project}}/agent-transcripts ({})",
-            shown(dir),
+            "transcripts: {} ({})",
+            shown(&dir.join("{project}").join("agent-transcripts")),
             status(transcripts.is_ok() && agent_store.is_ok())
         )?,
         None => writeln!(
@@ -323,12 +324,16 @@ fn cmd_healthcheck(
                 notices.extend(loaded.notices);
             }
             // The agent store fails with the location check's own error when
-            // none of its locations can be read.
+            // none of its locations can be read; its own says how to skip it.
             Err(error) => {
                 let error = anyhow::Error::from(error);
                 let text = format!("{error:#}");
-                if !failed.iter().any(|(_, seen)| format!("{seen:#}") == text) {
-                    failed.push((source, error));
+                match failed
+                    .iter_mut()
+                    .find(|(_, seen)| format!("{seen:#}") == text)
+                {
+                    Some((_, seen)) => *seen = error,
+                    None => failed.push((source, error)),
                 }
             }
         }
@@ -361,7 +366,7 @@ fn cmd_healthcheck(
         writeln!(
             out,
             "{} store failed: {}",
-            source.as_str(),
+            source.name(),
             messages(error).join(": ")
         )?;
         for hint in hints(error, paths, true) {
@@ -372,15 +377,23 @@ fn cmd_healthcheck(
     if paths.is_empty() {
         return Err(Error::NoStorage.into());
     }
-    let mut failed_stores: Vec<Source> = failed.iter().map(|(source, _)| *source).collect();
-    failed_stores.dedup();
-    match failed_stores.as_slice() {
-        [] => Ok(()),
-        [source] => bail!(
-            "healthcheck failed: the {} store could not be loaded",
-            source.as_str()
-        ),
-        _ => bail!("healthcheck failed: the agent and ide stores could not be loaded"),
+    let failed_store = |store| failed.iter().any(|(source, _)| *source == store);
+    // The agent store loads while one of its locations can be read.
+    let agent = if agent_loaded {
+        "an Agent CLI location could not be read"
+    } else {
+        "the Agent CLI store could not be loaded"
+    };
+    match (failed_store(Source::Agent), failed_store(Source::Ide)) {
+        (false, false) => Ok(()),
+        (true, false) => bail!("healthcheck failed: {agent}"),
+        (false, true) => bail!("healthcheck failed: the IDE store could not be loaded"),
+        (true, true) if agent_loaded => {
+            bail!("healthcheck failed: {agent}, and the IDE store could not be loaded")
+        }
+        (true, true) => {
+            bail!("healthcheck failed: the Agent CLI and IDE stores could not be loaded")
+        }
     }
 }
 
@@ -829,12 +842,12 @@ mod tests {
         let error = result.unwrap_err().to_string();
         assert_eq!(
             error,
-            "healthcheck failed: the ide store could not be loaded"
+            "healthcheck failed: the IDE store could not be loaded"
         );
         assert!(out.contains("agent-transcripts (ok)\n"));
         assert!(out.contains("state.vscdb (failed)\n"));
         assert!(out.contains("sessions loaded: 1 (agent: 1, ide: 0)\n"));
-        assert!(out.contains("ide store failed: failed to read sqlite database: "));
+        assert!(out.contains("IDE store failed: could not read SQLite database "));
     }
 
     #[test]
@@ -849,11 +862,11 @@ mod tests {
         let (result, out) = run_args(&paths, &["healthcheck"]);
         assert_eq!(
             result.unwrap_err().to_string(),
-            "healthcheck failed: the ide store could not be loaded"
+            "healthcheck failed: the IDE store could not be loaded"
         );
         assert!(out.contains("state.vscdb (failed)\n"));
         assert!(out.contains("agent-transcripts (ok)\n"));
-        assert!(out.contains("ide store failed: could not access "));
+        assert!(out.contains("IDE store failed: could not access "));
     }
 
     #[cfg(unix)]
@@ -881,6 +894,13 @@ mod tests {
             ..paths.clone()
         };
         let (both_result, both_out) = run_args(&both, &["healthcheck"]);
+        let with_ide = paths_with_ide(dir.path());
+        let with_ide = StoragePaths {
+            chats_dir: Some(chats.clone()),
+            projects_dir: Some(projects.clone()),
+            ..with_ide
+        };
+        let (ide_result, ide_out) = run_args(&with_ide, &["healthcheck"]);
         for locked in [&chats, &projects] {
             fs::set_permissions(locked, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -891,7 +911,7 @@ mod tests {
         // Two failed locations are still one failed store.
         assert_eq!(
             both_result.unwrap_err().to_string(),
-            "healthcheck failed: the agent store could not be loaded"
+            "healthcheck failed: the Agent CLI store could not be loaded"
         );
         let failures: Vec<&str> = both_out
             .lines()
@@ -899,10 +919,24 @@ mod tests {
             .collect();
         assert_eq!(failures.len(), 2, "{both_out}");
         assert!(failures[1].contains(&projects.display().to_string()));
+        // With the IDE store found, the report says how to skip this one.
+        assert_eq!(
+            ide_result.unwrap_err().to_string(),
+            "healthcheck failed: the Agent CLI store could not be loaded"
+        );
+        assert!(
+            ide_out.contains(&format!(
+                "Agent CLI store failed: could not access {}: Permission denied (os error 13)\n  \
+                 `list`, `show` and `export` accept `--source ide` to skip Agent CLI sessions\n",
+                chats.display()
+            )),
+            "{ide_out}"
+        );
 
+        // The transcripts still load, so only a location failed.
         assert_eq!(
             result.unwrap_err().to_string(),
-            "healthcheck failed: the agent store could not be loaded"
+            "healthcheck failed: an Agent CLI location could not be read"
         );
         assert!(out.contains(&format!("agent chats: {} (failed)\n", chats.display())));
         assert!(out.contains("agent-transcripts (ok)\n"), "{out}");
@@ -913,7 +947,7 @@ mod tests {
         let failures: Vec<&str> = out.lines().filter(|l| l.contains(" failed: ")).collect();
         assert_eq!(failures.len(), 1, "{out}");
         assert!(failures[0].starts_with(&format!(
-            "agent store failed: could not access {}: ",
+            "Agent CLI store failed: could not access {}: ",
             chats.display()
         )));
     }

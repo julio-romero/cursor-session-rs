@@ -406,7 +406,7 @@ fn ambiguous_prefix_lists_every_candidate_newest_first() {
     );
     assert_eq!(
         err.to_string(),
-        r#"session id prefix "ABCD" is ambiguous (2 matches)"#
+        r#"session ID prefix "ABCD" is ambiguous (2 matches)"#
     );
     assert_eq!(err.hints().last().unwrap(), "use more characters of the ID");
 

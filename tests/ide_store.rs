@@ -123,7 +123,7 @@ fn non_database_file_fails_with_a_database_error() {
     let err = stderr(&output);
     assert!(
         err.starts_with(&format!(
-            "error: failed to read sqlite database: {}\n  caused by: file is not a database\n",
+            "error: could not read SQLite database {}\n  caused by: file is not a database\n",
             db.display()
         )),
         "{err}"
