@@ -4,13 +4,13 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::detect::StoragePaths;
 use crate::model::{Message, Session, Source};
 use crate::sqlite::open_readonly;
+use crate::{Error, Result};
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -62,7 +62,7 @@ struct TranscriptPart {
     text: Option<String>,
 }
 
-pub fn load_sessions(paths: &StoragePaths) -> Result<Vec<Session>> {
+pub fn load_sessions(paths: &StoragePaths, _warnings: &mut Vec<String>) -> Result<Vec<Session>> {
     let mut by_id: HashMap<String, Session> = HashMap::new();
 
     if let Some(chats_dir) = &paths.chats_dir {
@@ -328,11 +328,15 @@ fn transcript_path(dir: &Path, id: &str) -> Option<PathBuf> {
 }
 
 pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
-    let file = fs::File::open(path)?;
+    let io_err = |source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let file = fs::File::open(path).map_err(io_err)?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
     for line in reader.lines() {
-        let line = line?;
+        let line = line.map_err(io_err)?;
         let line = line.trim();
         if line.is_empty() {
             continue;

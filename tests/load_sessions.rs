@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use cursor_session::detect::{StoragePaths, workspace_md5};
 use cursor_session::export::{self, Format};
-use cursor_session::{find_session, load_sessions};
+use cursor_session::{LoadOptions, find_session, load_sessions};
 use rusqlite::Connection;
 
 fn fixture_home() -> PathBuf {
@@ -20,7 +20,9 @@ fn workspace_hash_matches_live_path() {
 #[test]
 fn loads_agent_session_from_meta_json_and_transcript() {
     let paths = StoragePaths::from_home(&fixture_home());
-    let sessions = load_sessions(&paths).expect("load");
+    let sessions = load_sessions(&paths, &LoadOptions::default())
+        .expect("load")
+        .sessions;
     let session = find_session(&sessions, "f4eea6d2-d2d3-41ad-b290-824445295a15")
         .expect("session should be found");
 
@@ -47,7 +49,9 @@ fn loads_agent_session_from_meta_json_and_transcript() {
 #[test]
 fn prefix_lookup_is_unique() {
     let paths = StoragePaths::from_home(&fixture_home());
-    let sessions = load_sessions(&paths).unwrap();
+    let sessions = load_sessions(&paths, &LoadOptions::default())
+        .unwrap()
+        .sessions;
     assert!(find_session(&sessions, "f4eea6d2").is_some());
 }
 
@@ -90,7 +94,7 @@ fn loads_ide_composer_from_sqlite() {
     .unwrap();
     drop(conn);
 
-    let sessions = cursor_session::ide::load_from_db(&db_path).unwrap();
+    let sessions = cursor_session::ide::load_from_db(&db_path, &mut Vec::new()).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, "composer-1");
     assert_eq!(sessions[0].title, "Dynamic table proposal");
@@ -103,7 +107,9 @@ fn loads_ide_composer_from_sqlite() {
 #[test]
 fn exports_markdown_and_jsonl() {
     let paths = StoragePaths::from_home(&fixture_home());
-    let sessions = load_sessions(&paths).unwrap();
+    let sessions = load_sessions(&paths, &LoadOptions::default())
+        .unwrap()
+        .sessions;
     let session = find_session(&sessions, "f4eea6d2-d2d3-41ad-b290-824445295a15").unwrap();
 
     let mut md = Vec::new();
@@ -147,7 +153,9 @@ fn duplicate_project_transcripts_keep_the_complete_conversation() {
     for (nested_text, flat_text) in [(short, long.as_str()), (long.as_str(), short)] {
         std::fs::write(nested.join("session-1.jsonl"), nested_text).unwrap();
         std::fs::write(flat.join("session-1.jsonl"), flat_text).unwrap();
-        let sessions = load_sessions(&paths).unwrap();
+        let sessions = load_sessions(&paths, &LoadOptions::default())
+            .unwrap()
+            .sessions;
         assert_eq!(sessions.len(), 1);
         let session = find_session(&sessions, "session-1").unwrap();
         assert_eq!(session.messages.len(), 3);

@@ -1,18 +1,26 @@
+use std::io;
 use std::path::Path;
 
-use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
+
+use crate::{Error, Result};
 
 pub fn open_readonly(path: &Path) -> Result<Connection> {
     if !path.is_file() {
-        anyhow::bail!("database file does not exist: {}", path.display());
+        return Err(Error::StorageNotFound {
+            path: path.to_path_buf(),
+            source: io::ErrorKind::NotFound.into(),
+        });
     }
     let uri = sqlite_uri(path);
     Connection::open_with_flags(
         &uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
     )
-    .with_context(|| format!("failed to open sqlite database: {}", path.display()))
+    .map_err(|source| Error::Database {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn sqlite_uri(path: &Path) -> String {

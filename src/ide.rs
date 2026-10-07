@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::Result;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::detect::StoragePaths;
 use crate::model::{Message, Session, Source};
 use crate::sqlite::open_readonly;
+use crate::{Error, Result};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,27 +57,35 @@ struct CodeBlock {
     content: Option<String>,
 }
 
-pub fn load_sessions(paths: &StoragePaths) -> Result<Vec<Session>> {
+pub fn load_sessions(paths: &StoragePaths, warnings: &mut Vec<String>) -> Result<Vec<Session>> {
     let Some(db_path) = &paths.global_storage_db else {
         return Ok(Vec::new());
     };
-    load_from_db(db_path)
+    load_from_db(db_path, warnings)
 }
 
-pub fn load_from_db(db_path: &Path) -> Result<Vec<Session>> {
+pub fn load_from_db(db_path: &Path, _warnings: &mut Vec<String>) -> Result<Vec<Session>> {
     let conn = match open_readonly(db_path) {
         Ok(conn) => conn,
         Err(_) => return Ok(Vec::new()),
     };
+    let db_err = |source| Error::Database {
+        path: db_path.to_path_buf(),
+        source,
+    };
 
     let mut bubble_map: HashMap<String, Bubble> = HashMap::new();
     {
-        let mut stmt = conn.prepare(
-            "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%' AND value IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%' AND value IS NOT NULL",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err)?;
         for row in rows.flatten() {
             let (key, value) = row;
             if let Ok(bubble) = serde_json::from_str::<Bubble>(&value) {
@@ -94,12 +102,16 @@ pub fn load_from_db(db_path: &Path) -> Result<Vec<Session>> {
 
     let mut sessions = Vec::new();
     {
-        let mut stmt = conn.prepare(
-            "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND value IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND value IS NOT NULL",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err)?;
         for row in rows.flatten() {
             let (key, value) = row;
             let Ok(composer) = serde_json::from_str::<Composer>(&value) else {

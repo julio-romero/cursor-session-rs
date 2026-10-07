@@ -1,9 +1,8 @@
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 
-use anyhow::Result;
-
 use crate::model::Session;
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
@@ -27,7 +26,7 @@ impl Format {
 pub fn export_session(session: &Session, format: Format, writer: &mut impl Write) -> Result<()> {
     match format {
         Format::Jsonl => export_jsonl(session, writer),
-        Format::Md => export_markdown(session, writer),
+        Format::Md => export_markdown(session, writer).map_err(Error::Write),
         Format::Json => export_json(session, writer),
         Format::Yaml => export_yaml(session, writer),
     }
@@ -40,24 +39,24 @@ pub fn export_path(out_dir: &Path, session: &Session, format: Format) -> std::pa
 fn export_jsonl(session: &Session, writer: &mut impl Write) -> Result<()> {
     for message in &session.messages {
         serde_json::to_writer(&mut *writer, message)?;
-        writer.write_all(b"\n")?;
+        writer.write_all(b"\n").map_err(Error::Write)?;
     }
     Ok(())
 }
 
 fn export_json(session: &Session, writer: &mut impl Write) -> Result<()> {
     serde_json::to_writer_pretty(&mut *writer, session)?;
-    writer.write_all(b"\n")?;
+    writer.write_all(b"\n").map_err(Error::Write)?;
     Ok(())
 }
 
 fn export_yaml(session: &Session, writer: &mut impl Write) -> Result<()> {
     let yaml = serde_yaml::to_string(session)?;
-    writer.write_all(yaml.as_bytes())?;
+    writer.write_all(yaml.as_bytes()).map_err(Error::Write)?;
     Ok(())
 }
 
-fn export_markdown(session: &Session, writer: &mut impl Write) -> Result<()> {
+fn export_markdown(session: &Session, writer: &mut impl Write) -> io::Result<()> {
     writeln!(writer, "# {}\n", session.title)?;
     writeln!(writer, "- **ID:** `{}`", session.id)?;
     writeln!(writer, "- **Source:** {}", session.source.as_str())?;

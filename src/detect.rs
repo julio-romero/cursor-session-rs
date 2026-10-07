@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use md5::{Digest, Md5};
+
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, Default)]
 pub struct StoragePaths {
@@ -36,7 +37,10 @@ impl StoragePaths {
     pub fn from_custom(path: &Path, home: Option<&Path>) -> Result<Self> {
         let path = path
             .canonicalize()
-            .with_context(|| format!("storage path does not exist: {}", path.display()))?;
+            .map_err(|source| Error::StorageNotFound {
+                path: path.to_path_buf(),
+                source,
+            })?;
         let mut paths = match home {
             Some(home) => Self::from_home(home),
             None => Self::detect().unwrap_or_default(),
@@ -57,7 +61,7 @@ impl StoragePaths {
                 paths.chats_dir = Some(chats_root.to_path_buf());
                 return Ok(paths);
             }
-            anyhow::bail!("unsupported storage file (expected state.vscdb or store.db)");
+            return Err(Error::UnsupportedStorage { path });
         }
 
         if path.join("state.vscdb").is_file() {
@@ -95,7 +99,7 @@ fn dirs_home() -> Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-        .context("could not determine home directory")
+        .ok_or(Error::NoHome)
 }
 
 fn existing_dir(path: PathBuf) -> Option<PathBuf> {
