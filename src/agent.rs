@@ -9,7 +9,7 @@ use rusqlite::types::ValueRef;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::detect::{StoragePaths, chats_depth};
+use crate::detect::{ChatsScope, StoragePaths};
 use crate::model::{Message, Session, Source};
 use crate::sqlite::open_readonly;
 use crate::{Error, Result};
@@ -68,12 +68,10 @@ pub fn load_sessions(paths: &StoragePaths, warnings: &mut Vec<String>) -> Result
     let mut by_id: HashMap<String, Session> = HashMap::new();
     // Below the chats root (one workspace or one session), transcripts only
     // fill in the sessions found there.
-    let mut scoped = false;
+    let scoped = paths.chats_dir.is_some() && paths.chats_scope != ChatsScope::All;
 
     if let Some(chats_dir) = &paths.chats_dir {
-        let depth = chats_depth(chats_dir).unwrap_or(0);
-        scoped = depth > 0;
-        for session in scan_chats(chats_dir, depth, warnings) {
+        for session in scan_chats(chats_dir, paths.chats_scope, warnings) {
             by_id.insert(session.id.clone(), session);
         }
     }
@@ -164,19 +162,21 @@ fn dir_name(dir: Option<&Path>) -> String {
         .to_string()
 }
 
-/// Loads the sessions under `chats_dir`, which sits `depth` levels below the
-/// chats root (see [`chats_depth`]).
-fn scan_chats(chats_dir: &Path, depth: usize, warnings: &mut Vec<String>) -> Vec<Session> {
+/// Loads the sessions under `chats_dir`, which is the `scope` part of the
+/// chats tree.
+fn scan_chats(chats_dir: &Path, scope: ChatsScope, warnings: &mut Vec<String>) -> Vec<Session> {
     let mut session_dirs = Vec::new();
-    match depth {
-        2 => session_dirs.push((chats_dir.to_path_buf(), dir_name(chats_dir.parent()))),
-        1 => {
+    match scope {
+        ChatsScope::Session => {
+            session_dirs.push((chats_dir.to_path_buf(), dir_name(chats_dir.parent())))
+        }
+        ChatsScope::Workspace => {
             let workspace_hash = dir_name(Some(chats_dir));
             for dir in subdirs(chats_dir, warnings) {
                 session_dirs.push((dir, workspace_hash.clone()));
             }
         }
-        _ => {
+        ChatsScope::All => {
             for workspace in subdirs(chats_dir, warnings) {
                 let workspace_hash = dir_name(Some(&workspace));
                 for dir in subdirs(&workspace, warnings) {
@@ -606,9 +606,14 @@ mod tests {
         );
     }
 
-    fn load(chats_dir: &Path, projects_dir: Option<&Path>) -> (Vec<Session>, Vec<String>) {
+    fn load(
+        chats_dir: &Path,
+        chats_scope: ChatsScope,
+        projects_dir: Option<&Path>,
+    ) -> (Vec<Session>, Vec<String>) {
         let paths = StoragePaths {
             chats_dir: Some(chats_dir.to_path_buf()),
+            chats_scope,
             projects_dir: projects_dir.map(Path::to_path_buf),
             ..Default::default()
         };
@@ -654,7 +659,7 @@ mod tests {
             "not a sqlite database, just text",
         );
 
-        let (sessions, warnings) = load(&chats, None);
+        let (sessions, warnings) = load(&chats, ChatsScope::All, None);
         let titles: Vec<_> = sessions.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, ["Named", "s2", "s3", "s4"]);
         assert_eq!(sessions[0].model.as_deref(), Some("gpt-5"));
@@ -682,12 +687,16 @@ mod tests {
         }
         transcript(&projects, "transcript-only");
 
-        for (chats_dir, expected) in [
-            (chats.clone(), &["s1", "s2", "transcript-only"][..]),
-            (workspace.clone(), &["s1", "s2"][..]),
-            (workspace.join("s1"), &["s1"][..]),
+        for (chats_dir, scope, expected) in [
+            (
+                chats.clone(),
+                ChatsScope::All,
+                &["s1", "s2", "transcript-only"][..],
+            ),
+            (workspace.clone(), ChatsScope::Workspace, &["s1", "s2"][..]),
+            (workspace.join("s1"), ChatsScope::Session, &["s1"][..]),
         ] {
-            let (sessions, warnings) = load(&chats_dir, Some(&projects));
+            let (sessions, warnings) = load(&chats_dir, scope, Some(&projects));
             let ids: Vec<_> = sessions.iter().map(|s| s.id.as_str()).collect();
             assert_eq!(ids, expected, "{}", chats_dir.display());
             assert!(sessions.iter().all(|s| s.messages.len() == 1));
@@ -699,6 +708,20 @@ mod tests {
             );
             assert!(warnings.is_empty());
         }
+    }
+
+    #[test]
+    fn stray_files_in_a_workspace_do_not_hide_its_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let chats = dir.path().join("chats");
+        write(&chats.join("ws1").join("s1").join("meta.json"), "{}");
+        write(&chats.join("ws2").join("s2").join("meta.json"), "{}");
+        write(&chats.join("ws2").join("meta.json"), "{}");
+
+        let (sessions, warnings) = load(&chats, ChatsScope::All, None);
+        let ids: Vec<_> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["s1", "s2"]);
+        assert!(warnings.is_empty());
     }
 
     #[cfg(unix)]
@@ -713,7 +736,7 @@ mod tests {
         write(&locked.join("s2").join("meta.json"), "{}");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         let readable = fs::read_dir(&locked).is_ok(); // root ignores permissions
-        let (sessions, warnings) = load(&chats, None);
+        let (sessions, warnings) = load(&chats, ChatsScope::All, None);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         if readable {
             return;

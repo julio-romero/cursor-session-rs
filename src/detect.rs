@@ -8,11 +8,34 @@ use crate::{Error, Result};
 
 #[derive(Debug, Clone, Default)]
 pub struct StoragePaths {
-    /// Agent CLI chats: the root of `<workspace hash>/<session id>/`, one
-    /// workspace directory, or a single session directory.
+    /// Agent CLI chats, at the level `chats_scope` says.
     pub chats_dir: Option<PathBuf>,
+    pub chats_scope: ChatsScope,
     pub projects_dir: Option<PathBuf>,
     pub global_storage_db: Option<PathBuf>,
+}
+
+/// Which part of the agent chats tree `chats_dir` points at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ChatsScope {
+    /// The chats root, holding `<workspace hash>/<session id>/` directories.
+    #[default]
+    All,
+    /// One workspace directory.
+    Workspace,
+    /// One session directory.
+    Session,
+}
+
+impl ChatsScope {
+    /// How many levels below the chats root this scope sits.
+    fn depth(self) -> usize {
+        match self {
+            ChatsScope::All => 0,
+            ChatsScope::Workspace => 1,
+            ChatsScope::Session => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,16 +180,17 @@ impl StoragePaths {
 
     fn first_existing(candidates: &Candidates) -> Self {
         Self {
-            chats_dir: candidates.chats.iter().find(|p| p.is_dir()).cloned(),
-            projects_dir: candidates.projects.iter().find(|p| p.is_dir()).cloned(),
-            global_storage_db: candidates.ide_db.iter().find(|p| p.is_file()).cloned(),
+            chats_dir: first_present(&candidates.chats, fs::Metadata::is_dir),
+            chats_scope: ChatsScope::All,
+            projects_dir: first_present(&candidates.projects, fs::Metadata::is_dir),
+            global_storage_db: first_present(&candidates.ide_db, fs::Metadata::is_file),
         }
     }
 
     fn from_storage_file(file: &Path) -> Option<Self> {
         let name = file.file_name()?.to_str()?;
         if name == "store.db" {
-            return Some(Self::from_chats(file.parent()?, 2));
+            return Some(Self::from_chats(file.parent()?, ChatsScope::Session));
         }
         if name.ends_with(".vscdb") || name.ends_with(".vscdb.backup") {
             return Some(Self {
@@ -193,16 +217,27 @@ impl StoragePaths {
             return Some(paths);
         }
 
+        let global_storage_db = [
+            dir.join("state.vscdb"),
+            dir.join("globalStorage").join("state.vscdb"),
+            join(dir, &["User", "globalStorage", "state.vscdb"]),
+        ]
+        .into_iter()
+        .find(|p| p.is_file());
         let mut paths = if dir.join("chats").is_dir() || dir.join("projects").is_dir() {
             Self {
                 chats_dir: existing_dir(dir.join("chats")),
                 projects_dir: existing_dir(dir.join("projects")),
                 ..Default::default()
             }
-        } else if let Some(depth) = chats_depth(dir) {
-            Self::from_chats(dir, depth)
+        } else if global_storage_db.is_some() {
+            // Extensions keep arbitrary files under globalStorage, so don't
+            // look for agent sessions in an IDE directory.
+            Self::default()
         } else if dir.file_name().is_some_and(|name| name == "chats") {
-            Self::from_chats(dir, 0)
+            Self::from_chats(dir, ChatsScope::All)
+        } else if let Some(scope) = chats_scope(dir) {
+            Self::from_chats(dir, scope)
         } else if has_transcripts(dir) {
             Self {
                 projects_dir: Some(dir.to_path_buf()),
@@ -211,25 +246,20 @@ impl StoragePaths {
         } else {
             Self::default()
         };
-        paths.global_storage_db = [
-            dir.join("state.vscdb"),
-            dir.join("globalStorage").join("state.vscdb"),
-            join(dir, &["User", "globalStorage", "state.vscdb"]),
-        ]
-        .into_iter()
-        .find(|p| p.is_file());
+        paths.global_storage_db = global_storage_db;
         (!paths.is_empty()).then_some(paths)
     }
 
-    /// `dir` sits `depth` levels below the chats root (see [`chats_depth`]),
-    /// whose sibling `projects` directory holds the transcripts.
-    fn from_chats(dir: &Path, depth: usize) -> Self {
+    /// `dir` is the `scope` part of a chats tree, whose root's sibling
+    /// `projects` directory holds the transcripts.
+    fn from_chats(dir: &Path, scope: ChatsScope) -> Self {
         let projects_dir = dir
             .ancestors()
-            .nth(depth + 1)
+            .nth(scope.depth() + 1)
             .and_then(|parent| existing_dir(parent.join("projects")));
         Self {
             chats_dir: Some(dir.to_path_buf()),
+            chats_scope: scope,
             projects_dir,
             global_storage_db: None,
         }
@@ -240,21 +270,20 @@ impl StoragePaths {
     }
 }
 
-/// How far below an agent chats root `dir` sits: 0 for the root itself
-/// (`<workspace hash>/<session id>/`), 1 for one workspace directory, 2 for a
-/// single session directory. `None` when no session directory is in reach.
-pub(crate) fn chats_depth(dir: &Path) -> Option<usize> {
+/// Which part of an agent chats tree `dir` looks like, judging by where its
+/// session directories are. `None` when none is in reach.
+fn chats_scope(dir: &Path) -> Option<ChatsScope> {
     if is_session_dir(dir) {
-        return Some(2);
+        return Some(ChatsScope::Session);
     }
     let children: Vec<PathBuf> = subdirs(dir).collect();
     if children.iter().any(|child| is_session_dir(child)) {
-        return Some(1);
+        return Some(ChatsScope::Workspace);
     }
     children
         .iter()
         .any(|child| subdirs(child).any(|session| is_session_dir(&session)))
-        .then_some(0)
+        .then_some(ChatsScope::All)
 }
 
 fn is_session_dir(dir: &Path) -> bool {
@@ -304,6 +333,22 @@ fn dedup(paths: impl Iterator<Item = PathBuf>) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The first of `paths` that exists with the wanted type, or that cannot be
+/// inspected (e.g. permission denied), so that reading it reports the problem
+/// instead of finding no sessions.
+fn first_present(paths: &[PathBuf], wanted: fn(&fs::Metadata) -> bool) -> Option<PathBuf> {
+    paths
+        .iter()
+        .find(|path| match fs::metadata(path) {
+            Ok(meta) => wanted(&meta),
+            Err(err) => !matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ),
+        })
+        .cloned()
 }
 
 fn existing_dir(path: PathBuf) -> Option<PathBuf> {
@@ -496,7 +541,7 @@ mod tests {
         touch(&db);
 
         let paths = StoragePaths::from_env(&Env::with_home(Os::Linux, home)).unwrap();
-        assert_eq!(paths.chats_dir, Some(fallback));
+        assert_eq!(paths.chats_dir, Some(fallback.clone()));
         assert_eq!(paths.projects_dir, None);
         assert_eq!(paths.global_storage_db, Some(db));
 
@@ -506,6 +551,12 @@ mod tests {
         // Windows keeps the IDE database elsewhere.
         let paths = StoragePaths::from_env(&Env::with_home(Os::Windows, home)).unwrap();
         assert_eq!(paths.global_storage_db, None);
+
+        // A file where a directory is expected counts as absent.
+        fs::remove_dir_all(home.join(".cursor")).unwrap();
+        touch(&home.join(".cursor"));
+        let paths = StoragePaths::from_env(&Env::with_home(Os::Linux, home)).unwrap();
+        assert_eq!(paths.chats_dir, Some(fallback));
     }
 
     fn touch(path: &Path) {
@@ -542,12 +593,20 @@ mod tests {
         let workspace = session.parent().unwrap();
         let chats = workspace.parent().unwrap();
 
-        for (given, chats_dir) in [
-            (session.join("store.db"), &session),
-            (session.clone(), &session),
-            (workspace.to_path_buf(), &workspace.to_path_buf()),
-            (chats.to_path_buf(), &chats.to_path_buf()),
-            (dir.path().join(".cursor"), &chats.to_path_buf()),
+        for (given, chats_dir, scope) in [
+            (session.join("store.db"), &session, ChatsScope::Session),
+            (session.clone(), &session, ChatsScope::Session),
+            (
+                workspace.to_path_buf(),
+                &workspace.to_path_buf(),
+                ChatsScope::Workspace,
+            ),
+            (chats.to_path_buf(), &chats.to_path_buf(), ChatsScope::All),
+            (
+                dir.path().join(".cursor"),
+                &chats.to_path_buf(),
+                ChatsScope::All,
+            ),
         ] {
             let paths = custom(&given);
             assert_eq!(
@@ -556,7 +615,14 @@ mod tests {
                 "{}",
                 given.display()
             );
+            assert_eq!(paths.chats_scope, scope, "{}", given.display());
             assert_eq!(paths.global_storage_db, None, "{}", given.display());
+        }
+
+        // A stray file in a workspace directory doesn't narrow the chats root.
+        touch(&workspace.join("meta.json"));
+        for given in [chats.to_path_buf(), dir.path().join(".cursor")] {
+            assert_eq!(custom(&given).chats_scope, ChatsScope::All);
         }
 
         // An empty chats directory is still recognised by name.
@@ -588,6 +654,80 @@ mod tests {
             assert_eq!(paths.global_storage_db, Some(resolve(&expected).unwrap()));
             assert_eq!((paths.chats_dir, paths.projects_dir), (None, None));
         }
+    }
+
+    #[test]
+    fn ide_directories_are_not_searched_for_agent_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_storage = dir.path().join("User").join("globalStorage");
+        touch(&global_storage.join("state.vscdb"));
+        touch(
+            &global_storage
+                .join("vendor.extension")
+                .join("cache")
+                .join("meta.json"),
+        );
+
+        for given in [global_storage, dir.path().join("User")] {
+            let paths = custom(&given);
+            assert_eq!(paths.chats_dir, None, "{}", given.display());
+            assert!(paths.global_storage_db.is_some());
+        }
+    }
+
+    #[test]
+    fn storage_is_authoritative() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        dot_cursor(&home);
+        let db = dir.path().join("copy").join("state.vscdb");
+        touch(&db);
+
+        for given in [db.clone(), Path::new("~").join("..").join("copy")] {
+            let paths = StoragePaths::from_custom(&given, Some(&home)).unwrap();
+            assert_eq!(paths.global_storage_db, Some(resolve(&db).unwrap()));
+            assert_eq!((paths.chats_dir, paths.projects_dir), (None, None));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detection_reports_locations_it_cannot_inspect() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let global_storage = home
+            .join("Library")
+            .join("Application Support")
+            .join("Cursor")
+            .join("User")
+            .join("globalStorage");
+        touch(&global_storage.join("state.vscdb"));
+        fs::create_dir_all(home.join(".cursor").join("chats")).unwrap();
+
+        let locked = [global_storage.as_path(), &home.join(".cursor")];
+        for dir in locked {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let readable = fs::read_dir(&global_storage).is_ok(); // root ignores permissions
+        let paths = StoragePaths::from_env(&Env::with_home(Os::MacOs, home)).unwrap();
+        for dir in locked {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        if readable {
+            return;
+        }
+
+        assert_eq!(
+            paths.global_storage_db,
+            Some(global_storage.join("state.vscdb"))
+        );
+        assert_eq!(paths.chats_dir, Some(home.join(".cursor").join("chats")));
+        assert_eq!(
+            paths.projects_dir,
+            Some(home.join(".cursor").join("projects"))
+        );
     }
 
     #[test]

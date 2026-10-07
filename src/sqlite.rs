@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -11,6 +12,8 @@ use rusqlite::{Connection, OpenFlags};
 use crate::{Error, Result};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const SNAPSHOT_PREFIX: &str = "cursor-session-";
+const STALE_SNAPSHOT: Duration = Duration::from_secs(60 * 60);
 
 /// A read-only connection. When the database had to be copied first (see
 /// [`open_readonly`]), the copy lives as long as the connection.
@@ -37,9 +40,7 @@ impl Deref for Db {
 /// directory is read-only). Such a file is copied to a private temporary
 /// directory and the copy is opened instead.
 pub fn open_readonly(path: &Path) -> Result<Db> {
-    // An absolute path never starts with `file:`, so the bundled SQLite (built
-    // with SQLITE_USE_URI) cannot mistake it for a URI.
-    let abs = std::path::absolute(path).map_err(|source| Error::access(path, source))?;
+    let abs = sqlite_path(path).map_err(|source| Error::access(path, source))?;
     for _ in 0..3 {
         let before = stamp(&abs).map_err(|source| Error::access(path, source))?;
         if !needs_snapshot(&abs).map_err(|source| Error::access(path, source))? {
@@ -79,6 +80,18 @@ fn connect(file: &Path, path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "query_only", true)
         .map_err(db_err)?;
     Ok(conn)
+}
+
+/// The path SQLite derives the `-wal` and `-shm` names from. Its Unix VFS
+/// resolves symlinks first and its Windows VFS does not. Being absolute, it
+/// never starts with `file:`, so the bundled SQLite (built with
+/// SQLITE_USE_URI) cannot mistake it for a URI.
+fn sqlite_path(path: &Path) -> io::Result<PathBuf> {
+    if cfg!(unix) {
+        fs::canonicalize(path)
+    } else {
+        std::path::absolute(path)
+    }
 }
 
 fn stamp(path: &Path) -> io::Result<(u64, Option<SystemTime>)> {
@@ -137,18 +150,59 @@ impl Drop for Snapshot {
 
 fn private_temp_dir() -> io::Result<PathBuf> {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let mut builder = fs::DirBuilder::new();
+    static SWEEP: Once = Once::new();
+    let temp = std::env::temp_dir();
+    SWEEP.call_once(|| remove_stale_snapshots(&temp, STALE_SNAPSHOT));
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     loop {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("cursor-session-{}-{n}", std::process::id()));
+        let dir = temp.join(format!("{SNAPSHOT_PREFIX}{}-{n}", std::process::id()));
         match builder.create(&dir) {
             Ok(()) => return Ok(dir),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists && n < 1000 => continue,
             Err(err) => return Err(err),
         }
     }
+}
+
+/// Removes snapshot directories that a killed process (e.g. by Ctrl-C) left
+/// in `temp`. No read holds a snapshot for anywhere near `max_age`.
+fn remove_stale_snapshots(temp: &Path, max_age: Duration) {
+    let Ok(entries) = fs::read_dir(temp) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let ours = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(SNAPSHOT_PREFIX))
+            .and_then(|rest| rest.split_once('-'))
+            .is_some_and(|(pid, n)| is_number(pid) && is_number(n));
+        // `DirEntry` metadata does not follow symlinks.
+        let stale = entry.metadata().is_ok_and(|meta| {
+            meta.is_dir()
+                && meta
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.elapsed().ok())
+                    .is_some_and(|age| age >= max_age)
+        });
+        if ours && stale {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+fn is_number(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -228,6 +282,50 @@ mod tests {
             .query_row("SELECT count(*) FROM cursorDiskKV", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_wal_database_sees_commits_in_the_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let path = real.join("state.vscdb");
+        create(&path, "wal");
+        let link = dir.path().join("state.vscdb");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute("INSERT INTO cursorDiskKV VALUES ('k2', 'v2')", [])
+            .unwrap();
+        let db = open_readonly(&link).unwrap();
+        assert!(db._snapshot.is_none());
+        let count: i64 = db
+            .query_row("SELECT count(*) FROM cursorDiskKV", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn stale_snapshots_are_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = [
+            "cursor-session-123-0",
+            "cursor-session-123",
+            "cursor-session-x-0",
+            "other-1-0",
+        ];
+        for name in names {
+            fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        fs::write(dir.path().join("cursor-session-1-0"), "a file").unwrap();
+
+        remove_stale_snapshots(dir.path(), STALE_SNAPSHOT);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 5);
+        remove_stale_snapshots(dir.path(), Duration::ZERO);
+        assert!(!dir.path().join(names[0]).exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 4);
     }
 
     #[test]
