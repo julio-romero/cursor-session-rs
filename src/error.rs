@@ -6,6 +6,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// How many candidates an ambiguous ID hint lists before summarising the rest.
 const MAX_ID_CANDIDATES: usize = 10;
 const TRY_AGAIN: &str = "try again in a moment; Cursor may be writing to it right now";
+const SKIP_IDE: &str = "rerun with `--source agent` to skip IDE sessions";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -105,7 +106,7 @@ impl Error {
                 hints
             }
             Error::SchemaMismatch { .. } => vec![
-                "rerun with `--source agent` to skip IDE sessions".to_string(),
+                SKIP_IDE.to_string(),
                 "report it at https://github.com/julio-romero/cursor-session-rs/issues and \
                  include your Cursor version"
                     .to_string(),
@@ -119,6 +120,9 @@ impl Error {
                 vec![TRY_AGAIN.to_string()]
             }
             Error::Changed { .. } => vec![TRY_AGAIN.to_string()],
+            Error::Database { path, .. } | Error::Io { path, .. } if is_ide_db(path) => {
+                vec![SKIP_IDE.to_string()]
+            }
             Error::Snapshot { .. } => vec![
                 format!(
                     "make sure {} is writable and has room for a copy of the database, or point \
@@ -135,6 +139,13 @@ impl Error {
             _ => Vec::new(),
         }
     }
+}
+
+/// Whether `path` is an IDE database, which `--source agent` leaves unread.
+fn is_ide_db(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".vscdb") || name.ends_with(".vscdb.backup"))
 }
 
 #[cfg(test)]
@@ -172,7 +183,26 @@ mod tests {
             Error::Changed { path },
             Error::NoStorage,
         ];
-        for error in &errors {
+        let ide_db = Error::Io {
+            path: PathBuf::from("/Cursor/User/globalStorage/state.vscdb"),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        assert_eq!(ide_db.hints(), [SKIP_IDE]);
+        let chats = Error::Io {
+            path: PathBuf::from("/home/.cursor/chats"),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        assert!(chats.hints().is_empty());
+        let not_a_database = Error::Database {
+            path: PathBuf::from("backup.vscdb.backup"),
+            source: rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTADB),
+                None,
+            ),
+        };
+        assert_eq!(not_a_database.hints(), [SKIP_IDE]);
+
+        for error in errors.iter().chain([&ide_db]) {
             let hints = error.hints();
             let (candidates, advice): (Vec<_>, Vec<_>) =
                 hints.iter().partition(|hint| hint.starts_with("  "));

@@ -227,6 +227,162 @@ fn changed_schema_fails_the_cli_cleanly_unless_only_agent_sessions_are_asked_for
     }
 }
 
+/// Rows a Cursor update could change the format of, with how loading them
+/// reports it. The table and its columns are as expected.
+fn changed_row_formats() -> Vec<(Vec<(String, SqlValue)>, &'static str)> {
+    let encoded = |key: &str| {
+        (
+            key.to_string(),
+            SqlValue::Blob(vec![0x78, 0x9c, 0xcb, 0x48]),
+        )
+    };
+    vec![
+        (
+            vec![encoded("composerData:z1")],
+            "its composerData row could not be read",
+        ),
+        (
+            vec![
+                encoded("composerData:z1"),
+                encoded("composerData:z2"),
+                bubble("z1", "b1", &text_bubble("b1", 1, "hello"), Stored::Text),
+            ],
+            "none of its 2 composerData rows could be read",
+        ),
+        // The conversation is listed under a key this version does not know.
+        (
+            vec![
+                composer(
+                    "r1",
+                    &json!({"composerId": "r1", "conversationHeaders": [{"bubbleId": "b1"}]}),
+                    Stored::Text,
+                ),
+                bubble("r1", "b1", &text_bubble("b1", 1, "hello"), Stored::Text),
+                composer(
+                    "r2",
+                    &json!({"composerId": "r2", "name": "New and empty"}),
+                    Stored::Text,
+                ),
+            ],
+            "no chat lists the messages stored for it",
+        ),
+    ]
+}
+
+#[test]
+fn changed_row_formats_are_a_clear_error() {
+    for (rows, detail) in changed_row_formats() {
+        let fixture = Fixture::new();
+        write_standard_agent(&fixture);
+        let db = fixture.write_ide_db(Journal::Delete, &rows);
+        let err = load_db(&db).0.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "unrecognized Cursor IDE storage format in {}: {detail}. Cursor may have \
+                 changed its storage format.",
+                db.display()
+            )
+        );
+        let output = fixture.cmd().arg("list").output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{detail}");
+        assert!(stderr(&output).contains("\nrerun with `--source agent` to skip IDE sessions\n"));
+        assert_eq!(
+            listed_ids(&fixture, &["list", "--source", "agent"]).len(),
+            4
+        );
+    }
+}
+
+#[test]
+fn a_chat_that_lists_none_of_its_messages_is_reported() {
+    let fixture = Fixture::new();
+    let mut rows = standard_ide_rows();
+    rows.extend([
+        composer(
+            "r1",
+            &json!({"composerId": "r1", "conversationHeaders": [{"bubbleId": "b1"}]}),
+            Stored::Text,
+        ),
+        bubble("r1", "b1", &text_bubble("b1", 1, "hello"), Stored::Text),
+    ]);
+    let db = fixture.write_ide_db(Journal::Delete, &rows);
+    let (sessions, warnings) = load_db(&db);
+    assert_eq!(sessions.unwrap().len(), 5);
+    assert_eq!(
+        warnings,
+        [format!(
+            "1 chat(s) in {} list none of their stored messages",
+            db.display()
+        )]
+    );
+}
+
+#[test]
+fn messages_kept_inside_older_composers_are_read() {
+    let fixture = Fixture::new();
+    let legacy = json!({
+        "_v": 2,
+        "composerId": "legacy",
+        "name": "From an older Cursor",
+        "createdAt": 1_700_000_000_000_i64,
+        "conversation": [
+            {"bubbleId": "a", "type": 1, "text": "old question", "timestamp": 1_700_000_000_000_i64},
+            {"bubbleId": "b", "type": 2, "text": "old answer", "codeBlocks": [{"language": "sh", "content": "ls"}]},
+            {"bubbleId": "c", "type": "unknown"},
+            {"bubbleId": "d", "type": 2, "text": ""},
+        ],
+    });
+    let db = fixture.write_ide_db(
+        Journal::Delete,
+        &[composer("legacy", &legacy, Stored::Text)],
+    );
+    let (sessions, warnings) = load_db(&db);
+    let sessions = sessions.unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let messages: Vec<(&str, &str)> = sessions[0]
+        .messages
+        .iter()
+        .map(|m| (m.role.as_str(), m.content.as_str()))
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            ("user", "old question"),
+            ("assistant", "old answer\n\n```sh\nls\n```")
+        ]
+    );
+    assert_eq!(
+        sessions[0].messages[0].timestamp.as_deref(),
+        Some("1700000000000")
+    );
+}
+
+#[test]
+fn chats_that_reuse_a_message_id_keep_their_own_text() {
+    let fixture = Fixture::new();
+    let rows: Vec<_> = [("aaaa", "first chat"), ("bbbb", "second chat")]
+        .into_iter()
+        .enumerate()
+        .flat_map(|(n, (id, text))| {
+            let at = 1_757_000_000_000 + i64::try_from(n).unwrap();
+            [
+                composer(
+                    id,
+                    &composer_json(id, text, at, at, &[("b1", 1)]),
+                    Stored::Text,
+                ),
+                bubble(id, "b1", &text_bubble("b1", 1, text), Stored::Text),
+            ]
+        })
+        .collect();
+    let db = fixture.write_ide_db(Journal::Delete, &rows);
+    for session in load_db(&db).0.unwrap() {
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].content, session.title);
+    }
+}
+
 fn malformed_rows() -> Vec<(String, SqlValue)> {
     let mut rows = vec![
         composer(

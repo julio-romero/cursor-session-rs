@@ -230,7 +230,8 @@ sessions loaded: 4 (agent: 2, ide: 2)
 
 It shows each location it found, with `(ok)` or `(failed)`, or `not found`. It
 exits 1 when no storage is found at all, or when a store that was found fails to
-load; the report then includes the reason.
+load; the report then includes the reason and what to do about it. When rows or
+files were skipped, a `load warnings: N` line says so; `-v` lists them.
 
 ### Global flags
 
@@ -281,7 +282,7 @@ with its messages.
 | `workspace_hash` | string or null       | MD5 of the workspace path, the directory name under `~/.cursor/chats`. `null` for IDE sessions. |
 | `model`          | string or null       | Last model used, from the Agent CLI `store.db`. `null` for IDE sessions.                         |
 | `created_at`     | string or null       | RFC 3339 in UTC with whole seconds, such as `"2026-10-05T13:40:12Z"`. Works with jq's `fromdate`. |
-| `updated_at`     | string or null       | Same format as `created_at`.                                                                     |
+| `updated_at`     | string or null       | Same format as `created_at`. `null` when Cursor stored no update time; the list then uses `created_at`. |
 | `message_count`  | integer              | All messages in the session, even when `show --limit` returns fewer.                             |
 | `messages`       | array (`show` only)  | Objects with `role` (`"user"` or `"assistant"`), `content` (string) and `timestamp`.             |
 
@@ -450,7 +451,8 @@ in WAL mode is read depending on the files next to it:
   last model used, creation time); its other blobs are not decoded.
 - IDE messages: the text of each message, or its rich text when the plain text
   is empty, followed by its code blocks as fenced code. Messages with neither
-  text nor code blocks are skipped.
+  text nor code blocks are skipped. Chats from older Cursor versions, which keep
+  their messages inside the chat row, are read too.
 - `show --all` shows all loaded text messages, not the excluded records or
   content that exists only in the databases.
 
@@ -471,7 +473,9 @@ run `cursor-session list` to see session IDs
 ```
 
 **Cursor changed its storage format.** If a Cursor update changes the IDE
-database layout, `list`, `show` and `export` stop with:
+database layout, `list`, `show` and `export` stop with an error like this one.
+The same error, with another reason, appears when none of the chat rows can be
+read, or when no chat lists the messages stored for it:
 
 ```text
 error: unrecognized Cursor IDE storage format in /Users/dana/Library/Application Support/Cursor/User/globalStorage/state.vscdb: table `cursorDiskKV` not found (tables present: ItemTable). Cursor may have changed its storage format.

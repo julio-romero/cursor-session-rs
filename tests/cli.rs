@@ -680,9 +680,44 @@ fn healthcheck_fails_when_a_store_is_broken() {
     assert!(out.contains("agent-transcripts (ok)\n"));
     assert!(out.contains("sessions loaded: 4 (agent: 4, ide: 0)\n"));
     assert!(out.contains("ide store failed: unrecognized Cursor IDE storage format in "));
+    // The store's own advice follows its failure.
+    assert!(out.ends_with(
+        "Cursor may have changed its storage format.\n  \
+         rerun with `--source agent` to skip IDE sessions\n  \
+         report it at https://github.com/julio-romero/cursor-session-rs/issues and include \
+         your Cursor version\n"
+    ));
     assert_eq!(
         stderr(&output),
         "error: healthcheck failed: the ide store could not be loaded\n"
+    );
+}
+
+#[test]
+fn healthcheck_counts_skipped_data_and_names_only_what_storage_holds() {
+    let fixture = Fixture::new();
+    let mut rows = standard_ide_rows();
+    rows.push((
+        "composerData:broken".to_string(),
+        rusqlite::types::Value::Text("{".into()),
+    ));
+    let db = fixture.write_ide_db(Journal::Delete, &rows);
+    let out = ok(&fixture, &["healthcheck"]);
+    assert!(
+        out.ends_with("load warnings: 1 (rerun with -v to see them)\n"),
+        "{out}"
+    );
+    let verbose = run(&fixture, &["healthcheck", "-v"]);
+    assert!(!stdout(&verbose).contains("load warnings"));
+    assert!(stderr(&verbose).contains("warning: skipped 1 unreadable composer row in "));
+
+    let out = ok(
+        &fixture,
+        &["healthcheck", "--storage", db.to_str().unwrap()],
+    );
+    assert!(
+        out.contains("agent chats: not found\ntranscripts: not found\n"),
+        "{out}"
     );
 }
 

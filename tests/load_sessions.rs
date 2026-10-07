@@ -203,8 +203,10 @@ fn ide_composer_without_a_name_is_untitled() {
     let session = get(&sessions, IDE_UNTITLED_ID);
     assert_eq!(session.title, "Untitled");
     assert_eq!(session.created_at_ms, Some(1_757_250_000_000));
-    // The creation time stands in for a missing update time.
-    assert_eq!(session.updated_at_ms, Some(1_757_250_000_000));
+    // Like an agent session, a chat never updated has no update time; the
+    // table shows, and the list orders, its creation time instead.
+    assert_eq!(session.updated_at_ms, None);
+    assert_eq!(session.updated_display(), "2025-09-07 13:00");
     assert!(session.messages.is_empty());
 }
 

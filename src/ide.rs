@@ -29,6 +29,9 @@ struct Composer {
     last_updated_at: Option<i64>,
     #[serde(default)]
     full_conversation_headers_only: Vec<ConversationHeader>,
+    /// Older Cursor versions keep the messages in the composer itself.
+    #[serde(default)]
+    conversation: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,23 +122,29 @@ fn read_sessions(
         return Ok(Vec::new());
     }
 
-    let mut bubble_map: HashMap<String, Bubble> = HashMap::new();
+    // `bubbleId:<chat id>:<message id>` rows, by chat and then message ID.
+    let mut bubbles: HashMap<String, HashMap<String, Bubble>> = HashMap::new();
     let skipped = read_rows(conn, db_path, "bubbleId:", |key, value| {
         let Some(bubble) = parse_object::<Bubble>(value) else {
             return false;
         };
+        let rest = key.strip_prefix("bubbleId:").unwrap_or(key);
+        let (chat, bubble_key) = rest.split_once(':').unwrap_or_default();
         let id = bubble
             .bubble_id
             .clone()
-            .or_else(|| key.rsplit(':').next().map(str::to_string));
-        if let Some(id) = id {
-            bubble_map.insert(id, bubble);
-        }
+            .unwrap_or_else(|| bubble_key.to_string());
+        bubbles
+            .entry(chat.to_string())
+            .or_default()
+            .insert(id, bubble);
         true
     })?;
     warn_skipped(warnings, skipped, "message", db_path);
 
     let mut sessions = Vec::new();
+    // Chats with stored messages, and those of them that lead to none.
+    let (mut stored, mut unlinked) = (0, 0);
     let skipped = read_rows(conn, db_path, "composerData:", |key, value| {
         let Some(composer) = parse_object::<Composer>(value) else {
             return false;
@@ -154,10 +163,40 @@ fn read_sessions(
         let Some(id) = id else {
             return false;
         };
-        sessions.push(composer_session(id, composer, &bubble_map));
+        let chat_bubbles = bubbles.get(&id);
+        let (session, linked) = composer_session(id, composer, chat_bubbles);
+        if chat_bubbles.is_some() {
+            stored += 1;
+            unlinked += usize::from(!linked);
+        }
+        sessions.push(session);
         true
     })?;
+
+    // Rows that are all unreadable, or chats that all lead to none of their
+    // messages, mean the format changed rather than that there is nothing.
+    let mismatch = |detail| Error::SchemaMismatch {
+        path: db_path.to_path_buf(),
+        detail,
+    };
+    if sessions.is_empty() && skipped > 0 {
+        return Err(mismatch(match skipped {
+            1 => "its composerData row could not be read".to_string(),
+            _ => format!("none of its {skipped} composerData rows could be read"),
+        }));
+    }
+    if unlinked > 0 && unlinked == stored {
+        return Err(mismatch(
+            "no chat lists the messages stored for it".to_string(),
+        ));
+    }
     warn_skipped(warnings, skipped, "composer", db_path);
+    if unlinked > 0 {
+        warnings.push(format!(
+            "{unlinked} chat(s) in {} list none of their stored messages",
+            db_path.display()
+        ));
+    }
     Ok(sessions)
 }
 
@@ -266,49 +305,67 @@ fn warn_skipped(warnings: &mut Vec<String>, skipped: usize, kind: &str, db_path:
     }
 }
 
+/// The session for `composer`, and whether its conversation led to any
+/// message: one of `bubbles`, its stored messages, or one kept inline, as
+/// older Cursor versions did for composers without conversation headers.
 fn composer_session(
     id: String,
     composer: Composer,
-    bubble_map: &HashMap<String, Bubble>,
-) -> Session {
+    bubbles: Option<&HashMap<String, Bubble>>,
+) -> (Session, bool) {
     let mut messages = Vec::new();
+    let mut linked = false;
     for header in &composer.full_conversation_headers_only {
-        let Some(bubble_id) = &header.bubble_id else {
-            continue;
-        };
-        let Some(bubble) = bubble_map.get(bubble_id) else {
-            continue;
-        };
-        let content = extract_bubble_text(bubble);
-        if content.is_empty() {
-            continue;
+        let bubble = header
+            .bubble_id
+            .as_ref()
+            .and_then(|bubble_id| bubbles?.get(bubble_id));
+        if let Some(bubble) = bubble {
+            linked = true;
+            messages.extend(message(header.kind.or(bubble.kind), bubble));
         }
-        let role = match header.kind.or(bubble.kind).unwrap_or(1) {
-            1 => "user",
-            2 => "assistant",
-            _ => "assistant",
-        };
-        messages.push(Message {
-            role: role.to_string(),
-            content,
-            timestamp: bubble.timestamp.map(|ms| ms.to_string()),
-        });
+    }
+    if composer.full_conversation_headers_only.is_empty() {
+        for value in &composer.conversation {
+            if let Ok(bubble) = Bubble::deserialize(value) {
+                linked = true;
+                messages.extend(message(bubble.kind, &bubble));
+            }
+        }
     }
     let title = composer
         .name
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Untitled".to_string());
-    Session {
+    let session = Session {
         id,
         title,
         source: Source::Ide,
         workspace: None,
         workspace_hash: None,
         created_at_ms: composer.created_at,
-        updated_at_ms: composer.last_updated_at.or(composer.created_at),
+        updated_at_ms: composer.last_updated_at,
         model: None,
         messages,
+    };
+    (session, linked)
+}
+
+/// A message from `bubble`, unless it has no text or code.
+fn message(kind: Option<i64>, bubble: &Bubble) -> Option<Message> {
+    let content = extract_bubble_text(bubble);
+    if content.is_empty() {
+        return None;
     }
+    let role = match kind.unwrap_or(1) {
+        1 => "user",
+        _ => "assistant",
+    };
+    Some(Message {
+        role: role.to_string(),
+        content,
+        timestamp: bubble.timestamp.map(|ms| ms.to_string()),
+    })
 }
 
 fn extract_bubble_text(bubble: &Bubble) -> String {

@@ -128,12 +128,7 @@ fn report(error: &anyhow::Error, err: &mut dyn Write) {
     for cause in error.chain().skip(1) {
         let _ = writeln!(err, "  caused by: {cause}");
     }
-    let hints = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<cursor_session::Error>())
-        .map(cursor_session::Error::hints)
-        .unwrap_or_default();
-    for hint in hints {
+    for hint in commands::hints(error) {
         let _ = writeln!(err, "{hint}");
     }
 }

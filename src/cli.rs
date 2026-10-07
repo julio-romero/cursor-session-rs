@@ -149,6 +149,8 @@ pub struct ExportArgs {
 pub struct HealthcheckArgs {
     #[arg(from_global)]
     pub verbose: bool,
+    #[arg(from_global)]
+    pub storage: Option<PathBuf>,
 }
 
 fn at_least_one(value: &str) -> Result<usize, String> {

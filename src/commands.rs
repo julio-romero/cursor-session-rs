@@ -10,7 +10,7 @@ use cursor_session::ui;
 use cursor_session::{Error, LoadOptions, filter_workspace, find_session, load_sessions};
 use serde::Serialize;
 
-use crate::cli::{Commands, ExportArgs, ListArgs, ShowArgs};
+use crate::cli::{Commands, ExportArgs, HealthcheckArgs, ListArgs, ShowArgs};
 use crate::output::OutputOpts;
 
 /// Runs one subcommand. Normal output goes to `out`, diagnostics such as load
@@ -26,7 +26,7 @@ pub fn run(
         Commands::List(args) => cmd_list(paths, opts, out, err, &args),
         Commands::Show(args) => cmd_show(paths, opts, out, err, &args),
         Commands::Export(args) => cmd_export(paths, out, err, &args),
-        Commands::Healthcheck(args) => cmd_healthcheck(paths, out, err, args.verbose),
+        Commands::Healthcheck(args) => cmd_healthcheck(paths, out, err, &args),
     }
 }
 
@@ -161,7 +161,7 @@ fn cmd_healthcheck(
     paths: &StoragePaths,
     out: &mut dyn Write,
     err: &mut dyn Write,
-    verbose: bool,
+    args: &HealthcheckArgs,
 ) -> Result<()> {
     // Check each location and store on its own so one failure does not hide
     // another. The agent loader skips a location it cannot read and loads the
@@ -180,6 +180,11 @@ fn cmd_healthcheck(
     let ide_store =
         check_readable(paths.global_storage_db.as_deref()).and_then(|()| load(Source::Ide));
     let status = |ok: bool| if ok { "ok" } else { "failed" };
+    // With --storage, the default locations were never looked at.
+    let not_found = |default: &str| match args.storage {
+        Some(_) => "not found".to_string(),
+        None => format!("not found ({default})"),
+    };
 
     writeln!(out, "Cursor session healthcheck\n")?;
     match &paths.chats_dir {
@@ -189,7 +194,7 @@ fn cmd_healthcheck(
             dir.display(),
             status(chats.is_ok() && agent_store.is_ok())
         )?,
-        None => writeln!(out, "agent chats: not found (~/.cursor/chats)")?,
+        None => writeln!(out, "agent chats: {}", not_found("~/.cursor/chats"))?,
     }
     match &paths.projects_dir {
         Some(dir) => writeln!(
@@ -198,7 +203,7 @@ fn cmd_healthcheck(
             dir.display(),
             status(transcripts.is_ok() && agent_store.is_ok())
         )?,
-        None => writeln!(out, "transcripts: not found (~/.cursor/projects)")?,
+        None => writeln!(out, "transcripts: {}", not_found("~/.cursor/projects"))?,
     }
     match &paths.global_storage_db {
         Some(db) => writeln!(
@@ -207,7 +212,7 @@ fn cmd_healthcheck(
             db.display(),
             status(ide_store.is_ok())
         )?,
-        None => writeln!(out, "ide db: not found (state.vscdb)")?,
+        None => writeln!(out, "ide db: {}", not_found("state.vscdb"))?,
     }
 
     let mut sessions = Vec::new();
@@ -234,7 +239,7 @@ fn cmd_healthcheck(
             }
         }
     }
-    print_warnings(&warnings, verbose, err)?;
+    print_warnings(&warnings, args.verbose, err)?;
 
     let sessions = model::merge_sessions(sessions);
     let agent = sessions
@@ -250,8 +255,18 @@ fn cmd_healthcheck(
     if sessions.is_empty() {
         writeln!(out, "warning: no sessions were parsed")?;
     }
+    if !args.verbose && !warnings.is_empty() {
+        writeln!(
+            out,
+            "load warnings: {} (rerun with -v to see them)",
+            warnings.len()
+        )?;
+    }
     for (source, error) in &failed {
         writeln!(out, "{} store failed: {error:#}", source.as_str())?;
+        for hint in hints(error) {
+            writeln!(out, "  {hint}")?;
+        }
     }
 
     if paths.chats_dir.is_none()
@@ -270,6 +285,15 @@ fn cmd_healthcheck(
         ),
         _ => bail!("healthcheck failed: the agent and ide stores could not be loaded"),
     }
+}
+
+/// The guidance of the library error behind `error`, if any.
+pub fn hints(error: &anyhow::Error) -> Vec<String> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Error>())
+        .map(Error::hints)
+        .unwrap_or_default()
 }
 
 /// Checks that a found location can be opened, since the loaders skip what
@@ -385,7 +409,10 @@ mod tests {
                 AGENT_ID
             ]
         );
-        assert_eq!(all[0]["updated_at"], "2027-01-15T08:00:00Z");
+        // As for agent sessions, a chat never updated has no updated_at; it is
+        // ordered by its created_at, as the table's UPDATED column shows it.
+        assert_eq!(all[0]["updated_at"], Value::Null);
+        assert_eq!(all[0]["created_at"], "2027-01-15T08:00:00Z");
         assert_eq!(all[1]["updated_at"], "2023-11-14T22:21:40Z");
         // Transcript-only agent sessions have no timestamps and sort last.
         assert_eq!(all[2]["updated_at"], Value::Null);
