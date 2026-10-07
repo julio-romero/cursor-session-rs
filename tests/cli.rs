@@ -1120,6 +1120,41 @@ fn notices_print_without_verbose() {
     assert_eq!(err.lines().count(), 1, "{err}");
 }
 
+/// Paths that hold a line break, in warnings, the verbose path lines and the
+/// healthcheck report, stay on their own line.
+#[cfg(unix)]
+#[test]
+fn line_breaks_in_paths_cannot_start_lines_of_their_own() {
+    let fixture = Fixture::new();
+    let cursor = fixture.home().join("home\nerror: forged").join(".cursor");
+    let session = cursor.join("chats").join("ws").join("s1\nerror: forged");
+    write(&session.join("meta.json"), "{not json");
+
+    let output = fixture
+        .cmd()
+        .args(["-v", "list", "--json", "--storage"])
+        .arg(&cursor)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let err = stderr(&output);
+    let prefixes = ["chats: ", "projects: ", "ide db: ", "warning: "];
+    assert_eq!(err.lines().count(), 4, "{err}");
+    for line in err.lines() {
+        assert!(prefixes.iter().any(|p| line.starts_with(p)), "{err}");
+    }
+
+    let output = fixture
+        .cmd()
+        .args(["healthcheck", "--storage"])
+        .arg(&cursor)
+        .output()
+        .unwrap();
+    let out = stdout(&output);
+    assert!(out.contains("agent chats: "), "{out}");
+    assert!(!out.lines().any(|line| line.starts_with("error")), "{out}");
+}
+
 const ESCAPE_A: &str = "e5c00000-0000-4000-8000-00000000000a";
 const ESCAPE_B: &str = "e5c00000-0000-4000-8000-00000000000b";
 
