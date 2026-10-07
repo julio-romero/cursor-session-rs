@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -45,6 +46,26 @@ pub fn export_path(out_dir: &Path, session: &Session, format: Format) -> PathBuf
     out_dir.join(format!("{}.{}", file_stem(&session.id), format.extension()))
 }
 
+/// The export paths of one run, as [`export_path`] gives them, except that a
+/// session whose file name differs only in case from one given before gets
+/// the name of an ID that is not plain: macOS and Windows would otherwise
+/// write both sessions to one file.
+#[derive(Debug, Default)]
+pub struct ExportPaths {
+    taken: HashSet<String>,
+}
+
+impl ExportPaths {
+    pub fn next(&mut self, out_dir: &Path, session: &Session, format: Format) -> PathBuf {
+        let mut stem = file_stem(&session.id);
+        if !self.taken.insert(stem.to_lowercase()) {
+            stem = Cow::Owned(hashed_stem(&session.id));
+            self.taken.insert(stem.to_lowercase());
+        }
+        out_dir.join(format!("{stem}.{}", format.extension()))
+    }
+}
+
 /// The session ID when it is a plain file name on every OS: ASCII letters,
 /// digits, `-`, `_` and `.`, not starting with `.` and not a Windows device
 /// name. In other IDs, which only a crafted or damaged database holds, every
@@ -60,6 +81,12 @@ fn file_stem(id: &str) -> Cow<'_, str> {
     {
         return Cow::Borrowed(id);
     }
+    Cow::Owned(hashed_stem(id))
+}
+
+/// `id` with every character but letters, digits and `-` as `_`, cut to
+/// [`MAX_PLAIN_STEM`], and a hash of the whole ID appended.
+fn hashed_stem(id: &str) -> String {
     let kept = |c: char| c.is_ascii_alphanumeric() || c == '-';
     let mut stem: String = id
         .chars()
@@ -70,7 +97,7 @@ fn file_stem(id: &str) -> Cow<'_, str> {
     for byte in &Md5::digest(id.as_bytes())[..6] {
         stem.push_str(&format!("{byte:02x}"));
     }
-    Cow::Owned(stem)
+    stem
 }
 
 /// `CON`, `NUL.txt`, `com1` and the like, which Windows opens as devices.
@@ -149,6 +176,38 @@ mod tests {
         ] {
             assert_eq!(file_stem(id), id);
         }
+    }
+
+    #[test]
+    fn ids_that_differ_only_in_case_get_their_own_files() {
+        let session = |id: &str| Session {
+            id: id.to_string(),
+            title: String::new(),
+            source: crate::model::Source::Ide,
+            workspace: None,
+            workspace_hash: None,
+            created_at_ms: None,
+            updated_at_ms: None,
+            model: None,
+            messages: Vec::new(),
+        };
+        let out = Path::new("out");
+        let mut paths = ExportPaths::default();
+        let names: Vec<String> = ["abcdef00-01", "ABCDEF00-01", "Other", "abcdef00-01"]
+            .into_iter()
+            .map(|id| {
+                let path = paths.next(out, &session(id), Format::Md);
+                assert_eq!(path.parent(), Some(out));
+                path.file_name().unwrap().to_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(names[0], "abcdef00-01.md");
+        assert_eq!(names[1], format!("{}.md", hashed_stem("ABCDEF00-01")));
+        assert_eq!(names[2], "Other.md");
+        let mut lowercase: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+        lowercase.sort();
+        lowercase.dedup();
+        assert_eq!(lowercase.len(), 4);
     }
 
     #[test]

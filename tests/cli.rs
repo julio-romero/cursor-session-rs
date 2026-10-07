@@ -840,6 +840,23 @@ fn export_writes_one_file_per_session_in_every_format() {
 }
 
 #[test]
+fn export_out_expands_a_leading_tilde() {
+    let fixture = standard();
+    // Shells leave a `~` after `=` as it is.
+    let out = ok(
+        &fixture,
+        &["export", "--session-id", "F4EE", "--out=~/tilde"],
+    );
+    let dir = fixture.home().join("tilde");
+    assert_eq!(
+        out,
+        format!("wrote {}\n", dir.join(format!("{AGENT_ID}.md")).display())
+    );
+    assert_eq!(exported_files(&dir), [format!("{AGENT_ID}.md")]);
+    assert!(!fixture.home().join("~").exists());
+}
+
+#[test]
 fn export_selects_by_id_workspace_and_source() {
     let fixture = standard();
     let out = ok(

@@ -361,6 +361,12 @@ fn existing_dir(path: PathBuf) -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
+/// `path` with a leading `~` or `~/` replaced by the home directory, as for
+/// `--storage`, for options that a shell leaves unexpanded (`--out=~/x`).
+pub fn expand_home(path: &Path) -> Result<PathBuf> {
+    expand_tilde(path, None)
+}
+
 fn expand_tilde(path: &Path, home: Option<&Path>) -> Result<PathBuf> {
     let Some(rest) = path.to_str().and_then(|s| s.strip_prefix('~')) else {
         return Ok(path.to_path_buf());

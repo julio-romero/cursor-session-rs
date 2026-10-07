@@ -4,7 +4,7 @@ use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use cursor_session::detect::{Env, StoragePaths};
+use cursor_session::detect::{self, Env, StoragePaths};
 use cursor_session::export::{self, Format};
 use cursor_session::model::{self, Session, SessionSummary, Source};
 use cursor_session::ui;
@@ -159,13 +159,15 @@ fn cmd_export(
         }
         bail!("no sessions to export");
     }
-    fs::create_dir_all(&args.out)
-        .with_context(|| format!("could not create {}", args.out.display()))?;
+    let out_dir = detect::expand_home(&args.out)?;
+    fs::create_dir_all(&out_dir)
+        .with_context(|| format!("could not create {}", out_dir.display()))?;
     // The files are the result and the `wrote` lines only report progress, so
     // a reader that goes away (`| head`) stops the lines, not the export.
     let mut progress = true;
+    let mut paths = export::ExportPaths::default();
     for session in selected {
-        let path = export::export_path(&args.out, session, args.format);
+        let path = paths.next(&out_dir, session, args.format);
         write_export(session, args.format, &path)
             .with_context(|| format!("could not write {}", path.display()))?;
         if progress && let Err(error) = writeln!(out, "wrote {}", path.display()) {

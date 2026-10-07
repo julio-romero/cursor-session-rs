@@ -173,11 +173,13 @@ cursor-session export --format yaml --source ide
 ```
 
 Each session is written to `<out>/<session-id>.<ext>`, one `wrote <path>` line
-per file. `--out` defaults to `exports` and is created if missing. Existing
-files are overwritten. A session ID that is not a plain file name, which only a
-damaged or crafted database holds, is written under a name made from it plus a
-short hash, so every file stays inside `<out>`. If the `wrote` lines go to a
-reader that stops early (`| head`), every file is still written.
+per file. `--out` defaults to `exports` and is created if missing; a leading `~`
+is expanded. Existing files are overwritten. A session ID that is not a plain
+file name, which only a damaged or crafted database holds, is written under a
+name made from it plus a short hash, so every file stays inside `<out>`. So is
+an ID that differs only in case from one exported before it, since macOS and
+Windows would take both names for one file. If the `wrote` lines go to a reader
+that stops early (`| head`), every file is still written.
 
 | `--format`     | Contents                                                                                                |
 | -------------- | ------------------------------------------------------------------------------------------------------- |
