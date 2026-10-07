@@ -1,0 +1,43 @@
+---
+source: tests/snapshots.rs
+expression: rendered
+---
+Found 7 session(s)
+
+┌───────┬───────┬──────┬───────┬───────┐
+│ ID    ┆ SOURC ┆ MSGS ┆ UPDAT ┆ TITLE │
+│       ┆ E     ┆      ┆ ED    ┆       │
+╞═══════╪═══════╪══════╪═══════╪═══════╡
+│ 5ba7e ┆ agent ┆ 2    ┆ 2025- ┆ Share │
+│ d00   ┆       ┆      ┆ 09-09 ┆ d ses │
+│       ┆       ┆      ┆ 06:42 ┆ sion  │
+│       ┆       ┆      ┆       ┆ …     │
+│ d00df ┆ ide   ┆ 2    ┆ 2025- ┆ デー  │
+│ eed   ┆       ┆      ┆ 09-09 ┆ タパ  │
+│       ┆       ┆      ┆ 02:53 ┆ イプ  │
+│       ┆       ┆      ┆       ┆ ライ  │
+│       ┆       ┆      ┆       ┆ ンの  │
+│       ┆       ┆      ┆       ┆ 再設  │
+│       ┆       ┆      ┆       ┆ 計レ  │
+│       ┆       ┆      ┆       ┆ ビ…   │
+│ e1e10 ┆ ide   ┆ 0    ┆ 2025- ┆ Untit │
+│ 000   ┆       ┆      ┆ 09-07 ┆ led   │
+│       ┆       ┆      ┆ 13:00 ┆       │
+│ c0ffe ┆ ide   ┆ 3    ┆ 2025- ┆ Dynam │
+│ e00   ┆       ┆      ┆ 09-07 ┆ ic    │
+│       ┆       ┆      ┆ 00:06 ┆ table │
+│       ┆       ┆      ┆       ┆ p…    │
+│ 7b1e0 ┆ agent ┆ 2    ┆ 2025- ┆ Fix   │
+│ c55   ┆       ┆      ┆ 09-05 ┆ flaky │
+│       ┆       ┆      ┆ 19:20 ┆ CI    │
+│       ┆       ┆      ┆       ┆ on…   │
+│ f4eea ┆ agent ┆ 4    ┆ 2025- ┆ Langf │
+│ 6d2   ┆       ┆      ┆ 09-04 ┆ use   │
+│       ┆       ┆      ┆ 16:33 ┆ Seman │
+│       ┆       ┆      ┆       ┆ t…    │
+│ 0a1b2 ┆ agent ┆ 2    ┆ —     ┆ 0a1b2 │
+│ c3d   ┆       ┆      ┆       ┆ c3d-4 │
+│       ┆       ┆      ┆       ┆ e5f-4 │
+│       ┆       ┆      ┆       ┆ …     │
+└───────┴───────┴──────┴───────┴───────┘
+IDs shortened to 8 chars; `show` accepts a prefix.

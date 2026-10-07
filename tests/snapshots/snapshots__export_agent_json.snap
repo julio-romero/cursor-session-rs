@@ -1,0 +1,33 @@
+---
+source: tests/snapshots.rs
+expression: "String::from_utf8(out).unwrap()"
+---
+{
+  "id": "f4eea6d2-d2d3-41ad-b290-824445295a15",
+  "title": "Langfuse Semantic Layer",
+  "source": "agent",
+  "workspace": "/Users/demo/project-x",
+  "workspace_hash": "beba428e99a69c4ecef285b898662cd3",
+  "created_at_ms": 1757000000000,
+  "updated_at_ms": 1757003600000,
+  "model": "claude-4.5-sonnet",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Design a semantic layer for Langfuse traces.",
+      "timestamp": "Thursday, Sep 4, 2025, 9:33 AM (UTC-6)"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me look at the trace schema first."
+    },
+    {
+      "role": "user",
+      "content": "Keep it read-only."
+    },
+    {
+      "role": "assistant",
+      "content": "Here is the plan:\n1. Model traces as facts.\n2. Expose metrics."
+    }
+  ]
+}

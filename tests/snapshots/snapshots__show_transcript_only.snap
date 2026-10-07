@@ -1,0 +1,16 @@
+---
+source: tests/snapshots.rs
+expression: rendered
+---
+0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e
+id:        0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e
+source:    agent
+created:   —
+updated:   —
+messages:  2
+
+[user]
+Summarize yesterday's changes.
+
+[assistant]
+Nothing changed yesterday.

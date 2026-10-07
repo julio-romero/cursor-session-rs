@@ -6,6 +6,7 @@ use std::path::Path;
 use rusqlite::Connection;
 use rusqlite::types::ValueRef;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::detect::StoragePaths;
@@ -112,7 +113,7 @@ fn read_sessions(
 
     let mut bubble_map: HashMap<String, Bubble> = HashMap::new();
     let skipped = read_rows(conn, db_path, "bubbleId:", |key, value| {
-        let Ok(bubble) = serde_json::from_str::<Bubble>(value) else {
+        let Some(bubble) = parse_object::<Bubble>(value) else {
             return false;
         };
         let id = bubble
@@ -128,7 +129,7 @@ fn read_sessions(
 
     let mut sessions = Vec::new();
     let skipped = read_rows(conn, db_path, "composerData:", |key, value| {
-        let Ok(composer) = serde_json::from_str::<Composer>(value) else {
+        let Some(composer) = parse_object::<Composer>(value) else {
             return false;
         };
         let id = composer
@@ -229,6 +230,15 @@ fn as_text(value: rusqlite::Result<ValueRef<'_>>) -> Option<&str> {
         ValueRef::Text(bytes) | ValueRef::Blob(bytes) => std::str::from_utf8(bytes).ok(),
         _ => None,
     }
+}
+
+/// Parses a JSON object. serde would also fill a struct from a JSON array, by
+/// field position.
+fn parse_object<T: DeserializeOwned>(json: &str) -> Option<T> {
+    if !json.trim_start().starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(json).ok()
 }
 
 fn warn_skipped(warnings: &mut Vec<String>, skipped: usize, kind: &str, db_path: &Path) {

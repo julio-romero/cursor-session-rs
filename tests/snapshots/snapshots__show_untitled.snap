@@ -1,0 +1,10 @@
+---
+source: tests/snapshots.rs
+expression: rendered
+---
+Untitled
+id:        e1e10000-5555-4666-8777-888899990000
+source:    ide
+created:   2025-09-07 13:00
+updated:   2025-09-07 13:00
+messages:  0

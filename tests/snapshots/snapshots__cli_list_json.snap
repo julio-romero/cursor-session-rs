@@ -1,0 +1,83 @@
+---
+source: tests/snapshots.rs
+expression: "cli_stdout(&fixture, &[\"list\", \"--json\"])"
+---
+[
+  {
+    "id": "5ba7ed00-1111-4222-8333-444455556666",
+    "title": "Shared session from the agent",
+    "source": "agent",
+    "workspace": "/Users/demo/project-y",
+    "workspace_hash": "b963e3698df5879fcc30b494ac971419",
+    "model": null,
+    "created_at": "2025-09-09T06:40:00Z",
+    "updated_at": "2025-09-09T06:42:00Z",
+    "message_count": 2
+  },
+  {
+    "id": "d00dfeed-0000-4000-8000-000000000002",
+    "title": "データパイプラインの再設計レビュー 🚀 — überprüfe den Migrationsplan für Q4 und die Rollback-Strategie (ünïcödé ✓)",
+    "source": "ide",
+    "workspace": null,
+    "workspace_hash": null,
+    "model": null,
+    "created_at": "2025-09-08T02:53:20Z",
+    "updated_at": "2025-09-09T02:53:20Z",
+    "message_count": 2
+  },
+  {
+    "id": "e1e10000-5555-4666-8777-888899990000",
+    "title": "Untitled",
+    "source": "ide",
+    "workspace": null,
+    "workspace_hash": null,
+    "model": null,
+    "created_at": "2025-09-07T13:00:00Z",
+    "updated_at": "2025-09-07T13:00:00Z",
+    "message_count": 0
+  },
+  {
+    "id": "c0ffee00-0000-4000-8000-000000000001",
+    "title": "Dynamic table proposal",
+    "source": "ide",
+    "workspace": null,
+    "workspace_hash": null,
+    "model": null,
+    "created_at": "2025-09-06T23:06:40Z",
+    "updated_at": "2025-09-07T00:06:40Z",
+    "message_count": 3
+  },
+  {
+    "id": "7b1e0c55-9d2a-4c4e-8f61-2a3b4c5d6e7f",
+    "title": "Fix flaky CI on Windows",
+    "source": "agent",
+    "workspace": null,
+    "workspace_hash": "b963e3698df5879fcc30b494ac971419",
+    "model": "gpt-5",
+    "created_at": "2025-09-05T19:20:00Z",
+    "updated_at": null,
+    "message_count": 2
+  },
+  {
+    "id": "f4eea6d2-d2d3-41ad-b290-824445295a15",
+    "title": "Langfuse Semantic Layer",
+    "source": "agent",
+    "workspace": "/Users/demo/project-x",
+    "workspace_hash": "beba428e99a69c4ecef285b898662cd3",
+    "model": "claude-4.5-sonnet",
+    "created_at": "2025-09-04T15:33:20Z",
+    "updated_at": "2025-09-04T16:33:20Z",
+    "message_count": 4
+  },
+  {
+    "id": "0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e",
+    "title": "0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e",
+    "source": "agent",
+    "workspace": null,
+    "workspace_hash": null,
+    "model": null,
+    "created_at": null,
+    "updated_at": null,
+    "message_count": 2
+  }
+]

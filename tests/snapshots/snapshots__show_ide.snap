@@ -1,0 +1,25 @@
+---
+source: tests/snapshots.rs
+expression: rendered
+---
+Dynamic table proposal
+id:        c0ffee00-0000-4000-8000-000000000001
+source:    ide
+created:   2025-09-06 23:06
+updated:   2025-09-07 00:06
+messages:  3
+
+[user (1757200000000)]
+Replace this view with a dynamic table.
+
+[assistant (1757200060000)]
+Here is a plan.
+
+[assistant]
+Use this component:
+
+```tsx
+export function Table() {
+  return null;
+}
+```
