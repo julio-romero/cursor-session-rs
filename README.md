@@ -98,7 +98,9 @@ e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46  ide         3  2026-10-04 16:48  Speed up 
 - `UPDATED` is in UTC. A session with no stored update time shows its creation time.
 - With no sessions, `list` prints `No sessions found` and exits 0.
 - In a terminal, control characters and escape sequences in stored titles and
-  messages are removed before printing. Piped output is written as stored.
+  messages are removed before printing. The exception is `show` with color on:
+  it keeps color and style codes and resets them at the end of each line.
+  Piped output is written as stored.
 
 ### Filter by source and count
 
@@ -171,7 +173,7 @@ files are overwritten.
 | -------------- | ------------------------------------------------------------------------------------------------------- |
 | `md` (default) | Title, a metadata list, then every message                                                              |
 | `json`         | The session object: `id`, `title`, `source`, `workspace`, `workspace_hash`, `created_at_ms`, `updated_at_ms`, `model`, `messages`. Missing values are left out. |
-| `jsonl`        | One message per line: `role`, `content`, `timestamp`                                                    |
+| `jsonl`        | One message per line: `role`, `content`, `timestamp`. A missing `timestamp` is left out.                |
 | `yaml`         | The same fields as `json`                                                                               |
 
 - `--session-id` takes an ID or a unique prefix.
@@ -225,7 +227,9 @@ load; the report then includes the reason.
 
 ### Global flags
 
-Global flags work before or after the subcommand.
+`--storage`, `-v`/`--verbose` and `--color` work before or after the subcommand.
+`-V`/`--version` works only before it, and `-h`/`--help` after a subcommand
+prints that subcommand's options.
 
 | Flag                          | Effect                                                                                               |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
@@ -251,8 +255,10 @@ NO_COLOR=1 cursor-session list
 with its messages.
 
 - Written to stdout, pretty-printed with two-space indentation and a trailing
-  newline. Never colored or fitted to the terminal; the same in a terminal and
-  in a pipe.
+  newline. No color is added and nothing is fitted to the terminal.
+- JSON escapes most control characters. The ones it leaves as is (DEL and
+  U+0080 to U+009F) go through the terminal filter that `show` uses when stdout
+  is a terminal; pipe or redirect the output to get them unchanged.
 - `list --json` keeps the list order (most recently updated first) and applies
   `--source` and `--limit`. No sessions gives `[]`.
 - `show --json` includes every message, also in a terminal, unless `--limit N`
@@ -389,8 +395,9 @@ home directory. A leading `~` is expanded. It accepts:
 | `state.vscdb` (any `*.vscdb` or `*.vscdb.backup` file)                 | IDE sessions only                                             |
 | A directory containing `state.vscdb`: `globalStorage`, `Cursor/User` or `Cursor` | IDE sessions only                                   |
 
-A path that does not exist gives `storage path does not exist`; anything else
-gives `unrecognized storage location`. Both exit 1.
+A path that does not exist gives `storage path does not exist`, a path that
+cannot be read gives `could not access`, and any other path gives
+`unrecognized storage location`. All three exit 1.
 
 ### Read-only access
 
@@ -426,8 +433,9 @@ flag and `PRAGMA query_only`.
   `<user_query>` wrappers around user messages are removed, and the timestamp
   text becomes the message time. `store.db` is only used for metadata (name,
   last model used, creation time); its other blobs are not decoded.
-- IDE messages: the text of each message, followed by its code blocks as fenced
-  code. Messages with no text are skipped.
+- IDE messages: the text of each message, or its rich text when the plain text
+  is empty, followed by its code blocks as fenced code. Messages with neither
+  text nor code blocks are skipped.
 - `show --all` shows all loaded text messages, not the excluded records or
   content that exists only in the databases.
 
@@ -437,7 +445,7 @@ flag and `PRAGMA query_only`.
 | ---- | ----------------------------------------------------------------------------------------------------------- |
 | 0    | Success, including `--help`, `--version`, an empty list, and output cut short by a closed pipe (`cursor-session list \| head`), which prints nothing on stderr |
 | 1    | Runtime error: session not found or ambiguous, unreadable storage, changed storage format, failed healthcheck, nothing to export |
-| 2    | Usage error: unknown command or flag, invalid value (`--limit 0`, `--source web`), `--limit` together with `--all`, missing subcommand |
+| 2    | Usage error: unknown command or flag, invalid value (`list --limit 0`, `--source web`), `--limit` together with `--all`, missing subcommand |
 
 Errors go to stderr as `error: <message>`, then one `caused by:` line per
 underlying cause, then hints:
@@ -475,7 +483,7 @@ rest still loads. `-v` prints the paths in use and a `warning:` line for each
 kind of skipped data:
 
 ```console
-$ cursor-session -v list --source ide
+$ cursor-session -v list --source ide >/dev/null
 chats: /Users/dana/.cursor/chats
 projects: /Users/dana/.cursor/projects
 ide db: /Users/dana/Library/Application Support/Cursor/User/globalStorage/state.vscdb
@@ -508,6 +516,9 @@ snapshot as a `.snap.new` file. To review and accept the changes:
 cargo insta review                        # needs cargo-insta: cargo install cargo-insta
 INSTA_UPDATE=always cargo test --locked   # without cargo-insta: accept all, then check git diff
 ```
+
+`INSTA_UPDATE=always` leaves the `.snap.new` files of earlier runs behind.
+Delete them with `find tests/snapshots -name '*.snap.new' -delete`.
 
 ### Releasing
 
