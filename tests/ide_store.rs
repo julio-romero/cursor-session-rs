@@ -316,6 +316,43 @@ fn changed_row_formats() -> Vec<(Vec<(String, SqlValue)>, &'static str)> {
                 .collect(),
             "none of its 2 chats that list messages has a readable message",
         ),
+        // The chats are kept under a key this version does not know.
+        (
+            ["p1", "p2"]
+                .into_iter()
+                .flat_map(|id| {
+                    [
+                        (
+                            format!("composer:{id}"),
+                            Stored::Text.value(&composer_json(id, "Moved", 1, 1, &[("b1", 1)])),
+                        ),
+                        bubble(id, "b1", &text_bubble("b1", 1, "hello"), Stored::Text),
+                    ]
+                })
+                .collect(),
+            "none of its 2 bubbleId rows belongs to a composerData row",
+        ),
+        // Who wrote a message is kept in a field this version does not know.
+        (
+            vec![
+                composer(
+                    "y1",
+                    &json!({"composerId": "y1", "fullConversationHeadersOnly": [
+                        {"bubbleId": "b1", "role": 1},
+                        {"bubbleId": "b2", "role": 2},
+                    ]}),
+                    Stored::Text,
+                ),
+                bubble("y1", "b1", &json!({"role": 1, "text": "hi"}), Stored::Text),
+                bubble(
+                    "y1",
+                    "b2",
+                    &json!({"role": 2, "text": "hello"}),
+                    Stored::Text,
+                ),
+            ],
+            "none of its 2 messages has a known type",
+        ),
     ]
 }
 
@@ -417,6 +454,57 @@ fn odd_field_types_cost_only_those_fields() {
         sessions[4].messages[0].timestamp.as_deref(),
         Some("2023-11-14T22:13:20.000Z")
     );
+}
+
+#[test]
+fn message_types_may_be_named_and_unknown_ones_are_reported() {
+    let fixture = Fixture::new();
+    let chat = |id: &str, kinds: [serde_json::Value; 2]| {
+        let headers: Vec<_> = ["b1", "b2"]
+            .into_iter()
+            .map(|bubble_id| json!({"bubbleId": bubble_id}))
+            .collect();
+        let json = json!({"composerId": id, "fullConversationHeadersOnly": headers});
+        let [first, second] = kinds;
+        [
+            composer(id, &json, Stored::Text),
+            bubble(
+                id,
+                "b1",
+                &json!({"type": first, "text": "question"}),
+                Stored::Text,
+            ),
+            bubble(
+                id,
+                "b2",
+                &json!({"type": second, "text": "answer"}),
+                Stored::Text,
+            ),
+        ]
+    };
+    let rows: Vec<_> = [
+        chat("named", [json!("user"), json!("assistant")]),
+        chat("unknown", [json!("human"), json!(3)]),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let db = fixture.write_ide_db(Journal::Delete, &rows);
+    let (sessions, warnings) = load_db(&db);
+    assert_eq!(
+        warnings,
+        [format!(
+            "2 message(s) in {} have an unknown type",
+            db.display()
+        )]
+    );
+    let mut sessions = sessions.unwrap();
+    sessions.sort_by(|a, b| a.id.cmp(&b.id));
+    let roles: Vec<Vec<&str>> = sessions
+        .iter()
+        .map(|s| s.messages.iter().map(|m| m.role.as_str()).collect())
+        .collect();
+    assert_eq!(roles, [["user", "assistant"], ["user", "assistant"]]);
 }
 
 #[test]

@@ -42,8 +42,8 @@ struct Composer {
 struct ConversationHeader {
     #[serde(default, deserialize_with = "lenient")]
     bubble_id: Option<String>,
-    #[serde(rename = "type", default, deserialize_with = "lenient")]
-    kind: Option<i64>,
+    #[serde(rename = "type", default, deserialize_with = "kind")]
+    kind: Option<Kind>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,10 +57,21 @@ struct Bubble {
     rich_text: Option<String>,
     #[serde(default, deserialize_with = "timestamp")]
     timestamp: Option<String>,
-    #[serde(rename = "type", default, deserialize_with = "lenient")]
-    kind: Option<i64>,
+    #[serde(rename = "type", default, deserialize_with = "kind")]
+    kind: Option<Kind>,
     #[serde(default, deserialize_with = "lenient")]
     code_blocks: Vec<CodeBlock>,
+}
+
+/// Who wrote a message, from its `type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// 1, or `"user"`.
+    User,
+    /// 2, or `"assistant"`.
+    Assistant,
+    /// Any other number.
+    Other,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -79,6 +90,20 @@ where
 {
     let value = Value::deserialize(deserializer)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+/// A message `type`: `None` when it is neither a number nor a known name.
+fn kind<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<Kind>, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Number(n) => Some(match n.as_i64() {
+            Some(1) => Kind::User,
+            Some(2) => Kind::Assistant,
+            _ => Kind::Other,
+        }),
+        Value::String(name) if name == "user" => Some(Kind::User),
+        Value::String(name) if name == "assistant" => Some(Kind::Assistant),
+        _ => None,
+    })
 }
 
 /// Epoch milliseconds, also with a fraction (`performance.now()` based) or
@@ -191,6 +216,8 @@ fn read_sessions(
     let (mut stored, mut unlinked) = (0, 0);
     // Chats that list messages, and those of them with a message to show.
     let (mut listing, mut shown) = (0, 0);
+    // Messages shown without a known type.
+    let mut untyped = 0;
     let skipped = read_rows(conn, db_path, "composerData:", |key, value| {
         let Some(composer) = parse_object::<Composer>(value) else {
             return false;
@@ -214,7 +241,7 @@ fn read_sessions(
         // Each chat takes its messages, so their text is not held twice.
         let chat_bubbles = bubbles.remove(&id);
         let has_stored = chat_bubbles.is_some();
-        let (session, linked) = composer_session(id, composer, chat_bubbles);
+        let (session, linked) = composer_session(id, composer, chat_bubbles, &mut untyped);
         if has_stored {
             stored += 1;
             unlinked += usize::from(!linked);
@@ -227,8 +254,9 @@ fn read_sessions(
         true
     })?;
 
-    // Rows that are all unreadable, or chats that all lead to none of their
-    // messages, mean the format changed rather than that there is nothing.
+    // Rows that are all unreadable, messages without a chat or a type, or
+    // chats that all lead to none of their messages, mean the format changed
+    // rather than that there is nothing.
     let mismatch = |detail| Error::SchemaMismatch {
         store: Source::Ide,
         path: db_path.to_path_buf(),
@@ -238,6 +266,12 @@ fn read_sessions(
         return Err(mismatch(match skipped {
             1 => "its composerData row could not be read".to_string(),
             _ => format!("none of its {skipped} composerData rows could be read"),
+        }));
+    }
+    if sessions.is_empty() && read > 0 {
+        return Err(mismatch(match read {
+            1 => "its bubbleId row belongs to no composerData row".to_string(),
+            _ => format!("none of its {read} bubbleId rows belongs to a composerData row"),
         }));
     }
     if read == 0 && skipped_bubbles > 0 {
@@ -257,11 +291,24 @@ fn read_sessions(
             _ => format!("none of its {listing} chats that list messages has a readable message"),
         }));
     }
+    let messages: usize = sessions.iter().map(|session| session.messages.len()).sum();
+    if untyped > 0 && untyped == messages {
+        return Err(mismatch(match messages {
+            1 => "its one message has no known type".to_string(),
+            _ => format!("none of its {messages} messages has a known type"),
+        }));
+    }
     warn_skipped(warnings, skipped_bubbles, "message", db_path);
     warn_skipped(warnings, skipped, "composer", db_path);
     if unlinked > 0 {
         warnings.push(format!(
             "{unlinked} chat(s) in {} list none of their stored messages",
+            db_path.display()
+        ));
+    }
+    if untyped > 0 {
+        warnings.push(format!(
+            "{untyped} message(s) in {} have an unknown type",
             db_path.display()
         ));
     }
@@ -393,10 +440,12 @@ fn warn_skipped(warnings: &mut Vec<String>, skipped: usize, kind: &str, db_path:
 /// The session for `composer`, and whether its conversation led to any
 /// message: one of `bubbles`, its stored messages, or one kept inline, as
 /// older Cursor versions did for composers without conversation headers.
+/// Messages without a known type are counted in `untyped`.
 fn composer_session(
     id: String,
     composer: Composer,
     mut bubbles: Option<HashMap<String, Bubble>>,
+    untyped: &mut usize,
 ) -> (Session, bool) {
     let mut messages = Vec::new();
     let mut linked = false;
@@ -407,14 +456,14 @@ fn composer_session(
             .and_then(|bubble_id| bubbles.as_mut()?.remove(bubble_id));
         if let Some(bubble) = bubble {
             linked = true;
-            messages.extend(message(header.kind.or(bubble.kind), bubble));
+            messages.extend(message(header.kind.or(bubble.kind), bubble, untyped));
         }
     }
     if composer.full_conversation_headers_only.is_empty() {
         for value in composer.conversation {
             if let Ok(bubble) = serde_json::from_value::<Bubble>(value) {
                 linked = true;
-                messages.extend(message(bubble.kind, bubble));
+                messages.extend(message(bubble.kind, bubble, untyped));
             }
         }
     }
@@ -436,16 +485,19 @@ fn composer_session(
     (session, linked)
 }
 
-/// A message from `bubble`, unless it has no text or code.
-fn message(kind: Option<i64>, mut bubble: Bubble) -> Option<Message> {
+/// A message from `bubble`, unless it has no text or code. One without a
+/// known `kind` is counted in `untyped`, and goes on as a user's message
+/// when it has no type and as an assistant's when its type is another number.
+fn message(kind: Option<Kind>, mut bubble: Bubble, untyped: &mut usize) -> Option<Message> {
     let timestamp = bubble.timestamp.take();
     let content = extract_bubble_text(bubble);
     if content.is_empty() {
         return None;
     }
-    let role = match kind.unwrap_or(1) {
-        1 => "user",
-        _ => "assistant",
+    *untyped += usize::from(!matches!(kind, Some(Kind::User | Kind::Assistant)));
+    let role = match kind {
+        Some(Kind::User) | None => "user",
+        Some(Kind::Assistant | Kind::Other) => "assistant",
     };
     Some(Message {
         role: role.to_string(),

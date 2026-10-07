@@ -507,8 +507,9 @@ run `cursor-session list` to see session IDs
 **Cursor changed its storage format.** If a Cursor update changes the IDE
 database layout, `list`, `show` and `export` stop with an error like this one.
 The same error, with another reason, appears when none of the chat rows or none
-of the message rows can be read, when no chat lists the messages stored for it,
-or when chats list messages but none of them can be read:
+of the message rows can be read, when messages are stored but no chat row is
+found or no chat lists them, when chats list messages but none of them can be
+read, or when no message has a known type (user or assistant):
 
 ```text
 error: unrecognized Cursor IDE storage format in /Users/dana/Library/Application Support/Cursor/User/globalStorage/state.vscdb: table `cursorDiskKV` not found (tables present: ItemTable). Cursor may have changed its storage format.
