@@ -64,7 +64,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub storage: Option<PathBuf>,
 
-    /// Print the storage paths in use and loader warnings to stderr
+    /// Print the storage paths in use and the rows and files that were skipped to stderr
     #[arg(short, long, global = true)]
     pub verbose: bool,
 

@@ -17,6 +17,10 @@ A Rust rewrite of [iksnae/cursor-session](https://github.com/iksnae/cursor-sessi
 brew install julio-romero/tap/cursor-session
 ```
 
+On Linux the binary needs glibc 2.35 or newer (Ubuntu 22.04, Debian 12,
+Fedora 36 or later). On older systems, such as RHEL 9 or Amazon Linux 2023,
+or on musl-based ones such as Alpine, use `cargo install` instead.
+
 ### Shell installer (macOS and Linux)
 
 ```sh
@@ -24,9 +28,11 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/julio-romero/cursor-ses
 ```
 
 The script downloads the binary for your platform (macOS on Apple silicon or
-Intel, Linux on x86_64 or arm64) from the latest GitHub Release and installs it
-to `$CARGO_HOME/bin`, which defaults to `~/.cargo/bin`. If that directory is not
-on your `PATH`, it adds it in your shell profile.
+Intel, Linux on x86_64 or arm64 with glibc 2.35 or newer) from the latest GitHub
+Release and installs it to `$CARGO_HOME/bin`, which defaults to `~/.cargo/bin`.
+If that directory is not on your `PATH`, it adds it in your shell profile. On
+an older glibc the script stops with `no compatible downloads were found for
+your platform`; use `cargo install` there.
 
 To install somewhere else, set `CURSOR_SESSION_INSTALL_DIR`. The binary goes in
 its `bin` subdirectory, so this installs `~/.local/bin/cursor-session`:
@@ -99,7 +105,8 @@ e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46  ide         3  2026-10-04 16:48  Speed up 
 - With no sessions, `list` prints `No sessions found` and exits 0.
 - In a terminal, control characters and escape sequences in stored titles and
   messages are removed before printing. The exception is `show` with color on:
-  it keeps color and style codes and resets them at the end of each line.
+  it keeps color and style codes, except blinking and hidden text, and resets
+  them at the end of each line.
   Piped output is written as stored, so a title that contains a line break
   spans two lines there; `list --json` is exact for scripts.
 
@@ -133,8 +140,8 @@ id:        a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027
 source:    agent
 workspace: /Users/dana/src/billing-api
 model:     claude-4.5-sonnet
-created:   2026-10-05 13:40
-updated:   2026-10-05 14:12
+created:   2026-10-05 13:40 UTC
+updated:   2026-10-05 14:12 UTC
 messages:  4
 
 2 earlier message(s) omitted. Use --limit N or --all to see more.
@@ -153,9 +160,8 @@ Done. `WEBHOOK_MAX_ATTEMPTS` (default 5) is read in `Config::from_env`, and the 
   `--limit N` prints the last N and `--all` prints everything. The two flags
   cannot be combined.
 - `--source agent|ide` works here too.
-- The time next to a message is as Cursor stored it: local-time text for Agent
-  CLI messages and epoch milliseconds for IDE messages. `created` and `updated`
-  are in UTC.
+- The time next to a message is local-time text as the Agent CLI stored it,
+  or for IDE messages a UTC time such as `2026-10-04 16:21 UTC`.
 
 ### Export
 
@@ -182,15 +188,19 @@ reader that stops early (`| head`), every file is still written.
 
 - `--session-id` takes an ID or a unique prefix. It cannot be combined with
   `--workspace`.
-- `--workspace` matches a workspace path, or part of one, or the MD5 hash that
-  names its directory under `~/.cursor/chats`. Only Agent CLI sessions record a
-  workspace.
+- `--workspace` takes a workspace path, which also selects the workspaces
+  below it; whole directory names from a path, such as `billing-api` or
+  `src/billing-api`; or the MD5 hash that names its directory under
+  `~/.cursor/chats`. A trailing `/` makes no difference, and `.`, `..` and `~`
+  are resolved first, so `--workspace .` is the current directory. Only Agent
+  CLI sessions record a workspace.
 - An unknown `--session-id` gives `session not found`, a `--workspace` that
   matches nothing gives `no sessions matched`, and no sessions at all gives
   `no sessions to export`. A file or directory that cannot be written gives
   `could not write <path>` or `could not create <dir>` with the reason. All exit 1.
 - Exports contain the stored text unchanged. Times in `json` and `yaml` exports
   are epoch milliseconds; this is not the `--json` format described below.
+  Markdown exports show times like `show` does.
 
 ```console
 $ cursor-session export --session-id 3f9c
@@ -202,8 +212,8 @@ $ head -n 15 exports/3f9c2a71-8b4e-4d6a-9e15-7c0b2d4f8a63.md
 - **Source:** agent
 - **Workspace:** /Users/dana/src/invoice-service
 - **Model:** gpt-5
-- **Created:** 2026-10-02 08:03
-- **Updated:** 2026-10-02 08:31
+- **Created:** 2026-10-02 08:03 UTC
+- **Updated:** 2026-10-02 08:31 UTC
 - **Messages:** 3
 
 ---
@@ -229,10 +239,11 @@ ide db: /Users/dana/Library/Application Support/Cursor/User/globalStorage/state.
 sessions loaded: 4 (agent: 2, ide: 2)
 ```
 
-It shows each location it found, with `(ok)` or `(failed)`, or `not found`. It
-exits 1 when no storage is found at all, or when a store that was found fails to
-load; the report then includes the reason and what to do about it. When rows or
-files were skipped, a `load warnings: N` line says so; `-v` lists them.
+It shows each location it found, with `(ok)` or `(failed)`, or `not found` and
+the paths it looked in. It exits 1 when no storage is found at all, or when a
+store that was found fails to load; the report then includes the reason and what
+to do about it. When rows or files were skipped, a `load warnings: N` line says
+so; `-v` lists them.
 
 ### Global flags
 
@@ -243,8 +254,8 @@ prints that subcommand's options.
 | Flag                          | Effect                                                                                               |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `--storage <PATH>`            | Read only this location instead of detecting Cursor's data. See `--storage` under "Where it reads data from". |
-| `-v`, `--verbose`             | Print the storage paths in use and loader warnings to stderr.                                        |
-| `--color <auto\|always\|never>` | `auto` (default) colors only a terminal, and only when `NO_COLOR` is unset or empty and `TERM` is not `dumb`. `always` colors even when piped and overrides `NO_COLOR`. `never` prints no color codes. |
+| `-v`, `--verbose`             | Print the storage paths in use and the rows and files that were skipped to stderr.                  |
+| `--color <auto\|always\|never>` | `auto` (default) colors only a terminal, and only when `NO_COLOR` is unset or empty and `TERM` is not `dumb`. `always` colors even when piped and overrides `NO_COLOR`. `never` prints no color codes. Help and usage errors follow the same rules. |
 | `-h`, `--help`                | `-h` prints a summary with examples. `--help` adds the data sources and exit codes.                  |
 | `-V`, `--version`             | Print the version.                                                                                   |
 
@@ -265,8 +276,9 @@ with its messages.
 
 - Written to stdout, pretty-printed with two-space indentation and a trailing
   newline. No color is added and nothing is fitted to the terminal.
-- Every control character in a string, DEL and U+0080 to U+009F included, is
-  escaped as `\u00XX`, so the JSON is the same in a terminal and in a pipe.
+- Control characters in strings are escaped (as `\n`, `\t` or `\u00XX`), and
+  so are DEL and U+0080 to U+009F (as `\u00XX`), so the JSON is the same in a
+  terminal and in a pipe.
 - `list --json` keeps the list order (most recently updated first) and applies
   `--source` and `--limit`. No sessions gives `[]`.
 - `show --json` includes every message, also in a terminal, unless `--limit N`
@@ -375,6 +387,9 @@ $ cursor-session list --json | jq '[.[] | select(.updated_at != null and (.updat
 - The home directory is `HOME` on macOS and Linux and `USERPROFILE` on Windows.
 - Under WSL, the Linux home inside WSL is used. The IDE runs on Windows and is
   not detected; pass `--storage /mnt/c/Users/<you>` to read the Windows side.
+  SQLite cannot share its locks across the WSL boundary, so the database is
+  then read without them: as immutable, or from a copy while Cursor has commits
+  in its `-wal` (see "Read-only access").
 
 The Agent CLI keeps one directory per session:
 
@@ -413,10 +428,12 @@ cursor-session never changes Cursor's data. Every SQLite database it reads
 (`state.vscdb` and each session's `store.db`) is opened with SQLite's read-only
 flag and `PRAGMA query_only`.
 
-A database in rollback-journal mode, SQLite's default, is always read in place
-and creates no files. A read can make Cursor wait briefly to commit, and if the
-database is locked the read waits up to 5 seconds before giving up. A database
-in WAL mode is read depending on the files next to it:
+A database in rollback-journal mode, SQLite's default, is read in place and
+creates no files. A read can make Cursor wait briefly to commit, and if the
+database is locked the read waits up to 5 seconds before giving up. If a crash
+left a journal that must be rolled back, which takes write access, the database
+and its journal are copied to a private temporary directory and rolled back
+there. A database in WAL mode is read depending on the files next to it:
 
 - **While Cursor is running**, the database has `-wal` and `-shm` files next to
   it, even when the `-wal` is empty. cursor-session reads it in place like any
@@ -434,6 +451,18 @@ in WAL mode is read depending on the files next to it:
   This needs free space for the copy in `TMPDIR` (`TMP` on Windows). Starting
   and quitting Cursor once avoids the copy. If cursor-session is killed during
   such a read, its copy stays behind until a later run removes it, an hour on.
+
+A database on a filesystem that another machine or VM serves, such as a network
+share or the Windows drives WSL mounts under `/mnt`, is never read in place,
+because SQLite's locks and its `-shm` do not reach across it: it is read as
+immutable while its journal is empty, and from a copy of it and its journal
+otherwise. If Cursor writes to it during every attempt, the command stops with
+`changed while it was being read`.
+
+One case can still leave files next to the database: when Cursor quits in the
+moment between cursor-session finding it open and starting to read, the read
+creates an empty `-wal` and a `-shm`, which a read-only connection cannot
+remove. Cursor deletes them the next time it opens and closes the database.
 
 ### What is included
 
@@ -462,7 +491,7 @@ in WAL mode is read depending on the files next to it:
 | ---- | ----------------------------------------------------------------------------------------------------------- |
 | 0    | Success, including `--help`, `--version`, an empty list, and output cut short by a closed pipe (`cursor-session list \| head`), which prints nothing on stderr |
 | 1    | Runtime error: session not found or ambiguous, unreadable storage, changed storage format, failed healthcheck, nothing to export |
-| 2    | Usage error: unknown command or flag, invalid value (`list --limit 0`, `--source web`), `--limit` together with `--all`, missing subcommand |
+| 2    | Usage error: unknown command or flag, invalid value (`list --limit 0`, `--source web`, an empty session ID or `--workspace`), `--limit` together with `--all`, missing subcommand |
 
 Errors go to stderr as `error: <message>`, then one `caused by:` line per
 underlying cause, then hints:
@@ -474,8 +503,9 @@ run `cursor-session list` to see session IDs
 
 **Cursor changed its storage format.** If a Cursor update changes the IDE
 database layout, `list`, `show` and `export` stop with an error like this one.
-The same error, with another reason, appears when none of the chat rows can be
-read, or when no chat lists the messages stored for it:
+The same error, with another reason, appears when none of the chat rows or none
+of the message rows can be read, when no chat lists the messages stored for it,
+or when chats list messages but none of them can be read:
 
 ```text
 error: unrecognized Cursor IDE storage format in /Users/dana/Library/Application Support/Cursor/User/globalStorage/state.vscdb: table `cursorDiskKV` not found (tables present: ItemTable). Cursor may have changed its storage format.
@@ -490,6 +520,12 @@ database:
 cursor-session list --source agent
 ```
 
+The Agent CLI gets the same treatment. When transcripts hold lines but none of
+them yields a message, the error reads `unrecognized Cursor Agent CLI storage
+format` and `--source ide` skips those sessions. When no `store.db` can be read
+because its tables or values changed, the sessions still list, under their IDs
+and without a model, and a `warning:` line says so.
+
 Please [open an issue](https://github.com/julio-romero/cursor-session-rs/issues)
 with your Cursor version.
 
@@ -499,7 +535,9 @@ elsewhere, point `--storage` at it. When no location is found at all, `show`
 and `export` stop with `no Cursor session storage found`.
 
 **Sessions or messages missing.** Unreadable rows and files are skipped so the
-rest still loads. `-v` prints the paths in use and a `warning:` line for each
+rest still loads. A location that cannot be read, such as `~/.cursor/chats`
+without permission while the transcripts load, is reported with a `warning:`
+line on every run. `-v` prints the paths in use and a `warning:` line for each
 kind of skipped data:
 
 ```console
@@ -544,7 +582,20 @@ Delete them with `find tests/snapshots -name '*.snap.new' -delete`.
 ### Releasing
 
 Releases are built by [cargo-dist](https://github.com/axodotdev/cargo-dist)
-when a version tag is pushed:
+when a version tag is pushed. Before the first release, once:
+
+- Create the public repository `julio-romero/homebrew-tap` with at least one
+  commit (a README is enough).
+- Add the secret `HOMEBREW_TAP_TOKEN` to this repository: a fine-grained
+  personal access token with Contents read and write access to the tap only.
+- Add the secret `CARGO_REGISTRY_TOKEN`: a crates.io API token with the
+  publish-new and publish-update scopes, from an account with a verified email.
+- Make this repository public. Until then the Homebrew formula and the shell
+  installer download from private releases and fail with 404.
+
+`gh secret list --repo julio-romero/cursor-session-rs` should then show both
+secrets. Without them a tag push still creates the GitHub Release, and then
+the Homebrew and crates.io jobs fail. For each release:
 
 1. Set `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, then
    commit and push to `master`.
