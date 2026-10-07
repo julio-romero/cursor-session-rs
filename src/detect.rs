@@ -165,6 +165,9 @@ impl StoragePaths {
         let paths = if meta.is_file() {
             Self::from_storage_file(&path)
         } else {
+            // Inside a directory that cannot be listed, every location would
+            // look present but unreadable.
+            fs::read_dir(&path).map_err(|source| Error::access(&path, source))?;
             Self::from_storage_dir(&path)
         };
         paths.ok_or(Error::UnsupportedStorage { path })

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -64,44 +64,79 @@ struct TranscriptPart {
     text: Option<String>,
 }
 
+/// Loads the Agent CLI sessions. A location that cannot be read is reported in
+/// `warnings` while the other one loads; when no location that was found can be
+/// read, loading fails, so that this is not mistaken for having no sessions.
 pub fn load_sessions(paths: &StoragePaths, warnings: &mut Vec<String>) -> Result<Vec<Session>> {
     let mut by_id: HashMap<String, Session> = HashMap::new();
     // Below the chats root (one workspace or one session), transcripts only
     // fill in the sessions found there.
     let scoped = paths.chats_dir.is_some() && paths.chats_scope != ChatsScope::All;
+    let mut unreadable = Vec::new();
 
-    if let Some(chats_dir) = &paths.chats_dir {
-        for session in scan_chats(chats_dir, paths.chats_scope, warnings) {
-            by_id.insert(session.id.clone(), session);
-        }
+    let chats = paths.chats_dir.as_deref().and_then(|dir| {
+        let scanned = scan_chats(dir, paths.chats_scope, warnings);
+        readable(dir, scanned, &mut unreadable)
+    });
+    let transcripts = paths.projects_dir.as_deref().and_then(|dir| {
+        let scanned = scan_transcripts(dir, warnings);
+        readable(dir, scanned, &mut unreadable)
+    });
+    let read_any = chats.is_some() || transcripts.is_some();
+    let mut unreadable = unreadable.into_iter();
+    if !read_any && let Some((dir, err)) = unreadable.next() {
+        return Err(Error::access(&dir, err));
+    }
+    for (dir, err) in unreadable {
+        warnings.push(format!("could not read {}: {err}", dir.display()));
     }
 
-    if let Some(projects_dir) = &paths.projects_dir {
-        for (id, messages) in scan_transcripts(projects_dir, warnings) {
-            if let Some(session) = by_id.get_mut(&id) {
-                if session.messages.is_empty() {
-                    session.messages = messages;
-                }
-            } else if !scoped {
-                by_id.insert(
-                    id.clone(),
-                    Session {
-                        title: id.clone(),
-                        id,
-                        source: Source::Agent,
-                        workspace: None,
-                        workspace_hash: None,
-                        created_at_ms: None,
-                        updated_at_ms: None,
-                        model: None,
-                        messages,
-                    },
-                );
+    for session in chats.unwrap_or_default() {
+        by_id.insert(session.id.clone(), session);
+    }
+    for (id, messages) in transcripts.unwrap_or_default() {
+        if let Some(session) = by_id.get_mut(&id) {
+            if session.messages.is_empty() {
+                session.messages = messages;
             }
+        } else if !scoped {
+            by_id.insert(
+                id.clone(),
+                Session {
+                    title: id.clone(),
+                    id,
+                    source: Source::Agent,
+                    workspace: None,
+                    workspace_hash: None,
+                    created_at_ms: None,
+                    updated_at_ms: None,
+                    model: None,
+                    messages,
+                },
+            );
         }
     }
 
     Ok(by_id.into_values().collect())
+}
+
+/// What scanning the location `dir` found, or `None` when `dir` could not be
+/// read, which `unreadable` then records. A location removed since it was
+/// found is not recorded.
+fn readable<T>(
+    dir: &Path,
+    scanned: io::Result<T>,
+    unreadable: &mut Vec<(PathBuf, io::Error)>,
+) -> Option<T> {
+    match scanned {
+        Ok(found) => Some(found),
+        Err(err) => {
+            if err.kind() != io::ErrorKind::NotFound {
+                unreadable.push((dir.to_path_buf(), err));
+            }
+            None
+        }
+    }
 }
 
 /// Files of one kind that could not be read, reported as a single warning.
@@ -135,19 +170,20 @@ impl Unreadable {
     }
 }
 
+fn read_subdirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    Ok(fs::read_dir(dir)?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect())
+}
+
 /// Subdirectories of `dir`. An unreadable `dir` is reported in `warnings`.
 fn subdirs(dir: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
-    match fs::read_dir(dir) {
-        Ok(entries) => entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_dir())
-            .collect(),
-        Err(err) => {
-            warnings.push(format!("could not read {}: {err}", dir.display()));
-            Vec::new()
-        }
-    }
+    read_subdirs(dir).unwrap_or_else(|err| {
+        warnings.push(format!("could not read {}: {err}", dir.display()));
+        Vec::new()
+    })
 }
 
 /// The underlying cause of `err`, for warnings that already name the file.
@@ -163,8 +199,12 @@ fn dir_name(dir: Option<&Path>) -> String {
 }
 
 /// Loads the sessions under `chats_dir`, which is the `scope` part of the
-/// chats tree.
-fn scan_chats(chats_dir: &Path, scope: ChatsScope, warnings: &mut Vec<String>) -> Vec<Session> {
+/// chats tree. Fails only when `chats_dir` itself cannot be read.
+fn scan_chats(
+    chats_dir: &Path,
+    scope: ChatsScope,
+    warnings: &mut Vec<String>,
+) -> io::Result<Vec<Session>> {
     let mut session_dirs = Vec::new();
     match scope {
         ChatsScope::Session => {
@@ -172,12 +212,12 @@ fn scan_chats(chats_dir: &Path, scope: ChatsScope, warnings: &mut Vec<String>) -
         }
         ChatsScope::Workspace => {
             let workspace_hash = dir_name(Some(chats_dir));
-            for dir in subdirs(chats_dir, warnings) {
+            for dir in read_subdirs(chats_dir)? {
                 session_dirs.push((dir, workspace_hash.clone()));
             }
         }
         ChatsScope::All => {
-            for workspace in subdirs(chats_dir, warnings) {
+            for workspace in read_subdirs(chats_dir)? {
                 let workspace_hash = dir_name(Some(&workspace));
                 for dir in subdirs(&workspace, warnings) {
                     session_dirs.push((dir, workspace_hash.clone()));
@@ -194,7 +234,7 @@ fn scan_chats(chats_dir: &Path, scope: ChatsScope, warnings: &mut Vec<String>) -
         .collect();
     meta_files.report(warnings);
     stores.report(warnings);
-    sessions
+    Ok(sessions)
 }
 
 fn load_chat_session(
@@ -360,13 +400,15 @@ fn select_transcript(
     }
 }
 
+/// The messages of each transcript under `projects_dir`, by session ID. Fails
+/// only when `projects_dir` itself cannot be read.
 fn scan_transcripts(
     projects_dir: &Path,
     warnings: &mut Vec<String>,
-) -> HashMap<String, Vec<Message>> {
+) -> io::Result<HashMap<String, Vec<Message>>> {
     let mut candidates = HashMap::new();
     let mut unreadable = Unreadable::new("transcript");
-    for project in subdirs(projects_dir, warnings) {
+    for project in read_subdirs(projects_dir)? {
         let transcripts = project.join("agent-transcripts");
         if !transcripts.is_dir() {
             continue;
@@ -414,10 +456,10 @@ fn scan_transcripts(
         }
     }
     unreadable.report(warnings);
-    candidates
+    Ok(candidates
         .into_iter()
         .map(|(id, candidate)| (id, candidate.messages))
-        .collect()
+        .collect())
 }
 
 fn transcript_path(dir: &Path, id: &str, warnings: &mut Vec<String>) -> Option<PathBuf> {
@@ -753,5 +795,60 @@ mod tests {
             "{}",
             warnings[0]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_locations_fail_only_when_no_other_one_loads() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let chats = dir.path().join("chats");
+        let projects = dir.path().join("projects");
+        write(&chats.join("ws").join("s1").join("meta.json"), "{}");
+        transcript(&projects, "s2");
+        let paths = |chats_dir: &Path| StoragePaths {
+            chats_dir: Some(chats_dir.to_path_buf()),
+            projects_dir: Some(projects.clone()),
+            ..Default::default()
+        };
+        let lock = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        lock(&chats, 0o000);
+        if fs::read_dir(&chats).is_ok() {
+            lock(&chats, 0o755);
+            eprintln!("skipped: permissions are not enforced for this user (root)");
+            return;
+        }
+        let mut warnings = Vec::new();
+        let partial = load_sessions(&paths(&chats), &mut warnings);
+        lock(&projects, 0o000);
+        let failed = load_sessions(&paths(&chats), &mut Vec::new());
+        // A location that is gone holds no sessions; the other one still fails.
+        let gone = load_sessions(&paths(&dir.path().join("gone")), &mut Vec::new());
+        lock(&chats, 0o755);
+        lock(&projects, 0o755);
+
+        let partial = partial.unwrap();
+        assert_eq!(partial.len(), 1);
+        assert_eq!(partial[0].id, "s2");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with(&format!("could not read {}: ", chats.display())));
+        for (result, failing) in [(failed, &chats), (gone, &projects)] {
+            assert!(
+                matches!(&result, Err(Error::Io { path, .. }) if path == failing),
+                "{result:?}"
+            );
+        }
+
+        let gone = dir.path().join("gone");
+        let empty = StoragePaths {
+            chats_dir: Some(gone.clone()),
+            projects_dir: Some(gone),
+            ..Default::default()
+        };
+        assert!(load_sessions(&empty, &mut Vec::new()).unwrap().is_empty());
     }
 }

@@ -223,7 +223,15 @@ fn cmd_healthcheck(
                 sessions.extend(loaded.sessions);
                 warnings.extend(loaded.warnings);
             }
-            Err(error) => failed.push((source, anyhow::Error::from(error))),
+            // The agent store fails with the location check's own error when
+            // none of its locations can be read.
+            Err(error) => {
+                let error = anyhow::Error::from(error);
+                let text = format!("{error:#}");
+                if !failed.iter().any(|(_, seen)| format!("{seen:#}") == text) {
+                    failed.push((source, error));
+                }
+            }
         }
     }
     print_warnings(&warnings, verbose, err)?;
@@ -628,8 +636,11 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let chats = dir.path().join("chats");
-        fs::create_dir(&chats).unwrap();
-        fs::set_permissions(&chats, fs::Permissions::from_mode(0o000)).unwrap();
+        let projects = dir.path().join("projects");
+        for locked in [&chats, &projects] {
+            fs::create_dir(locked).unwrap();
+            fs::set_permissions(locked, fs::Permissions::from_mode(0o000)).unwrap();
+        }
         let readable = fs::read_dir(&chats).is_ok(); // root ignores permissions
         let paths = StoragePaths {
             chats_dir: Some(chats.clone()),
@@ -637,10 +648,25 @@ mod tests {
             ..Default::default()
         };
         let (result, out) = run_args(&paths, &["healthcheck"]);
-        fs::set_permissions(&chats, fs::Permissions::from_mode(0o755)).unwrap();
+        // Neither location readable: each is reported once.
+        let both = StoragePaths {
+            projects_dir: Some(projects.clone()),
+            ..paths.clone()
+        };
+        let (_, both_out) = run_args(&both, &["healthcheck"]);
+        for locked in [&chats, &projects] {
+            fs::set_permissions(locked, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         if readable {
+            eprintln!("skipped: permissions are not enforced for this user (root)");
             return;
         }
+        let failures: Vec<&str> = both_out
+            .lines()
+            .filter(|l| l.contains(" failed: "))
+            .collect();
+        assert_eq!(failures.len(), 2, "{both_out}");
+        assert!(failures[1].contains(&projects.display().to_string()));
 
         assert_eq!(
             result.unwrap_err().to_string(),

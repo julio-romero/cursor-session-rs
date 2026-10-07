@@ -872,6 +872,53 @@ fn storage_reads_only_the_given_location() {
         )));
 }
 
+#[cfg(unix)]
+#[test]
+fn unreadable_agent_storage_is_an_error_not_an_empty_list() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    write_standard_agent(&fixture);
+    let cursor_dir = fixture.home().join(".cursor");
+    let lock = |mode| {
+        fs::set_permissions(&cursor_dir, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    lock(0o000);
+    if fs::read_dir(&cursor_dir).is_ok() {
+        lock(0o755);
+        eprintln!("skipped: permissions are not enforced for this user (root)");
+        return;
+    }
+    let list = run(&fixture, &["list"]);
+    let storage = fixture
+        .cmd()
+        .args(["list", "--storage"])
+        .arg(&cursor_dir)
+        .output()
+        .unwrap();
+    lock(0o755);
+
+    assert_eq!(list.status.code(), Some(1));
+    assert_eq!(stdout(&list), "");
+    assert_eq!(
+        stderr(&list),
+        format!(
+            "error: could not access {}\n  caused by: Permission denied (os error 13)\n",
+            fixture.chats_dir().display()
+        )
+    );
+    // --storage reports the directory it was given.
+    assert_eq!(storage.status.code(), Some(1));
+    assert!(
+        stderr(&storage).starts_with(&format!(
+            "error: could not access {}\n",
+            cursor_dir.canonicalize().unwrap().display()
+        )),
+        "{}",
+        stderr(&storage)
+    );
+}
+
 /// The binary in a pseudo-terminal, through script(1). Windows has no
 /// script(1), and ConPTY would need a new dependency, so these run on Unix.
 #[cfg(unix)]
