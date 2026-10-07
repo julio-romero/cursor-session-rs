@@ -238,8 +238,12 @@ thread_local! {
 /// Whether reading `path` in place cannot rely on SQLite's locks and the
 /// shared memory (`-shm`) of WAL mode. On a filesystem that another machine or
 /// VM may write to at the same time, such as a network share or the Windows
-/// drives WSL mounts, they do not reach across. A read-only filesystem has no
-/// writer to share them with, and SQLite on macOS cannot open a `-shm` there.
+/// drives WSL mounts, they do not reach across. On macOS, SQLite opens a
+/// database on a read-only filesystem without locks and so without a `-shm`,
+/// which a WAL database cannot be read in place without. Elsewhere SQLite reads
+/// such a database in place with a read-only `-shm`, which also keeps it in
+/// step with a writer that reaches the same files through another mount, as a
+/// read-only bind mount into a container does.
 fn is_lockless_fs(path: &Path) -> bool {
     #[cfg(test)]
     if let Some(lockless) = LOCKLESS.get() {
@@ -272,14 +276,15 @@ const SHARED_FS_TYPES: [u32; 19] = [
     0x0000_564C, // NCP
 ];
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn lockless_fs(path: &Path) -> bool {
     c_path(path)
-        .and_then(|path| fs_stat(&path, libc::statfs))
+        .and_then(|path| fs_stat(&path))
         .is_some_and(|stat| is_lockless(&stat))
 }
 
-/// Network filesystems lack `MNT_LOCAL`; read-only ones have `MNT_RDONLY`.
+/// Network filesystems lack `MNT_LOCAL`; read-only ones have `MNT_RDONLY`,
+/// for which SQLite's macOS locking-style finder chooses no locks at all.
 #[cfg(target_os = "macos")]
 fn is_lockless(stat: &libc::statfs) -> bool {
     let flags = stat.f_flags;
@@ -287,21 +292,9 @@ fn is_lockless(stat: &libc::statfs) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn lockless_fs(path: &Path) -> bool {
-    let Some(path) = c_path(path) else {
-        return false;
-    };
-    // `statfs` gives the type and `statvfs` the mount flags.
-    let stat = fs_stat(&path, libc::statfs);
-    let vfs = fs_stat(&path, libc::statvfs);
-    stat.zip(vfs)
-        .is_some_and(|(stat, vfs)| is_lockless(&stat, &vfs))
-}
-
-#[cfg(target_os = "linux")]
-fn is_lockless(stat: &libc::statfs, vfs: &libc::statvfs) -> bool {
+fn is_lockless(stat: &libc::statfs) -> bool {
     // The field's type differs between targets; the magic numbers fit 32 bits.
-    is_shared_fs_type(stat.f_type as u32) || vfs.f_flag & libc::ST_RDONLY != 0
+    is_shared_fs_type(stat.f_type as u32)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -310,15 +303,12 @@ fn c_path(path: &Path) -> Option<std::ffi::CString> {
     std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
 }
 
-/// What `statfs` or `statvfs` reports for `path`.
+/// What `statfs` reports for `path`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn fs_stat<T>(
-    path: &std::ffi::CStr,
-    stat: unsafe extern "C" fn(*const libc::c_char, *mut T) -> libc::c_int,
-) -> Option<T> {
-    let mut buf = std::mem::MaybeUninit::<T>::uninit();
-    // SAFETY: `path` is NUL-terminated and `buf` is valid for writes of a `T`.
-    if unsafe { stat(path.as_ptr(), buf.as_mut_ptr()) } != 0 {
+fn fs_stat(path: &std::ffi::CStr) -> Option<libc::statfs> {
+    let mut buf = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `buf` is valid for writes of a statfs.
+    if unsafe { libc::statfs(path.as_ptr(), buf.as_mut_ptr()) } != 0 {
         return None;
     }
     // SAFETY: the call succeeded, so it filled `buf`.
@@ -1202,19 +1192,27 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn network_and_read_only_mounts_are_lockless() {
-        let mount = |fs_type: u32, flags: libc::c_ulong| {
-            // SAFETY: statfs and statvfs are plain data, for which all zeros is valid.
-            let (mut stat, mut vfs): (libc::statfs, libc::statvfs) =
-                unsafe { (std::mem::zeroed(), std::mem::zeroed()) };
+    fn network_mounts_are_lockless() {
+        let mount = |fs_type: u32| {
+            // SAFETY: statfs is plain data, for which all zeros is valid.
+            let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
             stat.f_type = fs_type as _;
-            vfs.f_flag = flags;
-            is_lockless(&stat, &vfs)
+            is_lockless(&stat)
         };
-        // ext4, 9p (WSL 2's /mnt/c), and ext4 mounted read-only.
-        assert!(!mount(0xEF53, 0));
-        assert!(mount(0x0102_1997, 0));
-        assert!(mount(0xEF53, libc::ST_RDONLY));
+        // ext4, and 9p (WSL 2's /mnt/c).
+        assert!(!mount(0xEF53));
+        assert!(mount(0x0102_1997));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn mounts_are_told_apart_by_what_the_system_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let stat = fs_stat(&c_path(dir.path()).unwrap());
+        assert!(stat.is_some_and(|stat| !is_lockless(&stat)));
+        // macOS mounts its sealed system volume read-only.
+        #[cfg(target_os = "macos")]
+        assert!(is_lockless_fs(Path::new("/")));
     }
 
     #[test]

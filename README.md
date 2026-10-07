@@ -486,10 +486,15 @@ there. A database in WAL mode is read depending on the files next to it:
 A database where SQLite's locks cannot do their job is never read in place. That
 is one on a filesystem that another machine or VM serves, such as a network
 share or the Windows drives WSL mounts under `/mnt`, because the locks and the
-`-shm` of a Cursor on the other side do not reach across it. It is also one on a
-read-only volume, such as a Time Machine backup or a disk image mounted
-read-only, where no Cursor can be writing. Such a database is read as immutable
-while its journal is empty, and from a copy of it and its journal otherwise. On
+`-shm` of a Cursor on the other side do not reach across it. On macOS it is also
+one on a read-only volume, such as a Time Machine backup or a disk image mounted
+read-only, as SQLite there opens such a database without locks and so without
+its `-shm`. Such a database is read as immutable while its journal is empty, and
+from a copy of it and its journal otherwise. On Linux, a database on a
+read-only mount is read like any other: while it has its `-wal` and `-shm`, in
+place with the `-shm` opened read-only, which also keeps up with a Cursor that
+writes it through another mount, such as the host behind a container's
+read-only bind mount. On
 Windows, one on a network path (`\\server\share\...`) is always read from a copy,
 as SQLite cannot open such a path as immutable. If Cursor writes to it during
 every attempt, the command stops with `changed while it was being read`.
