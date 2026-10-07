@@ -166,6 +166,8 @@ struct Unreadable {
     details: Vec<String>,
     /// How many of them hold a format this version does not know.
     unrecognized: usize,
+    /// How many files of this kind held something to read, readable or not.
+    read: usize,
 }
 
 impl Unreadable {
@@ -174,6 +176,7 @@ impl Unreadable {
             kind,
             details: Vec::new(),
             unrecognized: 0,
+            read: 0,
         }
     }
 
@@ -272,16 +275,13 @@ fn scan_chats(
     meta_files.report(warnings);
     // Not one store.db in a format this version knows: rather than a skipped
     // file, the format changed, and names and models are missing throughout.
-    let found = session_dirs
-        .iter()
-        .filter(|(dir, _)| dir.join("store.db").is_file())
-        .count();
-    if stores.unrecognized > 0 && stores.unrecognized == found {
+    if stores.unrecognized > 0 && stores.unrecognized == stores.read {
         notices.push(format!(
-            "unrecognized store.db format in {}: none of its {found} store.db files could be \
-             read ({}); session names and models are left out. Cursor may have changed its \
-             storage format.",
+            "unrecognized store.db format in {}: none of its {} store.db files could be read \
+             ({}); the session names and models they hold are left out. Cursor may \
+             have changed its storage format.",
             chats_dir.display(),
+            stores.read,
             stores.details[0]
         ));
     } else {
@@ -333,7 +333,9 @@ fn load_chat_session(
         messages: Vec::new(),
     };
 
-    match read_store_meta(&store_path) {
+    let store = read_store_meta(&store_path);
+    stores.read += usize::from(!matches!(store, Ok(None)));
+    match store {
         Ok(Some(store_meta)) => {
             if session.title.is_empty()
                 && let Some(name) = store_meta.name
@@ -362,6 +364,7 @@ fn load_chat_session(
     Some(session)
 }
 
+#[derive(Default)]
 struct StoreMeta {
     name: Option<String>,
     model: Option<String>,
@@ -377,12 +380,27 @@ enum StoreError {
 }
 
 /// Reads the optional `meta` row of an agent `store.db`. `Ok(None)` means
-/// there is nothing to read.
+/// there is no database to read: no file, an empty one, or one without
+/// tables, as a session that was never used can leave.
 fn read_store_meta(path: &Path) -> std::result::Result<Option<StoreMeta>, StoreError> {
-    if !path.is_file() {
+    if !fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
         return Ok(None);
     }
     let value = with_readonly(path, |conn| {
+        let db_err = |source| Error::Database {
+            path: path.to_path_buf(),
+            source,
+        };
+        let tables: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        if tables == 0 {
+            return Ok(None);
+        }
         conn.query_row("SELECT value FROM meta WHERE key = '0'", [], |row| {
             Ok(match row.get_ref(0)? {
                 ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Some(bytes.to_vec()),
@@ -390,10 +408,8 @@ fn read_store_meta(path: &Path) -> std::result::Result<Option<StoreMeta>, StoreE
             })
         })
         .optional()
-        .map_err(|source| Error::Database {
-            path: path.to_path_buf(),
-            source,
-        })
+        .map(|value| Some(value.flatten()))
+        .map_err(db_err)
     })
     .map_err(|err| {
         if is_missing_schema(&err) {
@@ -401,10 +417,12 @@ fn read_store_meta(path: &Path) -> std::result::Result<Option<StoreMeta>, StoreE
         } else {
             StoreError::Other(reason(&err))
         }
-    })?
-    .flatten();
+    })?;
     let Some(value) = value else {
         return Ok(None);
+    };
+    let Some(value) = value else {
+        return Ok(Some(StoreMeta::default()));
     };
     let json = decode_meta_json(&value).ok_or_else(|| {
         StoreError::Format("`meta` value is neither JSON nor hex-encoded JSON".to_string())
@@ -997,7 +1015,9 @@ mod tests {
             notice.starts_with(&format!(
                 "unrecognized store.db format in {}: none of its 2 store.db files could be read (",
                 chats.display()
-            )) && notice.contains(": no such table: meta); session names and models are left out."),
+            )) && notice.contains(
+                ": no such table: meta); the session names and models they hold are left out."
+            ),
             "{notice}"
         );
     }

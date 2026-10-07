@@ -642,6 +642,48 @@ fn text_cut_inside_an_emoji_costs_only_that_character() {
 }
 
 #[test]
+fn empty_and_plain_json_store_dbs_load_without_warnings() {
+    let fixture = Fixture::new();
+    let meta = json!({"name": "Plain JSON", "lastUsedModel": "gpt-5", "createdAt": 1});
+    let text = fixture.write_store_db(PROJECT_X, "plain-text", &meta, Stored::Text);
+    fixture.write_store_db(PROJECT_X, "plain-blob", &meta, Stored::Blob);
+    // A session that was never used: an empty file, no tables, or no meta row.
+    write(
+        &fixture
+            .session_dir(PROJECT_X, "zero-bytes")
+            .join("store.db"),
+        "",
+    );
+    let no_tables = fixture.session_dir(PROJECT_X, "no-tables").join("store.db");
+    write_sql_db(
+        &no_tables,
+        "PRAGMA journal_mode = wal; PRAGMA user_version = 1;",
+    );
+    write_sql_db(
+        &fixture.session_dir(PROJECT_X, "no-row").join("store.db"),
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB);",
+    );
+    assert!(fs::metadata(&no_tables).unwrap().len() > 0);
+    assert!(fs::metadata(&text).unwrap().len() > 0);
+
+    let loaded = fixture.load();
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
+    for id in ["plain-text", "plain-blob"] {
+        let session = get(&loaded.sessions, id);
+        assert_eq!(session.title, "Plain JSON");
+        assert_eq!(session.model.as_deref(), Some("gpt-5"));
+    }
+    for id in ["zero-bytes", "no-tables", "no-row"] {
+        let session = get(&loaded.sessions, id);
+        assert_eq!(
+            (session.title.as_str(), session.model.as_deref()),
+            (id, None)
+        );
+    }
+}
+
+#[test]
 fn load_options_default_to_both_stores() {
     let fixture = standard();
     let both = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();

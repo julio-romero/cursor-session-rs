@@ -528,8 +528,10 @@ The Agent CLI gets the same treatment. When transcripts hold lines but none of
 them yields a message, for example because their roles are no longer `user` and
 `assistant`, the error reads `unrecognized Cursor Agent CLI storage
 format` and `--source ide` skips those sessions. When no `store.db` can be read
-because its tables or values changed, the sessions still list, under their IDs
-and without a model, and a `warning:` line says so.
+because its tables or values changed, the sessions still list, without a model
+and under their `meta.json` title or else their ID, and a `warning:` line says
+so. An empty `store.db`, as a session that was never used leaves, is not a
+change of format.
 
 Please [open an issue](https://github.com/julio-romero/cursor-session-rs/issues)
 with your Cursor version.

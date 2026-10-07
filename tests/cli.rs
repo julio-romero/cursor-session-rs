@@ -1006,6 +1006,31 @@ fn unreadable_agent_storage_is_an_error_not_an_empty_list() {
     );
 }
 
+#[test]
+fn notices_print_without_verbose() {
+    let fixture = Fixture::new();
+    for id in ["s1", "s2"] {
+        fixture.write_meta_json(PROJECT_X, id, &serde_json::json!({"title": id}));
+        write_sql_db(
+            &fixture.session_dir(PROJECT_X, id).join("store.db"),
+            "CREATE TABLE meta2 (key TEXT PRIMARY KEY, value BLOB);",
+        );
+    }
+    let output = run(&fixture, &["list", "--json"]);
+    assert!(output.status.success());
+    assert_eq!(ids(&json(&stdout(&output))).len(), 2);
+    let err = stderr(&output);
+    assert!(
+        err.starts_with(&format!(
+            "warning: unrecognized store.db format in {}: none of its 2 store.db files could be \
+             read (",
+            fixture.chats_dir().display()
+        )),
+        "{err}"
+    );
+    assert_eq!(err.lines().count(), 1, "{err}");
+}
+
 const ESCAPE_A: &str = "e5c00000-0000-4000-8000-00000000000a";
 const ESCAPE_B: &str = "e5c00000-0000-4000-8000-00000000000b";
 
