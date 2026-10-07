@@ -33,8 +33,13 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # What `cargo publish` uploads must build on its own.
+      # What `cargo publish` uploads must build on its own,
       - run: cargo package --locked
+      # and its unit tests must find their fixtures in it.
+      - run: cargo test --locked --lib --bins --manifest-path target/package/cursor-session-*/Cargo.toml
+      # rust-cache would otherwise walk the unpacked crate as a build directory.
+      - if: always()
+        run: rm -rf target/package
 
   clippy:
     strategy:
