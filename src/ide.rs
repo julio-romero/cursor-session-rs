@@ -3,14 +3,14 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use rusqlite::Connection;
 use rusqlite::types::ValueRef;
+use rusqlite::{Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::detect::StoragePaths;
-use crate::json;
+use crate::json::{self, lenient, lenient_ms};
 use crate::model::{Message, Session, Source};
 use crate::sqlite::with_readonly;
 use crate::{Error, Result};
@@ -62,6 +62,20 @@ struct Bubble {
     kind: Option<Kind>,
     #[serde(default, deserialize_with = "lenient")]
     code_blocks: Vec<CodeBlock>,
+    /// A tool call, which is never shown.
+    #[serde(default)]
+    tool_former_data: Option<Value>,
+    /// Images, which are never shown.
+    #[serde(default, deserialize_with = "lenient")]
+    images: Vec<Value>,
+}
+
+impl Bubble {
+    /// Whether it holds something that is never shown, such as a tool call or
+    /// an image, so that having no text to show is no sign of a new format.
+    fn has_hidden_content(&self) -> bool {
+        self.tool_former_data.is_some() || !self.images.is_empty() || !self.code_blocks.is_empty()
+    }
 }
 
 /// Who wrote a message, from its `type`.
@@ -83,16 +97,6 @@ struct CodeBlock {
     content: Option<String>,
 }
 
-/// A value of the expected type, or the default for `null` and any other.
-fn lenient<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: DeserializeOwned + Default,
-{
-    let value = Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).unwrap_or_default())
-}
-
 /// A message `type`: `None` when it is neither a number nor a known name.
 fn kind<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Option<Kind>, D::Error> {
     Ok(match Value::deserialize(deserializer)? {
@@ -103,22 +107,6 @@ fn kind<'de, D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Optio
         }),
         Value::String(name) if name == "user" => Some(Kind::User),
         Value::String(name) if name == "assistant" => Some(Kind::Assistant),
-        _ => None,
-    })
-}
-
-/// Epoch milliseconds, also with a fraction (`performance.now()` based) or
-/// as an RFC 3339 string.
-fn lenient_ms<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> std::result::Result<Option<i64>, D::Error> {
-    Ok(match Value::deserialize(deserializer)? {
-        Value::Number(n) => n
-            .as_i64()
-            .or_else(|| n.as_f64().filter(|ms| ms.is_finite()).map(|ms| ms as i64)),
-        Value::String(text) => chrono::DateTime::parse_from_rfc3339(&text)
-            .ok()
-            .map(|time| time.timestamp_millis()),
         _ => None,
     })
 }
@@ -134,17 +122,26 @@ fn timestamp<'de, D: Deserializer<'de>>(
     })
 }
 
-pub fn load_sessions(paths: &StoragePaths, warnings: &mut Vec<String>) -> Result<Vec<Session>> {
+pub fn load_sessions(
+    paths: &StoragePaths,
+    warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
+) -> Result<Vec<Session>> {
     let Some(db_path) = &paths.global_storage_db else {
         return Ok(Vec::new());
     };
-    load_from_db(db_path, warnings)
+    load_from_db(db_path, warnings, notices)
 }
 
 /// Loads composer sessions from a `state.vscdb`. A missing file holds no
 /// sessions; rows that cannot be decoded are skipped and reported in
-/// `warnings`.
-pub fn load_from_db(db_path: &Path, warnings: &mut Vec<String>) -> Result<Vec<Session>> {
+/// `warnings`. Chats and messages that load in part, as when Cursor changes
+/// their format for new chats only, are reported in `notices`.
+pub fn load_from_db(
+    db_path: &Path,
+    warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
+) -> Result<Vec<Session>> {
     match fs::metadata(db_path) {
         Ok(meta) if meta.len() == 0 => {
             warnings.push(format!(
@@ -158,13 +155,14 @@ pub fn load_from_db(db_path: &Path, warnings: &mut Vec<String>) -> Result<Vec<Se
         Err(source) => return Err(Error::access(db_path, source)),
     }
     // The read may run twice (see `with_readonly`); only the last one's
-    // warnings are kept.
-    let (sessions, found) = with_readonly(db_path, |conn| {
-        let mut found = Vec::new();
-        let sessions = read_sessions(conn, db_path, &mut found)?;
-        Ok((sessions, found))
+    // warnings and notices are kept.
+    let (sessions, found, noticed) = with_readonly(db_path, |conn| {
+        let (mut found, mut noticed) = (Vec::new(), Vec::new());
+        let sessions = read_sessions(conn, db_path, &mut found, &mut noticed)?;
+        Ok((sessions, found, noticed))
     })?;
     warnings.extend(found);
+    notices.extend(noticed);
     Ok(sessions)
 }
 
@@ -172,6 +170,7 @@ fn read_sessions(
     conn: &Connection,
     db_path: &Path,
     warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
 ) -> Result<Vec<Session>> {
     // One read transaction, so that a chat and its messages come from the same
     // commit while Cursor writes. Dropping it ends the read.
@@ -215,7 +214,8 @@ fn read_sessions(
     let mut sessions = Vec::new();
     // Chats with stored messages, and those of them that lead to none.
     let (mut stored, mut unlinked) = (0, 0);
-    // Chats that list messages, and those of them with a message to show.
+    // Chats that list messages and should have one to show, and those of
+    // them that do.
     let (mut listing, mut shown) = (0, 0);
     // Messages shown without a known type.
     let mut untyped = 0;
@@ -242,18 +242,20 @@ fn read_sessions(
         // Each chat takes its messages, so their text is not held twice.
         let chat_bubbles = bubbles.remove(&id);
         let has_stored = chat_bubbles.is_some();
-        let (session, linked) = composer_session(id, composer, chat_bubbles, &mut untyped);
+        let chat = composer_session(id, composer, chat_bubbles, &mut untyped);
         if has_stored {
             stored += 1;
-            unlinked += usize::from(!linked);
+            unlinked += usize::from(!chat.linked);
         }
-        if lists {
+        if lists && !chat.only_hidden {
             listing += 1;
-            shown += usize::from(!session.messages.is_empty());
+            shown += usize::from(!chat.session.messages.is_empty());
         }
-        sessions.push(session);
+        sessions.push(chat.session);
         true
     })?;
+    // What is left are messages whose chat has no row that was read.
+    let orphans = find_orphans(conn, db_path, bubbles)?;
 
     // Rows that are all unreadable, messages without a chat or a type, or
     // chats that all lead to none of their messages, mean the format changed
@@ -269,10 +271,18 @@ fn read_sessions(
             _ => format!("none of its {skipped} composerData rows could be read"),
         }));
     }
-    if sessions.is_empty() && read > 0 {
+    if sessions.is_empty()
+        && let Some(prefix) = &orphans.moved_to
+    {
         return Err(mismatch(match read {
-            1 => "its bubbleId row belongs to no composerData row".to_string(),
-            _ => format!("none of its {read} bubbleId rows belongs to a composerData row"),
+            1 => format!(
+                "its bubbleId row belongs to no composerData row, and a `{prefix}:` row names \
+                 its chat"
+            ),
+            _ => format!(
+                "none of its {read} bubbleId rows belongs to a composerData row, and \
+                 `{prefix}:` rows name their chats"
+            ),
         }));
     }
     if read == 0 && skipped_bubbles > 0 {
@@ -301,19 +311,154 @@ fn read_sessions(
     }
     warn_skipped(warnings, skipped_bubbles, "message", db_path);
     warn_skipped(warnings, skipped, "composer", db_path);
+    if orphans.left.chats > 0 {
+        warnings.push(format!(
+            "skipped {} message row(s) of {} chat(s) in {} that have no composerData row",
+            orphans.left.rows,
+            orphans.left.chats,
+            db_path.display()
+        ));
+    }
     if unlinked > 0 {
         warnings.push(format!(
             "{unlinked} chat(s) in {} list none of their stored messages",
             db_path.display()
         ));
     }
+    // Loading went on, but what is shown is missing chats or may be wrong.
+    if let Some(prefix) = &orphans.moved_to {
+        notices.push(format!(
+            "left out {} chat(s) with {} message row(s) in {}: they have no composerData row, \
+             but `{prefix}:` rows name them. Cursor may have changed its storage format.",
+            orphans.moved.chats,
+            orphans.moved.rows,
+            db_path.display()
+        ));
+    }
     if untyped > 0 {
-        warnings.push(format!(
-            "{untyped} message(s) in {} have an unknown type",
+        notices.push(format!(
+            "{untyped} message(s) in {} have a type this version does not know and are shown \
+             as `unknown`. Cursor may have changed its storage format.",
             db_path.display()
         ));
     }
     Ok(sessions)
+}
+
+/// Chats with stored messages but without a chat row that was read.
+#[derive(Debug, Default)]
+struct Orphans {
+    /// Those that a row under another key prefix names, as when Cursor
+    /// moves its chat rows, and the first such prefix.
+    moved: Count,
+    moved_to: Option<String>,
+    /// Those that no other row names, as a deleted chat leaves them.
+    left: Count,
+}
+
+#[derive(Debug, Default)]
+struct Count {
+    chats: usize,
+    rows: usize,
+}
+
+impl Count {
+    fn add(&mut self, rows: usize) {
+        self.chats += 1;
+        self.rows += rows;
+    }
+}
+
+/// Sorts the chats of `bubbles` by whether a `<prefix>:<chat id>` row of
+/// another prefix exists. Those with a `composerData` row of their own, which
+/// could not be read and is reported as such, are left out.
+fn find_orphans(
+    conn: &Connection,
+    db_path: &Path,
+    bubbles: HashMap<String, HashMap<String, Bubble>>,
+) -> Result<Orphans> {
+    let mut orphans = Orphans::default();
+    if bubbles.is_empty() {
+        return Ok(orphans);
+    }
+    let db_err = |source| Error::Database {
+        path: db_path.to_path_buf(),
+        source,
+    };
+    let mut prefixes = key_prefixes(conn).map_err(db_err)?;
+    prefixes.retain(|prefix| prefix != "bubbleId");
+    // An unreadable chat row of its own explains a chat first.
+    prefixes.sort_by_key(|prefix| prefix != "composerData");
+    let mut exists = conn
+        .prepare(&format!("SELECT 1 FROM {KV_TABLE} WHERE key = ?1"))
+        .map_err(db_err)?;
+    let mut chats: Vec<(String, usize)> = bubbles
+        .into_iter()
+        .map(|(chat, messages)| (chat, messages.len()))
+        .collect();
+    chats.sort();
+    for (chat, rows) in chats {
+        let mut named_by = None;
+        if !chat.is_empty() {
+            for prefix in &prefixes {
+                if exists
+                    .exists([format!("{prefix}:{chat}")])
+                    .map_err(db_err)?
+                {
+                    named_by = Some(prefix);
+                    break;
+                }
+            }
+        }
+        match named_by {
+            Some(prefix) if prefix == "composerData" => {}
+            Some(prefix) => {
+                orphans.moved.add(rows);
+                orphans.moved_to.get_or_insert_with(|| prefix.clone());
+            }
+            None => orphans.left.add(rows),
+        }
+    }
+    Ok(orphans)
+}
+
+/// The prefixes, up to the first `:`, of the TEXT keys of `cursorDiskKV`. It
+/// skips through the key index from one prefix to the next rather than reading
+/// every key.
+fn key_prefixes(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    // `X''`, the smallest BLOB, sorts after every TEXT. The bound is a BLOB
+    // cast to TEXT so that a key that is not UTF-8 can be skipped too.
+    let query = |op: &str| {
+        format!(
+            "SELECT key FROM {KV_TABLE} WHERE key {op} CAST(?1 AS TEXT) AND key < X'' \
+             ORDER BY key LIMIT 1"
+        )
+    };
+    let mut from = conn.prepare(&query(">="))?;
+    let mut after = conn.prepare(&query(">"))?;
+    let first = |stmt: &mut rusqlite::Statement<'_>, bound: &[u8]| {
+        stmt.query_row([bound], |row| match row.get_ref(0)? {
+            ValueRef::Text(key) => Ok(Some(key.to_vec())),
+            _ => Ok(None),
+        })
+        .optional()
+        .map(Option::flatten)
+    };
+    let mut prefixes = Vec::new();
+    let mut key = first(&mut from, b"")?;
+    while let Some(found) = key {
+        key = match found.iter().position(|&byte| byte == b':') {
+            // Every key with this prefix sorts before `<prefix>;`.
+            Some(colon) => {
+                prefixes.push(String::from_utf8_lossy(&found[..colon]).into_owned());
+                let mut end = found[..colon].to_vec();
+                end.push(b';');
+                first(&mut from, &end)?
+            }
+            None => first(&mut after, &found)?,
+        };
+    }
+    Ok(prefixes)
 }
 
 #[cfg(test)]
@@ -401,9 +546,13 @@ fn read_rows(
 }
 
 /// The rows whose key is in `?1..?2`, a range that, unlike `LIKE`, SQLite
-/// finds through the index on `key`.
+/// finds through the index on `key`. A key stored as a BLOB sorts after
+/// every TEXT, so the range is searched once as TEXT and once as BLOB.
 fn rows_query() -> String {
-    format!("SELECT key, value FROM {KV_TABLE} WHERE key >= ?1 AND key < ?2 AND value IS NOT NULL")
+    format!(
+        "SELECT key, value FROM {KV_TABLE} WHERE (key >= ?1 AND key < ?2 \
+         OR key >= CAST(?1 AS BLOB) AND key < CAST(?2 AS BLOB)) AND value IS NOT NULL"
+    )
 }
 
 /// The first key after all those that start with `prefix`, which ends in `:`
@@ -438,67 +587,93 @@ fn warn_skipped(warnings: &mut Vec<String>, skipped: usize, kind: &str, db_path:
     }
 }
 
-/// The session for `composer`, and whether its conversation led to any
-/// message: one of `bubbles`, its stored messages, or one kept inline, as
-/// older Cursor versions did for composers without conversation headers.
-/// Messages without a known type are counted in `untyped`.
+/// A chat read from its composer row.
+struct Chat {
+    session: Session,
+    /// Whether its conversation led to any message: one of the `bubbles`
+    /// stored for it, or one kept inline.
+    linked: bool,
+    /// Whether it has no message to show because every message it lists is
+    /// there and holds only what is never shown, such as tool calls.
+    only_hidden: bool,
+}
+
+/// The chat for `composer`, with its messages from `bubbles`, its stored
+/// messages, or those kept inline, as older Cursor versions did for composers
+/// without conversation headers. Messages without a known type are counted in
+/// `untyped`.
 fn composer_session(
     id: String,
     composer: Composer,
     mut bubbles: Option<HashMap<String, Bubble>>,
     untyped: &mut usize,
-) -> (Session, bool) {
+) -> Chat {
     let mut messages = Vec::new();
     let mut linked = false;
+    // Whether every message it lists is there and holds something hidden.
+    let mut all_hidden = true;
     for header in &composer.full_conversation_headers_only {
         let bubble = header
             .bubble_id
             .as_ref()
             .and_then(|bubble_id| bubbles.as_mut()?.remove(bubble_id));
-        if let Some(bubble) = bubble {
-            linked = true;
-            messages.extend(message(header.kind.or(bubble.kind), bubble, untyped));
-        }
+        let Some(bubble) = bubble else {
+            all_hidden = false;
+            continue;
+        };
+        linked = true;
+        all_hidden &= bubble.has_hidden_content();
+        messages.extend(message(header.kind.or(bubble.kind), bubble, untyped));
     }
     if composer.full_conversation_headers_only.is_empty() {
         for value in composer.conversation {
-            if let Ok(bubble) = serde_json::from_value::<Bubble>(value) {
-                linked = true;
-                messages.extend(message(bubble.kind, bubble, untyped));
-            }
+            let Ok(bubble) = serde_json::from_value::<Bubble>(value) else {
+                all_hidden = false;
+                continue;
+            };
+            linked = true;
+            all_hidden &= bubble.has_hidden_content();
+            messages.extend(message(bubble.kind, bubble, untyped));
         }
     }
     let title = composer
         .name
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Untitled".to_string());
-    let session = Session {
-        id,
-        title,
-        source: Source::Ide,
-        workspace: None,
-        workspace_hash: None,
-        created_at_ms: composer.created_at,
-        updated_at_ms: composer.last_updated_at,
-        model: None,
-        messages,
-    };
-    (session, linked)
+    let only_hidden = messages.is_empty() && linked && all_hidden;
+    Chat {
+        session: Session {
+            id,
+            title,
+            source: Source::Ide,
+            workspace: None,
+            workspace_hash: None,
+            created_at_ms: composer.created_at,
+            updated_at_ms: composer.last_updated_at,
+            model: None,
+            messages,
+        },
+        linked,
+        only_hidden,
+    }
 }
 
 /// A message from `bubble`, unless it has no text or code. One without a
-/// known `kind` is counted in `untyped`, and goes on as a user's message
-/// when it has no type and as an assistant's when its type is another number.
+/// known `kind` is counted in `untyped` and goes on with the role `unknown`,
+/// rather than a guess that may be wrong.
 fn message(kind: Option<Kind>, mut bubble: Bubble, untyped: &mut usize) -> Option<Message> {
     let timestamp = bubble.timestamp.take();
     let content = extract_bubble_text(bubble);
     if content.is_empty() {
         return None;
     }
-    *untyped += usize::from(!matches!(kind, Some(Kind::User | Kind::Assistant)));
     let role = match kind {
-        Some(Kind::User) | None => "user",
-        Some(Kind::Assistant | Kind::Other) => "assistant",
+        Some(Kind::User) => "user",
+        Some(Kind::Assistant) => "assistant",
+        Some(Kind::Other) | None => {
+            *untyped += 1;
+            "unknown"
+        }
     };
     Some(Message {
         role: role.to_string(),
@@ -614,8 +789,9 @@ mod tests {
     }
 
     fn load(path: &Path) -> (Result<Vec<Session>>, Vec<String>) {
-        let mut warnings = Vec::new();
-        let sessions = load_from_db(path, &mut warnings);
+        let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+        let sessions = load_from_db(path, &mut warnings, &mut notices);
+        assert!(notices.is_empty(), "{notices:?}");
         (sessions, warnings)
     }
 
@@ -711,17 +887,46 @@ mod tests {
             ("bubbleId", SqlValue::Text("{}".into())),
             ("bubbleId;", SqlValue::Text("{}".into())),
             ("bubbleIdX:c1:b1", SqlValue::Text("{}".into())),
+            ("checkpointId:c1:k1", SqlValue::Text("{}".into())),
         ]);
         create_db(&path, &rows);
         let conn = Connection::open(&path).unwrap();
-        let plan: String = conn
-            .query_row(
-                &format!("EXPLAIN QUERY PLAN {}", rows_query()),
-                ["a", "b"],
-                |row| row.get(3),
-            )
-            .unwrap();
-        assert!(plan.contains("USING INDEX"), "{plan}");
+        // A key stored as a BLOB, as a binding of bytes leaves it.
+        conn.execute(
+            "INSERT INTO cursorDiskKV VALUES (?1, '{}')",
+            [SqlValue::Blob(b"bubbleId:c1:b3".to_vec())],
+        )
+        .unwrap();
+        // Every step searches the index; none scans the table.
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Vec<String> {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            stmt.query_map(params, |row| row.get(3))
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|step: &String| step.contains(KV_TABLE))
+                .collect()
+        };
+        for (sql, steps) in [
+            (rows_query(), plan(&rows_query(), &[&"a", &"b"])),
+            (
+                "prefix scan".to_string(),
+                plan(
+                    &format!(
+                        "SELECT key FROM {KV_TABLE} WHERE key >= CAST(?1 AS TEXT) AND key < X'' \
+                         ORDER BY key LIMIT 1"
+                    ),
+                    &[&b"a".as_slice()],
+                ),
+            ),
+        ] {
+            assert!(!steps.is_empty(), "{sql}");
+            for step in steps {
+                assert!(
+                    step.starts_with("SEARCH") && step.contains("INDEX"),
+                    "{sql}: {step}"
+                );
+            }
+        }
 
         assert_eq!(prefix_end("bubbleId:"), "bubbleId;");
         let mut keys = Vec::new();
@@ -730,7 +935,12 @@ mod tests {
             true
         })
         .unwrap();
-        assert_eq!(keys, ["bubbleId:c1:b1", "bubbleId:c1:b2"]);
+        keys.sort();
+        assert_eq!(keys, ["bubbleId:c1:b1", "bubbleId:c1:b2", "bubbleId:c1:b3"]);
+        assert_eq!(
+            key_prefixes(&conn).unwrap(),
+            ["bubbleId", "bubbleIdX", "checkpointId", "composerData"]
+        );
     }
 
     #[test]

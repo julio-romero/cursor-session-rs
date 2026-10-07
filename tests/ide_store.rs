@@ -15,10 +15,24 @@ use rusqlite::Connection;
 use rusqlite::types::Value as SqlValue;
 use serde_json::json;
 
+/// Loads `path`, which must give no notices, with its warnings.
 fn load_db(path: &Path) -> (cursor_session::Result<Vec<Session>>, Vec<String>) {
-    let mut warnings = Vec::new();
-    let sessions = load_from_db(path, &mut warnings);
+    let (sessions, warnings, notices) = load_db_noticed(path);
+    assert!(notices.is_empty(), "{notices:?}");
     (sessions, warnings)
+}
+
+/// Loads `path`, with its warnings and notices.
+fn load_db_noticed(
+    path: &Path,
+) -> (
+    cursor_session::Result<Vec<Session>>,
+    Vec<String>,
+    Vec<String>,
+) {
+    let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+    let sessions = load_from_db(path, &mut warnings, &mut notices);
+    (sessions, warnings, notices)
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
@@ -316,6 +330,30 @@ fn changed_row_formats() -> Vec<(Vec<(String, SqlValue)>, &'static str)> {
                 .collect(),
             "none of its 2 chats that list messages has a readable message",
         ),
+        // The text is kept in a field this version does not know, next to
+        // tool calls that are never shown.
+        (
+            vec![
+                composer(
+                    "u1",
+                    &composer_json("u1", "Renamed", 1, 1, &[("b1", 1), ("b2", 2)]),
+                    Stored::Text,
+                ),
+                bubble(
+                    "u1",
+                    "b1",
+                    &json!({"type": 1, "content": "hi"}),
+                    Stored::Text,
+                ),
+                bubble(
+                    "u1",
+                    "b2",
+                    &json!({"type": 2, "toolFormerData": {"name": "read_file"}}),
+                    Stored::Text,
+                ),
+            ],
+            "its one chat that lists messages has no readable message",
+        ),
         // The chats are kept under a key this version does not know.
         (
             ["p1", "p2"]
@@ -330,7 +368,8 @@ fn changed_row_formats() -> Vec<(Vec<(String, SqlValue)>, &'static str)> {
                     ]
                 })
                 .collect(),
-            "none of its 2 bubbleId rows belongs to a composerData row",
+            "none of its 2 bubbleId rows belongs to a composerData row, and `composer:` rows \
+             name their chats",
         ),
         // Who wrote a message is kept in a field this version does not know.
         (
@@ -457,7 +496,7 @@ fn odd_field_types_cost_only_those_fields() {
 }
 
 #[test]
-fn message_types_may_be_named_and_unknown_ones_are_reported() {
+fn message_types_may_be_named_and_unknown_ones_are_shown_as_unknown() {
     let fixture = Fixture::new();
     let chat = |id: &str, kinds: [serde_json::Value; 2]| {
         let headers: Vec<_> = ["b1", "b2"]
@@ -482,29 +521,204 @@ fn message_types_may_be_named_and_unknown_ones_are_reported() {
             ),
         ]
     };
+    // Older chats keep their types; a newer one has types this version does
+    // not know, as a change of format for new chats would leave them.
     let rows: Vec<_> = [
         chat("named", [json!("user"), json!("assistant")]),
+        chat("numbered", [json!(1), json!(2)]),
         chat("unknown", [json!("human"), json!(3)]),
     ]
     .into_iter()
     .flatten()
     .collect();
     let db = fixture.write_ide_db(Journal::Delete, &rows);
-    let (sessions, warnings) = load_db(&db);
-    assert_eq!(
-        warnings,
-        [format!(
-            "2 message(s) in {} have an unknown type",
-            db.display()
-        )]
+    let (sessions, warnings, notices) = load_db_noticed(&db);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let notice = format!(
+        "2 message(s) in {} have a type this version does not know and are shown as \
+         `unknown`. Cursor may have changed its storage format.",
+        db.display()
     );
+    assert_eq!(notices, std::slice::from_ref(&notice));
     let mut sessions = sessions.unwrap();
     sessions.sort_by(|a, b| a.id.cmp(&b.id));
     let roles: Vec<Vec<&str>> = sessions
         .iter()
         .map(|s| s.messages.iter().map(|m| m.role.as_str()).collect())
         .collect();
-    assert_eq!(roles, [["user", "assistant"], ["user", "assistant"]]);
+    assert_eq!(
+        roles,
+        [
+            ["user", "assistant"],
+            ["user", "assistant"],
+            ["unknown", "unknown"]
+        ]
+    );
+
+    // No guess at who wrote them, and a notice even without -v.
+    let output = fixture.cmd().args(["show", "unknown"]).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(stderr(&output), format!("warning: {notice}\n"));
+    let shown = stdout(&output);
+    assert!(
+        shown.contains("[unknown]\nquestion\n") && shown.contains("[unknown]\nanswer\n"),
+        "{shown}"
+    );
+    let healthcheck = fixture.cmd().arg("healthcheck").output().unwrap();
+    assert!(healthcheck.status.success());
+    assert!(
+        stdout(&healthcheck).contains(&format!("ide db: {} (incomplete)\n", db.display())),
+        "{}",
+        stdout(&healthcheck)
+    );
+    assert_eq!(stderr(&healthcheck), format!("warning: {notice}\n"));
+}
+
+/// A chat of `n` messages whose row is kept under `prefix`.
+fn chat_under(prefix: &str, id: &str, n: usize) -> Vec<(String, SqlValue)> {
+    let ids: Vec<String> = (0..n).map(|i| format!("b{i}")).collect();
+    let headers: Vec<(&str, i64)> = ids
+        .iter()
+        .zip([1, 2].into_iter().cycle())
+        .map(|(id, kind)| (id.as_str(), kind))
+        .collect();
+    let mut rows = vec![(
+        format!("{prefix}{id}"),
+        Stored::Text.value(&composer_json(id, id, 1, 1, &headers)),
+    )];
+    for (bubble_id, kind) in headers {
+        rows.push(bubble(
+            id,
+            bubble_id,
+            &text_bubble(bubble_id, kind, &format!("{id} {bubble_id}")),
+            Stored::Text,
+        ));
+    }
+    rows
+}
+
+#[test]
+fn chats_whose_rows_moved_are_a_notice_and_deleted_ones_a_warning() {
+    let fixture = Fixture::new();
+    // The older chat keeps its row; two newer ones have theirs under a new key.
+    let mut rows = chat_under("composerData:", "old", 2);
+    rows.extend(chat_under("composerDataV2:", "new1", 4));
+    rows.extend(chat_under("composerDataV2:", "new2", 6));
+    // A deleted chat leaves its messages, and maybe rows that name it within
+    // their key, behind.
+    let deleted = chat_under("deleted:", "gone", 2);
+    rows.extend(deleted[1..].iter().cloned());
+    rows.push((
+        "checkpointId:gone:k1".to_string(),
+        SqlValue::Text("{}".into()),
+    ));
+    // A chat whose row cannot be read is reported as that alone.
+    rows.push((
+        "composerData:broken".to_string(),
+        SqlValue::Text("{".into()),
+    ));
+    rows.extend(chat_under("unused:", "broken", 1)[1..].iter().cloned());
+    let db = fixture.write_ide_db(Journal::Delete, &rows);
+
+    let (sessions, warnings, notices) = load_db_noticed(&db);
+    let ids: Vec<String> = sessions.unwrap().into_iter().map(|s| s.id).collect();
+    assert_eq!(ids, ["old"]);
+    assert_eq!(
+        warnings,
+        [
+            format!("skipped 1 unreadable composer row in {}", db.display()),
+            format!(
+                "skipped 2 message row(s) of 1 chat(s) in {} that have no composerData row",
+                db.display()
+            ),
+        ]
+    );
+    let notice = format!(
+        "left out 2 chat(s) with 10 message row(s) in {}: they have no composerData row, but \
+         `composerDataV2:` rows name them. Cursor may have changed its storage format.",
+        db.display()
+    );
+    assert_eq!(notices, std::slice::from_ref(&notice));
+
+    // The notice prints without -v; the chats that load still list.
+    let output = fixture.cmd().arg("list").output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(stderr(&output), format!("warning: {notice}\n"));
+    assert!(stdout(&output).starts_with("Found 1 session(s)\n"));
+    let healthcheck = fixture.cmd().arg("healthcheck").output().unwrap();
+    assert!(healthcheck.status.success());
+    assert!(
+        stdout(&healthcheck).contains(&format!("ide db: {} (incomplete)\n", db.display())),
+        "{}",
+        stdout(&healthcheck)
+    );
+
+    // With every chat deleted, what is left is no sign of a new format.
+    let fixture = Fixture::new();
+    let db = fixture.write_ide_db(Journal::Delete, &deleted[1..]);
+    let (sessions, warnings) = load_db(&db);
+    assert!(sessions.unwrap().is_empty());
+    assert_eq!(
+        warnings,
+        [format!(
+            "skipped 2 message row(s) of 1 chat(s) in {} that have no composerData row",
+            db.display()
+        )]
+    );
+    fixture
+        .cmd()
+        .arg("list")
+        .assert()
+        .success()
+        .stdout("No sessions found\n")
+        .stderr("");
+}
+
+#[test]
+fn chats_of_only_tool_calls_and_images_load_without_messages() {
+    let fixture = Fixture::new();
+    let tool = |name: &str| json!({"type": 2, "text": "", "toolFormerData": {"name": name}});
+    let rows = vec![
+        composer(
+            "tools",
+            &composer_json("tools", "Tools", 1, 1, &[("b1", 1), ("b2", 2), ("b3", 2)]),
+            Stored::Text,
+        ),
+        bubble(
+            "tools",
+            "b1",
+            &json!({"type": 1, "text": "", "images": [{"path": "screenshot.png"}]}),
+            Stored::Text,
+        ),
+        bubble("tools", "b2", &tool("run_terminal_cmd"), Stored::Text),
+        bubble("tools", "b3", &tool("read_file"), Stored::Text),
+    ];
+    let db = fixture.write_ide_db(Journal::Delete, &rows);
+    let (sessions, warnings) = load_db(&db);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let sessions = sessions.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].messages.is_empty());
+}
+
+#[test]
+fn keys_stored_as_blobs_are_read() {
+    let fixture = Fixture::new();
+    let db = fixture.ide_db_path();
+    let conn = create_kv_db(&db, Journal::Delete);
+    for (key, value) in chat_under("composerData:", "blob-keys", 2) {
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+            rusqlite::params![SqlValue::Blob(key.into_bytes()), value],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let (sessions, warnings) = load_db(&db);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let sessions = sessions.unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].messages.len(), 2);
 }
 
 #[test]

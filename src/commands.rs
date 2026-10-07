@@ -8,7 +8,7 @@ use cursor_session::detect::{self, Env, StoragePaths};
 use cursor_session::export::{self, Format};
 use cursor_session::model::{self, Session, SessionSummary, Source};
 use cursor_session::ui;
-use cursor_session::{Error, LoadOptions, filter_workspace, find_session, load_sessions};
+use cursor_session::{Error, LoadOptions, Loaded, filter_workspace, find_session, load_sessions};
 use serde::Serialize;
 
 use crate::cli::{Commands, ExportArgs, HealthcheckArgs, ListArgs, ShowArgs};
@@ -292,7 +292,18 @@ fn cmd_healthcheck(
     let agent_loaded = agent_store.is_ok();
     let ide_store =
         check_readable(paths.global_storage_db.as_deref()).and_then(|()| load(Source::Ide));
-    let status = |ok: bool| if ok { "ok" } else { "failed" };
+    // A store that loaded with notices is missing something, or shows
+    // something that may be wrong.
+    let incomplete = |store: &cursor_session::Result<Loaded>| {
+        store
+            .as_ref()
+            .is_ok_and(|loaded| !loaded.notices.is_empty())
+    };
+    let status = |ok: bool, incomplete: bool| match (ok, incomplete) {
+        (false, _) => "failed",
+        (true, true) => "incomplete",
+        (true, false) => "ok",
+    };
     // With --storage, the default locations were never looked at.
     let searched = match args.storage {
         Some(_) => None,
@@ -316,7 +327,12 @@ fn cmd_healthcheck(
             out,
             "agent chats: {} ({})",
             shown(dir),
-            status(chats.is_ok() && agent_store.is_ok())
+            // Besides a location it cannot read, which fails that location,
+            // the agent store notices only what is missing from the chats.
+            status(
+                chats.is_ok() && agent_store.is_ok(),
+                incomplete(&agent_store) && transcripts.is_ok()
+            )
         )?,
         None => writeln!(
             out,
@@ -329,7 +345,7 @@ fn cmd_healthcheck(
             out,
             "transcripts: {} ({})",
             shown(&dir.join("{project}").join("agent-transcripts")),
-            status(transcripts.is_ok() && agent_store.is_ok())
+            status(transcripts.is_ok() && agent_store.is_ok(), false)
         )?,
         None => writeln!(
             out,
@@ -338,7 +354,12 @@ fn cmd_healthcheck(
         )?,
     }
     match &paths.global_storage_db {
-        Some(db) => writeln!(out, "ide db: {} ({})", shown(db), status(ide_store.is_ok()))?,
+        Some(db) => writeln!(
+            out,
+            "ide db: {} ({})",
+            shown(db),
+            status(ide_store.is_ok(), incomplete(&ide_store))
+        )?,
         None => writeln!(
             out,
             "ide db: {}",

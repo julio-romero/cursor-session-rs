@@ -264,10 +264,12 @@ sessions loaded: 4 (agent: 2, ide: 2)
 ```
 
 It shows each location it found, with `(ok)` or `(failed)`, or `not found` and
-the paths it looked in. It exits 1 when no storage is found at all, or when a
-store that was found fails to load; the report then includes the reason and what
-to do about it. When rows or files were skipped, a `load warnings: N` line says
-so; `-v` lists them.
+the paths it looked in. A location reads `(incomplete)` when its store loaded but
+a `warning:` line on stderr says what is missing or may be wrong, such as chats
+or titles in a format this version does not know. It exits 1 when no storage is
+found at all, or when a store that was found fails to load; the report then
+includes the reason and what to do about it. When rows or files were skipped, a
+`load warnings: N` line says so; `-v` lists them.
 
 ### Global flags
 
@@ -320,7 +322,7 @@ with its messages.
 | `created_at`     | string or null       | RFC 3339 in UTC with whole seconds, such as `"2026-10-05T13:40:12Z"`. Works with jq's `fromdate`. |
 | `updated_at`     | string or null       | Same format as `created_at`. `null` when Cursor stored no update time; the list then uses `created_at`. |
 | `message_count`  | integer              | All messages in the session, even when `show --limit` returns fewer.                             |
-| `messages`       | array (`show` only)  | Objects with `role` (`"user"` or `"assistant"`), `content` (string) and `timestamp`.             |
+| `messages`       | array (`show` only)  | Objects with `role` (`"user"` or `"assistant"`, or `"unknown"` for an IDE message whose stored type this version does not know), `content` (string) and `timestamp`. |
 
 A message `timestamp` is a string as Cursor stored it, or `null`: free text such
 as `"Friday, Oct 2, 2026, 10:29 AM (UTC+2)"` for Agent CLI messages, and epoch
@@ -512,8 +514,10 @@ remove. Cursor deletes them the next time it opens and closes the database.
   last model used, creation time); its other blobs are not decoded.
 - IDE messages: the text of each message, or its rich text when the plain text
   is empty, followed by its code blocks as fenced code. Messages with neither
-  text nor code blocks are skipped. Chats from older Cursor versions, which keep
-  their messages inside the chat row, are read too.
+  text nor code blocks, such as tool calls and images, are skipped. Chats from
+  older Cursor versions, which keep their messages inside the chat row, are read
+  too. A message whose type is neither user nor assistant is shown with the role
+  `unknown` rather than a guess.
 - `show --all` shows all loaded text messages, not the excluded records or
   content that exists only in the databases.
 
@@ -536,9 +540,10 @@ run `cursor-session list` to see session IDs
 **Cursor changed its storage format.** If a Cursor update changes the IDE
 database layout, `list`, `show` and `export` stop with an error like this one.
 The same error, with another reason, appears when none of the chat rows or none
-of the message rows can be read, when messages are stored but no chat row is
-found or no chat lists them, when chats list messages but none of them can be
-read, or when no message has a known type (user or assistant):
+of the message rows can be read, when messages are stored only for chats whose
+rows are under another key or when no chat lists them, when chats list messages
+but none of them can be read, or when no message has a known type (user or
+assistant):
 
 ```text
 error: unrecognized Cursor IDE storage format in /Users/dana/Library/Application Support/Cursor/User/globalStorage/state.vscdb: table `cursorDiskKV` not found (tables present: ItemTable). Cursor may have changed its storage format.
@@ -552,6 +557,15 @@ database:
 ```sh
 cursor-session list --source agent
 ```
+
+When only part of the data changed, as when Cursor writes new chats in a new
+format and leaves older ones as they are, what can be read still lists and a
+`warning:` line says what is left out, also without `-v`, and `healthcheck`
+marks the store `(incomplete)`. That is the case for chats whose rows are under
+another key (`left out 2 chat(s) with 10 message row(s) in …`) and for messages
+of a type this version does not know, which are shown as `unknown`. Messages of
+a chat that has no row at all and that no other row names, as a deleted chat
+leaves them, are only a `-v` warning.
 
 The Agent CLI gets the same treatment. When transcripts hold lines but none of
 them yields a message, for example because their roles are no longer `user` and

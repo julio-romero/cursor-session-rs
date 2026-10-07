@@ -38,7 +38,7 @@ pub fn load_sessions(paths: &StoragePaths, opts: &LoadOptions) -> Result<Loaded>
         sessions.extend(agent::load_sessions(paths, &mut warnings, &mut notices)?);
     }
     if opts.source.is_none_or(|source| source == Source::Ide) {
-        sessions.extend(ide::load_sessions(paths, &mut warnings)?);
+        sessions.extend(ide::load_sessions(paths, &mut warnings, &mut notices)?);
     }
     Ok(Loaded {
         sessions: model::merge_sessions(sessions),

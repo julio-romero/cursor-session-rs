@@ -1,4 +1,6 @@
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 
 /// Parses JSON as Cursor writes it. JavaScript writes a string cut inside an
 /// emoji with a lone surrogate escape (`"\ud83d"`), which serde_json rejects;
@@ -8,6 +10,33 @@ pub(crate) fn from_str<T: DeserializeOwned>(json: &str) -> serde_json::Result<T>
     serde_json::from_str(json).or_else(|err| match replace_lone_surrogates(json) {
         Some(repaired) => serde_json::from_str(&repaired),
         None => Err(err),
+    })
+}
+
+/// A value of the expected type, or the default for `null` and any other, so
+/// that one value of an unexpected type costs that value, not its record.
+pub(crate) fn lenient<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned + Default,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+/// Epoch milliseconds, also with a fraction (`performance.now()` based) or
+/// as an RFC 3339 string.
+pub(crate) fn lenient_ms<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<i64>, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_f64().filter(|ms| ms.is_finite()).map(|ms| ms as i64)),
+        Value::String(text) => chrono::DateTime::parse_from_rfc3339(&text)
+            .ok()
+            .map(|time| time.timestamp_millis()),
+        _ => None,
     })
 }
 
