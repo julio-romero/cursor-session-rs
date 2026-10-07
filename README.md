@@ -180,7 +180,9 @@ files are overwritten.
 - `--workspace` matches a workspace path, or part of one, or the MD5 hash that
   names its directory under `~/.cursor/chats`. Only Agent CLI sessions record a
   workspace.
-- If nothing matches, the error is `no sessions matched` and the exit code is 1.
+- An unknown `--session-id` gives `session not found`. If `--workspace` matches
+  nothing, or there are no sessions, the error is `no sessions matched`. Both
+  exit 1.
 - Exports contain the stored text unchanged. Times in `json` and `yaml` exports
   are epoch milliseconds; this is not the `--json` format described below.
 
@@ -404,6 +406,11 @@ cannot be read gives `could not access`, and any other path gives
 cursor-session never changes Cursor's data. Every SQLite database it reads
 (`state.vscdb` and each session's `store.db`) is opened with SQLite's read-only
 flag and `PRAGMA query_only`.
+
+A database in rollback-journal mode, SQLite's default, is always read in place
+and creates no files. A read can make Cursor wait briefly to commit, and if the
+database is locked the read waits up to 5 seconds before giving up. A database
+in WAL mode is read depending on the files next to it:
 
 - **While Cursor is running**, the database has `-wal` and `-shm` files next to
   it. cursor-session reads it in place like any other SQLite reader and sees
