@@ -2,8 +2,15 @@
 name = "cursor-session"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
 description = "List, show, and export Cursor IDE and Agent CLI chat sessions"
 license = "MIT"
+repository = "https://github.com/julio-romero/cursor-session-rs"
+homepage = "https://github.com/julio-romero/cursor-session-rs"
+readme = "README.md"
+keywords = ["cursor", "cli", "chat", "transcript", "export"]
+categories = ["command-line-utilities"]
+include = ["/src", "/README.md", "/LICENSE"]
 
 [lib]
 name = "cursor_session"
@@ -38,3 +45,8 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 print_stdout = "deny"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
