@@ -525,7 +525,8 @@ cursor-session list --source agent
 ```
 
 The Agent CLI gets the same treatment. When transcripts hold lines but none of
-them yields a message, the error reads `unrecognized Cursor Agent CLI storage
+them yields a message, for example because their roles are no longer `user` and
+`assistant`, the error reads `unrecognized Cursor Agent CLI storage
 format` and `--source ide` skips those sessions. When no `store.db` can be read
 because its tables or values changed, the sessions still list, under their IDs
 and without a model, and a `warning:` line says so.

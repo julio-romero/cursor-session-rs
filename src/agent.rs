@@ -591,7 +591,8 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
 struct Transcript {
     messages: Vec<Message>,
     /// Whether it holds lines but no message could be read from them, which
-    /// lines of other roles (system, tool) alone do not make it.
+    /// lines of the roles that are never shown (system, tool) alone do not
+    /// make it.
     unrecognized: bool,
 }
 
@@ -604,7 +605,7 @@ fn read_transcript(path: &Path) -> Result<Transcript> {
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
     // Lines that should hold a message: the user's, the assistant's, and
-    // those this version cannot read.
+    // those this version cannot read, such as lines of an unknown role.
     let mut expected = 0;
     for line in reader.split(b'\n') {
         let line = line.map_err(io_err)?;
@@ -620,10 +621,13 @@ fn read_transcript(path: &Path) -> Result<Transcript> {
             expected += 1;
             continue;
         };
-        if role != "user" && role != "assistant" {
+        if matches!(role.as_str(), "system" | "tool") {
             continue;
         }
         expected += 1;
+        if role != "user" && role != "assistant" {
+            continue;
+        }
         let raw_content = message
             .map(|m| extract_content(&m.content))
             .unwrap_or_default();
@@ -937,16 +941,19 @@ mod tests {
             warnings[0]
         );
 
-        // A message of a known role whose text moved elsewhere counts too.
-        fs::remove_file(path("c")).unwrap();
-        write(
-            &path("c"),
-            "{\"role\":\"user\",\"message\":{\"parts\":[\"hello\"]}}\n",
-        );
-        assert!(matches!(
-            load_transcripts(&projects),
-            Err(Error::SchemaMismatch { .. })
-        ));
+        // A message of a known role whose text moved elsewhere counts too,
+        // and so do roles this version does not know.
+        for text in [
+            "{\"role\":\"user\",\"message\":{\"parts\":[\"hello\"]}}\n".to_string(),
+            line("role", "human", "hello") + &line("role", "ai", "hi"),
+        ] {
+            fs::remove_file(path("c")).unwrap();
+            write(&path("c"), &text);
+            assert!(matches!(
+                load_transcripts(&projects),
+                Err(Error::SchemaMismatch { .. })
+            ));
+        }
     }
 
     #[cfg(unix)]

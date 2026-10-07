@@ -573,6 +573,34 @@ fn agent_problems_are_warnings_and_the_rest_loads() {
 }
 
 #[test]
+fn transcripts_whose_roles_were_renamed_are_an_unrecognized_format() {
+    let fixture = Fixture::new();
+    for id in ["a", "b"] {
+        fixture.write_transcript(
+            "Users-demo-project-x",
+            id,
+            Layout::Nested,
+            &[plain_message("human", "hello"), plain_message("ai", "hi")],
+        );
+    }
+    let err = fixture.load_source(Some(Source::Agent)).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::SchemaMismatch {
+                store: Source::Agent,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(
+        err.to_string()
+            .contains(": none of its 2 transcripts has a readable message.")
+    );
+}
+
+#[test]
 fn load_options_default_to_both_stores() {
     let fixture = standard();
     let both = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
