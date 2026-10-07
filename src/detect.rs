@@ -159,18 +159,20 @@ impl StoragePaths {
     /// detected from the environment. `home` expands a leading `~` (the
     /// current home directory when `None`).
     pub fn from_custom(path: &Path, home: Option<&Path>) -> Result<Self> {
-        let path = expand_tilde(path, home)?;
-        let path = resolve(&path).map_err(|source| Error::access(&path, source))?;
+        let given = expand_tilde(path, home)?;
+        let path = resolve(&given).map_err(|source| Error::access(&given, source))?;
+        let given = std::path::absolute(&given).unwrap_or(given);
         let meta = fs::metadata(&path).map_err(|source| Error::access(&path, source))?;
         let paths = if meta.is_file() {
-            Self::from_storage_file(&path)
+            // A symlink is recognized by its target's name or its own.
+            Self::from_storage_file(&path).or_else(|| Self::from_storage_file(&given))
         } else {
             // Inside a directory that cannot be listed, every location would
             // look present but unreadable.
             fs::read_dir(&path).map_err(|source| Error::access(&path, source))?;
             Self::from_storage_dir(&path)
         };
-        paths.ok_or(Error::UnsupportedStorage { path })
+        paths.ok_or(Error::UnsupportedStorage { path: given })
     }
 
     pub fn has_agent_storage(&self) -> bool {
@@ -785,5 +787,28 @@ mod tests {
             assert!(matches!(err, Error::UnsupportedStorage { .. }), "{err}");
             assert!(err.to_string().contains("unrecognized storage location"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_symlinks_count_by_their_own_name_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let renamed = dir.path().join("renamed.db");
+        touch(&renamed);
+        let link = dir.path().join("link.vscdb");
+        std::os::unix::fs::symlink(&renamed, &link).unwrap();
+        let paths = StoragePaths::from_custom(&link, None).unwrap();
+        assert_eq!(paths.global_storage_db, Some(link));
+
+        // An unknown file is reported by the name it was given.
+        let notes = dir.path().join("notes.txt");
+        touch(&notes);
+        let named = dir.path().join("named");
+        std::os::unix::fs::symlink(&notes, &named).unwrap();
+        let err = StoragePaths::from_custom(&named, None).unwrap_err();
+        assert!(
+            matches!(&err, Error::UnsupportedStorage { path } if *path == named),
+            "{err}"
+        );
     }
 }
