@@ -26,16 +26,20 @@ pub fn stdout_is_tty() -> bool {
 
 /// Width of the controlling terminal. Only meaningful when stdout is a terminal.
 pub fn terminal_width() -> usize {
-    if let Ok((cols, _)) = crossterm::terminal::size()
-        && cols > 0
-    {
+    let cols = crossterm::terminal::size().ok().map(|(cols, _)| cols);
+    width_from(cols, std::env::var("COLUMNS").ok().as_deref())
+}
+
+/// The width the terminal reports, else the one COLUMNS gives, but never
+/// below the narrowest table; 80 when neither gives one.
+fn width_from(cols: Option<u16>, columns: Option<&str>) -> usize {
+    if let Some(cols) = cols.filter(|&cols| cols > 0) {
         return usize::from(cols).max(MIN_TERM_WIDTH);
     }
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.trim().parse().ok())
-        .filter(|width| *width >= MIN_TERM_WIDTH)
-        .unwrap_or(DEFAULT_TERM_WIDTH)
+    columns
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&width| width > 0)
+        .map_or(DEFAULT_TERM_WIDTH, |width| width.max(MIN_TERM_WIDTH))
 }
 
 fn fixed_list_width() -> usize {
@@ -178,14 +182,18 @@ enum FilterState {
 /// Streaming filter that makes text safe for a terminal: it removes escape
 /// sequences whole (CSI, OSC and other control strings, two-byte escapes, their
 /// C1 forms) and control characters other than `\n`, `\t` and the `\r` of `\r\n`.
-/// SGR styling (`ESC [ ... m`) is kept when `keep_sgr` is set; styling still on at
-/// the end of a line is reset there, so stored text cannot style what follows.
-/// Input may be split anywhere, also inside a sequence or a UTF-8 character.
+/// SGR styling (`ESC [ ... m`) is kept when `keep_sgr` is set, without blinking
+/// or hidden text; styling still on at the end of a line is reset there, so
+/// stored text cannot style what follows. Input may be split anywhere, also
+/// inside a sequence or a UTF-8 character.
 #[derive(Debug, Clone)]
 pub struct TerminalFilter {
     keep_sgr: bool,
     state: FilterState,
     csi: Vec<u8>,
+    /// Whether the control sequence being read may pass: only the 7-bit
+    /// `ESC [` form, which is what this program writes.
+    csi_kept: bool,
     /// SGR attribute groups switched on by the sequences passed through.
     style: u16,
 }
@@ -196,6 +204,7 @@ impl TerminalFilter {
             keep_sgr,
             state: FilterState::Ground,
             csi: Vec::new(),
+            csi_kept: false,
             style: 0,
         }
     }
@@ -229,7 +238,7 @@ impl TerminalFilter {
             FilterState::C1Lead => {
                 self.state = FilterState::Ground;
                 match byte {
-                    0x9b => self.start_csi(),
+                    0x9b => self.start_csi(false),
                     0x90 | 0x98 | 0x9d..=0x9f => self.state = FilterState::ControlString,
                     0x80..=0x9f => {}
                     _ => {
@@ -255,10 +264,16 @@ impl TerminalFilter {
                 }
                 0x40..=0x7e => {
                     self.state = FilterState::Ground;
-                    if byte == b'm' && self.keep_sgr && is_sgr(&self.csi) {
+                    if byte == b'm'
+                        && self.keep_sgr
+                        && self.csi_kept
+                        && is_sgr(&self.csi)
+                        && let Some(params) = visible_sgr(&self.csi)
+                    {
                         out.extend_from_slice(b"\x1b[");
-                        out.extend_from_slice(&self.csi);
+                        out.extend_from_slice(&params);
                         out.push(b'm');
+                        self.csi = params;
                         self.track_sgr();
                     }
                 }
@@ -304,7 +319,7 @@ impl TerminalFilter {
     fn escape(&mut self, byte: u8, out: &mut Vec<u8>) {
         self.state = FilterState::Ground;
         match byte {
-            b'[' => self.start_csi(),
+            b'[' => self.start_csi(true),
             b']' | b'P' | b'X' | b'^' | b'_' => self.state = FilterState::ControlString,
             0x20..=0x2f => self.state = FilterState::EscapeIntermediate,
             0x30..=0x7e => {}
@@ -312,8 +327,9 @@ impl TerminalFilter {
         }
     }
 
-    fn start_csi(&mut self) {
+    fn start_csi(&mut self, kept: bool) {
         self.csi.clear();
+        self.csi_kept = kept;
         self.state = FilterState::Csi;
     }
 
@@ -366,6 +382,34 @@ fn is_sgr(params: &[u8]) -> bool {
         && params
             .iter()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b';' | b':'))
+}
+
+/// SGR parameters without blinking (5, 6) or hidden text (8), which stored
+/// text must not switch on; `None` when nothing else is left. A color given
+/// as `38;5;n` or `38;2;r;g;b` keeps all of its parameters.
+fn visible_sgr(params: &[u8]) -> Option<Vec<u8>> {
+    let mut kept: Vec<&[u8]> = Vec::new();
+    let mut dropped = false;
+    let mut params = params.split(|&byte| byte == b';').peekable();
+    while let Some(param) = params.next() {
+        let mut parts = param.split(|&byte| byte == b':');
+        let code = parts.next().map_or(0, sgr_number);
+        let colon_form = parts.next().is_some();
+        if matches!(code, 38 | 48 | 58) && !colon_form {
+            kept.push(param);
+            let color = match params.peek().map(|next| sgr_number(next)) {
+                Some(5) => 2,
+                Some(2) => 4,
+                _ => 0,
+            };
+            kept.extend(params.by_ref().take(color));
+        } else if matches!(code, 5 | 6 | 8) {
+            dropped = true;
+        } else {
+            kept.push(param);
+        }
+    }
+    (!dropped || !kept.is_empty()).then(|| kept.join(&b';'))
 }
 
 fn sgr_number(digits: &[u8]) -> u32 {
@@ -976,7 +1020,19 @@ mod tests {
             ),
             "a \u{1b}[1;38;5;14mb\u{1b}[0m c "
         );
-        assert_eq!(filtered("x\u{9b}31my", true), "x\u{1b}[31my");
+        // Only the 7-bit form passes, as this program writes it.
+        assert_eq!(filtered("x\u{9b}31my", true), "xy");
+        // Text cannot blink or hide; colors whose parameters are 5 or 8 stay.
+        assert_eq!(
+            filtered(
+                "a\u{1b}[1;5;31mb\u{1b}[6mc\u{1b}[8md\u{1b}[38;5;8;48;2;5;6;8me\u{1b}[m",
+                true
+            ),
+            "a\u{1b}[1;31mbcd\u{1b}[38;5;8;48;2;5;6;8me\u{1b}[m"
+        );
+        assert_eq!(visible_sgr(b"5;8"), None);
+        assert_eq!(visible_sgr(b"").as_deref(), Some(&b""[..]));
+        assert_eq!(visible_sgr(b"38:5:8;8").as_deref(), Some(&b"38:5:8"[..]));
         let long = format!("\u{1b}[{}m", "1;".repeat(MAX_SGR_LEN));
         assert_eq!(filtered(&long, true), "");
 
@@ -992,7 +1048,7 @@ mod tests {
         let cases = [
             (
                 "visible \u{1b}[8mhidden\r\n\u{1b}[41;5mleft on\nnext",
-                "visible \u{1b}[8mhidden\u{1b}[0m\r\n\u{1b}[41;5mleft on\u{1b}[0m\nnext",
+                "visible hidden\r\n\u{1b}[41mleft on\u{1b}[0m\nnext",
             ),
             (
                 "\u{1b}[1;31mx\u{1b}[22;39m\n",
@@ -1005,7 +1061,7 @@ mod tests {
             ),
             ("\u{1b}[4:3mx\u{1b}[4:0m\n", "\u{1b}[4:3mx\u{1b}[4:0m\n"),
             ("\u{1b}[7mx\u{1b}[m\n", "\u{1b}[7mx\u{1b}[m\n"),
-            ("\u{1b}[8mx\u{1b}[39m\n", "\u{1b}[8mx\u{1b}[39m\u{1b}[0m\n"),
+            ("\u{1b}[7mx\u{1b}[39m\n", "\u{1b}[7mx\u{1b}[39m\u{1b}[0m\n"),
             (
                 "\u{1b}[53mx\u{1b}[55m\n",
                 "\u{1b}[53mx\u{1b}[55m\u{1b}[0m\n",
@@ -1018,10 +1074,21 @@ mod tests {
 
         let mut filter = TerminalFilter::new(true);
         let mut out = Vec::new();
-        filter.push(b"\x1b[5mblink", &mut out);
+        filter.push(b"\x1b[41mred", &mut out);
         filter.reset_style(&mut out);
         filter.reset_style(&mut out);
-        assert_eq!(out, b"\x1b[5mblink\x1b[0m");
+        assert_eq!(out, b"\x1b[41mred\x1b[0m");
+    }
+
+    #[test]
+    fn terminal_width_falls_back_to_columns_then_80() {
+        assert_eq!(width_from(Some(120), Some("60")), 120);
+        assert_eq!(width_from(Some(10), None), MIN_TERM_WIDTH);
+        assert_eq!(width_from(Some(0), Some(" 60 ")), 60);
+        assert_eq!(width_from(None, Some("1")), MIN_TERM_WIDTH);
+        for columns in [None, Some(""), Some("0"), Some("wide"), Some("-5")] {
+            assert_eq!(width_from(None, columns), DEFAULT_TERM_WIDTH, "{columns:?}");
+        }
     }
 
     #[test]
