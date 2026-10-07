@@ -10,7 +10,7 @@ homepage = "https://github.com/julio-romero/cursor-session-rs"
 readme = "README.md"
 keywords = ["cursor", "cli", "chat", "transcript", "export"]
 categories = ["command-line-utilities"]
-include = ["/src", "/README.md", "/LICENSE"]
+include = ["/src", "/README.md", "/LICENSE", "/tests/fixtures"]
 
 [lib]
 name = "cursor_session"

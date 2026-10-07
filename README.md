@@ -525,8 +525,9 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-CI runs clippy and the tests on Linux, macOS and Windows, rustfmt on Linux, and
-`cargo check` with the minimum supported Rust version, 1.88.
+CI runs clippy and the tests on Linux, macOS and Windows, rustfmt and
+`cargo package` (the crate as crates.io receives it) on Linux, and `cargo check`
+with the minimum supported Rust version, 1.88.
 
 Output rendering is covered by [insta](https://insta.rs) snapshot tests. When
 output changes, `cargo test` fails and writes the new output next to the old
@@ -547,8 +548,10 @@ when a version tag is pushed:
 
 1. Set `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, then
    commit and push to `master`.
-2. Check that `dist plan` prints `announcing vX.Y.Z`.
-3. Push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+2. Wait for CI to pass on that commit. The Release workflow does not run the
+   tests itself.
+3. Check that `dist plan` prints `announcing vX.Y.Z`.
+4. Push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
 The Release workflow builds archives for the five targets, creates the GitHub
 Release with the archives, checksums and the shell installer, pushes the

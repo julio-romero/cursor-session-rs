@@ -27,3 +27,8 @@ publish-jobs = ["homebrew", "./publish-crates"]
 
 [dist.github-action-commits]
 "actions/checkout" = "v7"
+
+# GitHub retires the macos-14 image that dist 0.32 picks for Apple silicon
+# (brownouts in October 2026, removed on November 2, 2026)
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

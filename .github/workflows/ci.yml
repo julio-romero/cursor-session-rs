@@ -25,6 +25,17 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # What `cargo publish` uploads must build on its own.
+      - run: cargo package --locked
+
   clippy:
     strategy:
       fail-fast: false
