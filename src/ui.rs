@@ -151,13 +151,16 @@ enum FilterState {
 /// Streaming filter that makes text safe for a terminal: it removes escape
 /// sequences whole (CSI, OSC and other control strings, two-byte escapes, their
 /// C1 forms) and control characters other than `\n`, `\t` and the `\r` of `\r\n`.
-/// SGR styling (`ESC [ ... m`) is kept when `keep_sgr` is set. Input may be split
-/// anywhere, also inside a sequence or a UTF-8 character.
+/// SGR styling (`ESC [ ... m`) is kept when `keep_sgr` is set; styling still on at
+/// the end of a line is reset there, so stored text cannot style what follows.
+/// Input may be split anywhere, also inside a sequence or a UTF-8 character.
 #[derive(Debug, Clone)]
 pub struct TerminalFilter {
     keep_sgr: bool,
     state: FilterState,
     csi: Vec<u8>,
+    /// SGR attribute groups switched on by the sequences passed through.
+    style: u16,
 }
 
 impl TerminalFilter {
@@ -166,6 +169,7 @@ impl TerminalFilter {
             keep_sgr,
             state: FilterState::Ground,
             csi: Vec::new(),
+            style: 0,
         }
     }
 
@@ -176,12 +180,21 @@ impl TerminalFilter {
         }
     }
 
+    /// Appends a full reset when styling that passed through is still on.
+    pub fn reset_style(&mut self, out: &mut Vec<u8>) {
+        if self.style != 0 {
+            self.style = 0;
+            out.extend_from_slice(b"\x1b[0m");
+        }
+    }
+
     fn byte(&mut self, byte: u8, out: &mut Vec<u8>) {
         match self.state {
             FilterState::Ground => self.ground(byte, out),
             FilterState::CarriageReturn => {
                 self.state = FilterState::Ground;
                 if byte == b'\n' {
+                    self.reset_style(out);
                     out.push(b'\r');
                 }
                 self.ground(byte, out);
@@ -219,6 +232,7 @@ impl TerminalFilter {
                         out.extend_from_slice(b"\x1b[");
                         out.extend_from_slice(&self.csi);
                         out.push(b'm');
+                        self.track_sgr();
                     }
                 }
                 _ => {
@@ -249,7 +263,11 @@ impl TerminalFilter {
         match byte {
             0x1b => self.state = FilterState::Escape,
             b'\r' => self.state = FilterState::CarriageReturn,
-            b'\n' | b'\t' => out.push(byte),
+            b'\n' => {
+                self.reset_style(out);
+                out.push(byte);
+            }
+            b'\t' => out.push(byte),
             0x00..=0x1f | 0x7f => {}
             0xc2 => self.state = FilterState::C1Lead,
             _ => out.push(byte),
@@ -270,6 +288,34 @@ impl TerminalFilter {
     fn start_csi(&mut self) {
         self.csi.clear();
         self.state = FilterState::Csi;
+    }
+
+    fn track_sgr(&mut self) {
+        let mut params = self.csi.split(|&byte| byte == b';');
+        while let Some(param) = params.next() {
+            let mut parts = param.split(|&byte| byte == b':').map(sgr_number);
+            let code = parts.next().unwrap_or(0);
+            let sub = parts.next();
+            if code == 0 {
+                self.style = 0;
+                continue;
+            }
+            if matches!(code, 38 | 48 | 58) && sub.is_none() {
+                // `38;5;n` and `38;2;r;g;b` carry the color in the next parameters.
+                let skip = match params.next().map(sgr_number) {
+                    Some(5) => 1,
+                    Some(2) => 3,
+                    _ => 0,
+                };
+                params.by_ref().take(skip).for_each(drop);
+            }
+            let (group, on) = sgr_group(code);
+            if on && !(code == 4 && sub == Some(0)) {
+                self.style |= group;
+            } else {
+                self.style &= !group;
+            }
+        }
     }
 
     fn control_string(&mut self, byte: u8, out: &mut Vec<u8>) {
@@ -293,6 +339,43 @@ fn is_sgr(params: &[u8]) -> bool {
         && params
             .iter()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b';' | b':'))
+}
+
+fn sgr_number(digits: &[u8]) -> u32 {
+    digits.iter().fold(0, |number: u32, digit| {
+        number
+            .saturating_mul(10)
+            .saturating_add(u32::from(digit.wrapping_sub(b'0')))
+    })
+}
+
+/// The attribute group an SGR code switches, as a bit, and whether it switches
+/// it on. Codes without a reset of their own share a group only `0` clears.
+fn sgr_group(code: u32) -> (u16, bool) {
+    let (bit, on) = match code {
+        1 | 2 => (0, true),
+        22 => (0, false),
+        3 | 20 => (1, true),
+        23 => (1, false),
+        4 | 21 => (2, true),
+        24 => (2, false),
+        5 | 6 => (3, true),
+        25 => (3, false),
+        7 => (4, true),
+        27 => (4, false),
+        8 => (5, true),
+        28 => (5, false),
+        9 => (6, true),
+        29 => (6, false),
+        30..=38 | 90..=97 => (7, true),
+        39 => (7, false),
+        40..=48 | 100..=107 => (8, true),
+        49 => (8, false),
+        58 => (9, true),
+        59 => (9, false),
+        _ => (10, true),
+    };
+    (1 << bit, on)
 }
 
 pub fn title_width(term_width: usize) -> usize {
@@ -838,11 +921,52 @@ mod tests {
     }
 
     #[test]
+    fn terminal_filter_ends_stored_styling_at_the_line_end() {
+        let cases = [
+            (
+                "visible \u{1b}[8mhidden\r\n\u{1b}[41;5mleft on\nnext",
+                "visible \u{1b}[8mhidden\u{1b}[0m\r\n\u{1b}[41;5mleft on\u{1b}[0m\nnext",
+            ),
+            (
+                "\u{1b}[1;31mx\u{1b}[22;39m\n",
+                "\u{1b}[1;31mx\u{1b}[22;39m\n",
+            ),
+            ("\u{1b}[38;5;8mx\u{1b}[39m\n", "\u{1b}[38;5;8mx\u{1b}[39m\n"),
+            (
+                "\u{1b}[38;2;1;2;3mx\u{1b}[39m\n",
+                "\u{1b}[38;2;1;2;3mx\u{1b}[39m\n",
+            ),
+            ("\u{1b}[4:3mx\u{1b}[4:0m\n", "\u{1b}[4:3mx\u{1b}[4:0m\n"),
+            ("\u{1b}[7mx\u{1b}[m\n", "\u{1b}[7mx\u{1b}[m\n"),
+            ("\u{1b}[8mx\u{1b}[39m\n", "\u{1b}[8mx\u{1b}[39m\u{1b}[0m\n"),
+            (
+                "\u{1b}[53mx\u{1b}[55m\n",
+                "\u{1b}[53mx\u{1b}[55m\u{1b}[0m\n",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(filtered(input, true), expected, "{input:?}");
+        }
+        assert_eq!(filtered("\u{1b}[8mx\n", false), "x\n");
+
+        let mut filter = TerminalFilter::new(true);
+        let mut out = Vec::new();
+        filter.push(b"\x1b[5mblink", &mut out);
+        filter.reset_style(&mut out);
+        filter.reset_style(&mut out);
+        assert_eq!(out, b"\x1b[5mblink\x1b[0m");
+    }
+
+    #[test]
     fn comfy_table_shares_our_crossterm() {
         // `force_color_output` in `render_list_table` reaches comfy-table only
         // when both resolve to the same crossterm.
         let lock =
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).unwrap();
-        assert_eq!(lock.matches("name = \"crossterm\"\n").count(), 1);
+        let crossterms = lock
+            .lines()
+            .filter(|line| line.trim_end() == r#"name = "crossterm""#)
+            .count();
+        assert_eq!(crossterms, 1);
     }
 }

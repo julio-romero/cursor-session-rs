@@ -121,7 +121,12 @@ impl<W: Write> Write for TerminalWriter<W> {
         Ok(data.len())
     }
 
+    /// Also resets styling that stored text left on, so it cannot reach the
+    /// shell prompt.
     fn flush(&mut self) -> io::Result<()> {
+        self.buf.clear();
+        self.filter.reset_style(&mut self.buf);
+        self.inner.write_all(&self.buf)?;
         self.inner.flush()
     }
 }
@@ -241,6 +246,21 @@ mod tests {
         let mut out = TerminalWriter::new(Vec::new(), true);
         write!(out, "\u{1b}[36magent\u{1b}[39m \u{1b}[2J").unwrap();
         assert_eq!(out.inner, b"\x1b[36magent\x1b[39m ");
+    }
+
+    #[test]
+    fn terminal_writer_resets_stored_styling_on_flush() {
+        let mut out = TerminalWriter::new(Vec::new(), true);
+        write!(out, "visible \u{1b}[8mhidden \u{1b}[41;5mleft on").unwrap();
+        out.flush().unwrap();
+        assert!(out.inner.ends_with(b"left on\x1b[0m"));
+        out.flush().unwrap();
+        assert!(out.inner.ends_with(b"left on\x1b[0m"));
+
+        let mut out = TerminalWriter::new(Vec::new(), true);
+        write!(out, "\u{1b}[36magent\u{1b}[39m").unwrap();
+        out.flush().unwrap();
+        assert_eq!(out.inner, b"\x1b[36magent\x1b[39m");
     }
 
     #[test]
