@@ -55,7 +55,12 @@ impl Session {
     }
 
     pub fn updated_display(&self) -> String {
-        format_ms(self.updated_at_ms.or(self.created_at_ms))
+        format_ms(self.updated_or_created_ms())
+    }
+
+    /// The time the UPDATED column shows, which also orders the list.
+    fn updated_or_created_ms(&self) -> Option<i64> {
+        self.updated_at_ms.or(self.created_at_ms)
     }
 
     pub fn summary(&self) -> SessionSummary<'_> {
@@ -151,7 +156,11 @@ pub fn merge_sessions(mut sessions: Vec<Session>) -> Vec<Session> {
         }
         merged.push(session);
     }
-    merged.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms).then(a.id.cmp(&b.id)));
+    merged.sort_by(|a, b| {
+        b.updated_or_created_ms()
+            .cmp(&a.updated_or_created_ms())
+            .then(a.id.cmp(&b.id))
+    });
     merged
 }
 
@@ -283,6 +292,31 @@ mod tests {
 
         let value = serde_json::to_value(session.detail(&session.messages)).unwrap();
         assert_eq!(value["messages"][0]["timestamp"], "1700000000000");
+    }
+
+    #[test]
+    fn sessions_sort_newest_first_by_the_updated_time_shown() {
+        let at = |id: &str, created_at_ms, updated_at_ms| Session {
+            id: id.into(),
+            created_at_ms,
+            updated_at_ms,
+            ..session()
+        };
+        let sessions = vec![
+            at("no-times", None, None),
+            at("updated-2", Some(1), Some(2)),
+            at("created-3", Some(3), None),
+            at("tie-b", None, Some(2)),
+            at("tie-a", Some(2), None),
+        ];
+        let merged = merge_sessions(sessions);
+        let ids: Vec<&str> = merged.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["created-3", "tie-a", "tie-b", "updated-2", "no-times"]
+        );
+        let shown: Vec<String> = merged.iter().map(Session::updated_display).collect();
+        assert!(shown[..4].is_sorted_by(|a, b| a >= b), "{shown:?}");
     }
 
     #[test]
