@@ -97,7 +97,7 @@ impl Mode {
         };
         Ok(if wal_len == 0 {
             Mode::Immutable
-        } else if sidecar(path, "-shm").is_file() {
+        } else if has_sidecars(path) {
             Mode::InPlace
         } else {
             Mode::Snapshot
@@ -114,7 +114,7 @@ impl Mode {
 /// would otherwise create `-wal` and `-shm` next to it to read it, or fail in a
 /// read-only directory. One whose `-wal` a crash left behind is copied, with
 /// that `-wal`, to a private temporary directory and the copy is opened; so is
-/// one whose path a `file:` URI cannot carry.
+/// one whose path a `file:` URI cannot carry, unless it has both sidecars.
 fn open_readonly(path: &Path) -> Result<Db> {
     let file = sqlite_path(path).map_err(|source| Error::access(path, source))?;
     for _ in 0..3 {
@@ -132,6 +132,10 @@ fn open_readonly(path: &Path) -> Result<Db> {
                 immutable: Some((file, before)),
                 _snapshot: None,
             });
+        }
+        // With both sidecars present, reading in place creates no files.
+        if mode == Mode::Immutable && has_sidecars(&file) {
+            break;
         }
         let snapshot = Snapshot::copy(&file).map_err(|source| Error::Snapshot {
             path: path.to_path_buf(),
@@ -258,6 +262,10 @@ fn is_wal(path: &Path) -> io::Result<bool> {
         Err(err) => return Err(err),
     }
     Ok(header.starts_with(b"SQLite format 3\0") && (header[18] == 2 || header[19] == 2))
+}
+
+fn has_sidecars(path: &Path) -> bool {
+    sidecar(path, "-wal").is_file() && sidecar(path, "-shm").is_file()
 }
 
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
@@ -485,11 +493,14 @@ mod tests {
         create(&live, "wal");
         let writer = wal_writer(&live);
         // What a crash leaves behind: the database and its -wal, but no -shm.
+        // (Windows' fs::copy cannot open a file another handle is writing.)
         let crashed = dir.path().join("crashed");
         fs::create_dir(&crashed).unwrap();
         let path = crashed.join("state.vscdb");
-        fs::copy(&live, &path).unwrap();
-        fs::copy(sidecar(&live, "-wal"), sidecar(&path, "-wal")).unwrap();
+        for suffix in ["", "-wal"] {
+            let data = fs::read(sidecar(&live, suffix)).unwrap();
+            fs::write(sidecar(&path, suffix), data).unwrap();
+        }
         drop(writer);
 
         let before = listing(&crashed);
