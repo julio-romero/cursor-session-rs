@@ -19,17 +19,25 @@ pub struct OutputOpts {
 impl OutputOpts {
     pub fn detect(choice: ColorChoice) -> OutputOpts {
         let tty = ui::stdout_is_tty();
-        let no_color = env::var_os("NO_COLOR");
-        let term = env::var_os("TERM");
-        let mut color = use_color(tty, choice, no_color.as_deref(), term.as_deref());
-        if tty {
-            color = console_color(color, choice, enable_escape_sequences);
-        }
         OutputOpts {
             tty,
-            color,
+            color: stream_color(tty, choice),
             width: tty.then(ui::terminal_width),
         }
+    }
+}
+
+/// Whether a stream gets color, from whether it is a terminal, `--color` and
+/// the environment. Help and usage errors follow it too, so that they are
+/// colored exactly when the commands' output is.
+pub fn stream_color(tty: bool, choice: ColorChoice) -> bool {
+    let no_color = env::var_os("NO_COLOR");
+    let term = env::var_os("TERM");
+    let color = use_color(tty, choice, no_color.as_deref(), term.as_deref());
+    if tty {
+        console_color(color, choice, enable_escape_sequences)
+    } else {
+        color
     }
 }
 
@@ -72,10 +80,12 @@ pub fn use_color(
 }
 
 /// Writer that remembers whether the reader went away (EPIPE), so the process
-/// can exit quietly however the error was wrapped on its way up.
+/// can exit quietly however the error was wrapped on its way up, and whether
+/// writing failed otherwise, so the error can say it was stdout.
 pub struct PipeWriter<W: Write> {
     inner: W,
     closed: bool,
+    failed: bool,
 }
 
 impl<W: Write> PipeWriter<W> {
@@ -83,6 +93,7 @@ impl<W: Write> PipeWriter<W> {
         Self {
             inner,
             closed: false,
+            failed: false,
         }
     }
 
@@ -90,11 +101,17 @@ impl<W: Write> PipeWriter<W> {
         self.closed
     }
 
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
     fn track<T>(&mut self, result: io::Result<T>) -> io::Result<T> {
-        if let Err(error) = &result
-            && error.kind() == ErrorKind::BrokenPipe
-        {
-            self.closed = true;
+        if let Err(error) = &result {
+            if error.kind() == ErrorKind::BrokenPipe {
+                self.closed = true;
+            } else {
+                self.failed = true;
+            }
         }
         result
     }
@@ -259,10 +276,16 @@ mod tests {
     }
 
     #[test]
-    fn pipe_writer_ignores_other_failures() {
+    fn pipe_writer_tells_other_failures_apart() {
         let mut out = PipeWriter::new(Failing(ErrorKind::PermissionDenied));
+        assert!(!out.failed());
         assert!(out.write_all(&[b'x'; 64 * 1024]).is_err());
         assert!(!out.closed());
+        assert!(out.failed());
+
+        let mut out = PipeWriter::new(Failing(ErrorKind::BrokenPipe));
+        assert!(out.flush().is_err());
+        assert!(out.closed() && !out.failed());
     }
 
     #[test]

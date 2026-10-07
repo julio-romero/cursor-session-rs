@@ -6,7 +6,7 @@ mod common;
 
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 use common::*;
@@ -640,8 +640,20 @@ fn healthcheck_passes_when_the_stores_load() {
     let agent_only = Fixture::new();
     write_standard_agent(&agent_only);
     let out = ok(&agent_only, &["healthcheck"]);
-    assert!(out.contains("ide db: not found (state.vscdb)\n"));
+    let ide_db = agent_only.env().candidates().unwrap().ide_db;
+    assert!(out.contains(&format!(
+        "ide db: not found (looked in {})\n",
+        looked_in(&ide_db)
+    )));
     assert!(out.ends_with("sessions loaded: 4 (agent: 4, ide: 0)\n"));
+}
+
+fn looked_in(candidates: &[PathBuf]) -> String {
+    candidates
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[test]
@@ -649,14 +661,21 @@ fn healthcheck_fails_without_any_store() {
     let fixture = Fixture::new();
     let output = run(&fixture, &["healthcheck"]);
     assert_eq!(output.status.code(), Some(1));
+    // Each location names every place it was looked for, in order.
+    let searched = fixture.env().candidates().unwrap();
     assert_eq!(
         stdout(&output),
-        "Cursor session healthcheck\n\n\
-         agent chats: not found (~/.cursor/chats)\n\
-         transcripts: not found (~/.cursor/projects)\n\
-         ide db: not found (state.vscdb)\n\n\
-         sessions loaded: 0 (agent: 0, ide: 0)\n\
-         warning: no sessions were parsed\n"
+        format!(
+            "Cursor session healthcheck\n\n\
+             agent chats: not found (looked in {})\n\
+             transcripts: not found (looked in {})\n\
+             ide db: not found (looked in {})\n\n\
+             sessions loaded: 0 (agent: 0, ide: 0)\n\
+             warning: no sessions were parsed\n",
+            looked_in(&searched.chats),
+            looked_in(&searched.projects),
+            looked_in(&searched.ide_db)
+        )
     );
     assert_eq!(
         stderr(&output),

@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::fs;
 use std::io::{BufWriter, ErrorKind, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use cursor_session::detect::StoragePaths;
+use cursor_session::detect::{Env, StoragePaths};
 use cursor_session::export::{self, Format};
 use cursor_session::model::{self, Session, SessionSummary, Source};
 use cursor_session::ui;
@@ -43,10 +43,12 @@ fn load(
     Ok(loaded.sessions)
 }
 
+/// Prints each warning on one line, so that stored names in it cannot start
+/// lines of their own.
 fn print_warnings(warnings: &[String], verbose: bool, err: &mut dyn Write) -> Result<()> {
     if verbose {
         for warning in warnings {
-            writeln!(err, "warning: {warning}")?;
+            writeln!(err, "warning: {}", ui::one_line(warning))?;
         }
     }
     Ok(())
@@ -208,9 +210,20 @@ fn cmd_healthcheck(
         check_readable(paths.global_storage_db.as_deref()).and_then(|()| load(Source::Ide));
     let status = |ok: bool| if ok { "ok" } else { "failed" };
     // With --storage, the default locations were never looked at.
-    let not_found = |default: &str| match args.storage {
-        Some(_) => "not found".to_string(),
-        None => format!("not found ({default})"),
+    let searched = match args.storage {
+        Some(_) => None,
+        None => Env::current().candidates().ok(),
+    };
+    let not_found = |candidates: Option<&Vec<PathBuf>>| match candidates {
+        Some(candidates) if !candidates.is_empty() => format!(
+            "not found (looked in {})",
+            candidates
+                .iter()
+                .map(|path| shown(path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => "not found".to_string(),
     };
 
     writeln!(out, "Cursor session healthcheck\n")?;
@@ -218,28 +231,35 @@ fn cmd_healthcheck(
         Some(dir) => writeln!(
             out,
             "agent chats: {} ({})",
-            dir.display(),
+            shown(dir),
             status(chats.is_ok() && agent_store.is_ok())
         )?,
-        None => writeln!(out, "agent chats: {}", not_found("~/.cursor/chats"))?,
+        None => writeln!(
+            out,
+            "agent chats: {}",
+            not_found(searched.as_ref().map(|found| &found.chats))
+        )?,
     }
     match &paths.projects_dir {
         Some(dir) => writeln!(
             out,
             "transcripts: {}/{{project}}/agent-transcripts ({})",
-            dir.display(),
+            shown(dir),
             status(transcripts.is_ok() && agent_store.is_ok())
         )?,
-        None => writeln!(out, "transcripts: {}", not_found("~/.cursor/projects"))?,
+        None => writeln!(
+            out,
+            "transcripts: {}",
+            not_found(searched.as_ref().map(|found| &found.projects))
+        )?,
     }
     match &paths.global_storage_db {
-        Some(db) => writeln!(
+        Some(db) => writeln!(out, "ide db: {} ({})", shown(db), status(ide_store.is_ok()))?,
+        None => writeln!(
             out,
-            "ide db: {} ({})",
-            db.display(),
-            status(ide_store.is_ok())
+            "ide db: {}",
+            not_found(searched.as_ref().map(|found| &found.ide_db))
         )?,
-        None => writeln!(out, "ide db: {}", not_found("state.vscdb"))?,
     }
 
     let mut sessions = Vec::new();
@@ -293,7 +313,12 @@ fn cmd_healthcheck(
         )?;
     }
     for (source, error) in &failed {
-        writeln!(out, "{} store failed: {error:#}", source.as_str())?;
+        writeln!(
+            out,
+            "{} store failed: {}",
+            source.as_str(),
+            messages(error).join(": ")
+        )?;
         for hint in hints(error, paths, true) {
             writeln!(out, "  {hint}")?;
         }
@@ -314,9 +339,10 @@ fn cmd_healthcheck(
     }
 }
 
-/// The guidance of the library error behind `error`, if any. The `--source`
-/// that skips the failed store is only offered when the other store was
-/// found; `healthcheck`, which takes no `--source`, names the commands that do.
+/// The guidance of the library error behind `error`, if any, one line each.
+/// The `--source` that skips the failed store is only offered when the other
+/// store was found; `healthcheck`, which takes no `--source`, names the
+/// commands that do.
 pub fn hints(error: &anyhow::Error, paths: &StoragePaths, healthcheck: bool) -> Vec<String> {
     let Some(error) = error
         .chain()
@@ -337,6 +363,32 @@ pub fn hints(error: &anyhow::Error, paths: &StoragePaths, healthcheck: bool) -> 
         }
     }
     hints
+        .iter()
+        .map(|hint| ui::one_line(hint).into_owned())
+        .collect()
+}
+
+/// `error` and each of its causes, one line each. SQLite's result code, which
+/// rusqlite gives as the cause of its own message, is left out.
+pub fn messages(error: &anyhow::Error) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut after_sqlite = false;
+    for cause in error.chain() {
+        let repeats = after_sqlite && cause.downcast_ref::<rusqlite::ffi::Error>().is_some();
+        after_sqlite = matches!(
+            cause.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(..))
+        );
+        if !repeats {
+            lines.push(ui::one_line(&cause.to_string()).into_owned());
+        }
+    }
+    lines
+}
+
+/// A path on one line.
+fn shown(path: &Path) -> String {
+    ui::one_line(&path.display().to_string()).into_owned()
 }
 
 /// Checks that a found location can be opened, since the loaders skip what
@@ -364,9 +416,15 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::cli::{Cli, ColorChoice};
+    use crate::cli::Cli;
 
     const AGENT_ID: &str = "f4eea6d2-d2d3-41ad-b290-824445295a15";
+    /// Stdout as in CI, whether or not `cargo test` runs in a terminal.
+    const PIPED: OutputOpts = OutputOpts {
+        tty: false,
+        color: false,
+        width: None,
+    };
 
     fn fixture_projects() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/home/.cursor/projects")
@@ -416,10 +474,9 @@ mod tests {
         let cli =
             Cli::try_parse_from(std::iter::once("cursor-session").chain(argv.iter().copied()))
                 .unwrap();
-        let opts = OutputOpts::detect(ColorChoice::Never);
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let result = run(cli.command, paths, &opts, &mut out, &mut err);
+        let result = run(cli.command, paths, &PIPED, &mut out, &mut err);
         (result, String::from_utf8(out).unwrap())
     }
 
@@ -536,12 +593,11 @@ mod tests {
                 out_dir.to_str().unwrap(),
             ];
             let cli = Cli::try_parse_from(argv).unwrap();
-            let opts = OutputOpts::detect(ColorChoice::Never);
             let _ = fs::remove_dir_all(&out_dir);
             let result = run(
                 cli.command,
                 &paths,
-                &opts,
+                &PIPED,
                 &mut Failing(stdout),
                 &mut Vec::new(),
             );
@@ -754,7 +810,7 @@ mod tests {
             projects_dir: Some(projects.clone()),
             ..paths.clone()
         };
-        let (_, both_out) = run_args(&both, &["healthcheck"]);
+        let (both_result, both_out) = run_args(&both, &["healthcheck"]);
         for locked in [&chats, &projects] {
             fs::set_permissions(locked, fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -762,6 +818,11 @@ mod tests {
             eprintln!("skipped: permissions are not enforced for this user (root)");
             return;
         }
+        // Two failed locations are still one failed store.
+        assert_eq!(
+            both_result.unwrap_err().to_string(),
+            "healthcheck failed: the agent store could not be loaded"
+        );
         let failures: Vec<&str> = both_out
             .lines()
             .filter(|l| l.contains(" failed: "))
