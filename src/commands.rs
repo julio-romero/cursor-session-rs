@@ -1,10 +1,10 @@
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, ErrorKind, Write};
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use cursor_session::detect::StoragePaths;
-use cursor_session::export;
+use cursor_session::export::{self, Format};
 use cursor_session::model::{self, Session, SessionSummary, Source};
 use cursor_session::ui;
 use cursor_session::{Error, LoadOptions, filter_workspace, find_session, load_sessions};
@@ -125,16 +125,36 @@ fn cmd_export(
         sessions.iter().collect()
     };
     if selected.is_empty() {
-        bail!("no sessions matched");
+        if args.workspace.is_some() {
+            bail!("no sessions matched");
+        }
+        bail!("no sessions to export");
     }
-    fs::create_dir_all(&args.out)?;
+    fs::create_dir_all(&args.out)
+        .with_context(|| format!("could not create {}", args.out.display()))?;
+    // The files are the result and the `wrote` lines only report progress, so
+    // a reader that goes away (`| head`) stops the lines, not the export.
+    let mut progress = true;
     for session in selected {
         let path = export::export_path(&args.out, session, args.format);
-        let mut file = fs::File::create(&path)?;
-        export::export_session(session, args.format, &mut file)?;
-        writeln!(out, "wrote {}", path.display())?;
+        write_export(session, args.format, &path)
+            .with_context(|| format!("could not write {}", path.display()))?;
+        if progress && let Err(error) = writeln!(out, "wrote {}", path.display()) {
+            if error.kind() != ErrorKind::BrokenPipe {
+                return Err(error.into());
+            }
+            progress = false;
+        }
     }
     Ok(())
+}
+
+/// Writes one export file. Its I/O failures are `Error::Write`, which the
+/// binary never mistakes for a closed stdout.
+fn write_export(session: &Session, format: Format, path: &Path) -> cursor_session::Result<()> {
+    let mut file = BufWriter::new(fs::File::create(path).map_err(Error::Write)?);
+    export::export_session(session, format, &mut file)?;
+    file.flush().map_err(Error::Write)
 }
 
 fn cmd_healthcheck(
@@ -411,6 +431,96 @@ mod tests {
         );
         result.unwrap();
         assert!(out_dir.join(format!("{AGENT_ID}.json")).is_file());
+    }
+
+    struct Failing(ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(self.0.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(self.0.into())
+        }
+    }
+
+    #[test]
+    fn export_writes_every_file_after_stdout_closes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_ide(dir.path());
+        let out_dir = dir.path().join("exports");
+        let export = |stdout: ErrorKind| {
+            let argv = [
+                "cursor-session",
+                "export",
+                "--out",
+                out_dir.to_str().unwrap(),
+            ];
+            let cli = Cli::try_parse_from(argv).unwrap();
+            let opts = OutputOpts::detect(ColorChoice::Never);
+            let _ = fs::remove_dir_all(&out_dir);
+            let result = run(
+                cli.command,
+                &paths,
+                &opts,
+                &mut Failing(stdout),
+                &mut Vec::new(),
+            );
+            let written = fs::read_dir(&out_dir).map_or(0, Iterator::count);
+            (result, written)
+        };
+
+        let (result, written) = export(ErrorKind::BrokenPipe);
+        result.unwrap();
+        assert_eq!(written, 3);
+
+        let (result, written) = export(ErrorKind::PermissionDenied);
+        assert!(result.is_err());
+        assert_eq!(written, 1);
+    }
+
+    #[test]
+    fn export_errors_name_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_ide(dir.path());
+        let file = dir.path().join("a-file");
+        fs::write(&file, "").unwrap();
+        let out = file.to_str().unwrap();
+
+        let (result, _) = run_args(&paths, &["export", "--out", out]);
+        let error = result.unwrap_err();
+        assert_eq!(error.to_string(), format!("could not create {out}"));
+        assert!(error.chain().nth(1).is_some());
+
+        // A directory where the export file should go.
+        let out_dir = dir.path().join("exports");
+        let blocked = out_dir.join(format!("{AGENT_ID}.md"));
+        fs::create_dir_all(&blocked).unwrap();
+        let (result, _) = run_args(
+            &paths,
+            &[
+                "export",
+                "--source",
+                "agent",
+                "--out",
+                out_dir.to_str().unwrap(),
+            ],
+        );
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("could not write {}", blocked.display())
+        );
+    }
+
+    #[test]
+    fn export_says_whether_a_filter_matched_nothing() {
+        let paths = StoragePaths::default();
+        let (result, _) = run_args(&paths, &["export"]);
+        assert_eq!(result.unwrap_err().to_string(), "no sessions to export");
+        let (result, _) = run_args(&paths, &["export", "--workspace", "/nowhere"]);
+        assert_eq!(result.unwrap_err().to_string(), "no sessions matched");
     }
 
     #[test]

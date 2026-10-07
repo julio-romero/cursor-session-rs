@@ -167,7 +167,10 @@ cursor-session export --format yaml --source ide
 
 Each session is written to `<out>/<session-id>.<ext>`, one `wrote <path>` line
 per file. `--out` defaults to `exports` and is created if missing. Existing
-files are overwritten.
+files are overwritten. A session ID that is not a plain file name, which only a
+damaged or crafted database holds, is written under a name made from it plus a
+short hash, so every file stays inside `<out>`. If the `wrote` lines go to a
+reader that stops early (`| head`), every file is still written.
 
 | `--format`     | Contents                                                                                                |
 | -------------- | ------------------------------------------------------------------------------------------------------- |
@@ -176,13 +179,15 @@ files are overwritten.
 | `jsonl`        | One message per line: `role`, `content`, `timestamp`. A missing `timestamp` is left out.                |
 | `yaml`         | The same fields as `json`                                                                               |
 
-- `--session-id` takes an ID or a unique prefix.
+- `--session-id` takes an ID or a unique prefix. It cannot be combined with
+  `--workspace`.
 - `--workspace` matches a workspace path, or part of one, or the MD5 hash that
   names its directory under `~/.cursor/chats`. Only Agent CLI sessions record a
   workspace.
-- An unknown `--session-id` gives `session not found`. If `--workspace` matches
-  nothing, or there are no sessions, the error is `no sessions matched`. Both
-  exit 1.
+- An unknown `--session-id` gives `session not found`, a `--workspace` that
+  matches nothing gives `no sessions matched`, and no sessions at all gives
+  `no sessions to export`. A file or directory that cannot be written gives
+  `could not write <path>` or `could not create <dir>` with the reason. All exit 1.
 - Exports contain the stored text unchanged. Times in `json` and `yaml` exports
   are epoch milliseconds; this is not the `--json` format described below.
 

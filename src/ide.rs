@@ -132,10 +132,17 @@ fn read_sessions(
         let Some(composer) = parse_object::<Composer>(value) else {
             return false;
         };
+        // A blank ID could not be looked up with `show`.
+        let named = |id: &str| !id.trim().is_empty();
         let id = composer
             .composer_id
             .clone()
-            .or_else(|| key.strip_prefix("composerData:").map(str::to_string));
+            .filter(|id| named(id))
+            .or_else(|| {
+                key.strip_prefix("composerData:")
+                    .filter(|id| named(id))
+                    .map(str::to_string)
+            });
         let Some(id) = id else {
             return false;
         };

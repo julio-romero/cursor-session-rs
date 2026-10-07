@@ -131,11 +131,14 @@ fn usage_errors_exit_2() {
         &["frobnicate"],
         &["list", "--bogus"],
         &["list", "--limit", "0"],
+        &["list", "--limit", "-1"],
         &["list", "--limit", "many"],
         &["list", "--source", "web"],
         &["show"],
+        &["show", AGENT_ID, "--limit", "0"],
         &["show", AGENT_ID, "--limit", "1", "--all"],
         &["export", "--format", "pdf"],
+        &["export", "--session-id", "f4ee", "--workspace", PROJECT_X],
         &["--color", "sometimes", "list"],
     ] {
         let output = run(&fixture, args);
@@ -535,6 +538,83 @@ fn a_closed_pipe_ends_the_output_quietly() {
         );
         assert_eq!(err, "", "{args:?}");
     }
+}
+
+#[test]
+fn a_closed_pipe_does_not_stop_an_export() {
+    // 4000 `wrote` lines, far more than a pipe holds.
+    let fixture = big_fixture();
+    let output = hang_up_early(&fixture, &["export", "--out", "out"]);
+    assert!(output.status.success(), "{:?}", output.status);
+    assert_eq!(stderr(&output), "");
+    assert_eq!(exported_files(&fixture.home().join("out")).len(), 4000);
+}
+
+#[test]
+fn stored_ids_cannot_move_export_files_out_of_the_directory() {
+    let fixture = Fixture::new();
+    let outside = fixture.home().join("outside");
+    fs::create_dir(&outside).unwrap();
+    let absolute = outside.join("absolute").to_str().unwrap().to_string();
+    let ids = [
+        "../outside/relative",
+        r"..\outside\backslash",
+        absolute.as_str(),
+        "nested/dir/id",
+        "nul",
+        ".hidden",
+        "ok-id",
+    ];
+    let mut rows: Vec<_> = ids
+        .iter()
+        .enumerate()
+        .map(|(n, id)| {
+            composer(
+                &format!("row{n}"),
+                &composer_json(id, "Crafted", 1_757_000_000_000, 1_757_000_000_000, &[]),
+                Stored::Text,
+            )
+        })
+        .collect();
+    // A blank composerId falls back to the key, so `show` can find it.
+    rows.push(composer(
+        "from-key",
+        &serde_json::json!({"composerId": "", "name": "Blank"}),
+        Stored::Text,
+    ));
+    fixture.write_ide_db(Journal::Delete, &rows);
+
+    let out_dir = fixture.home().join("a").join("out");
+    let out = ok(
+        &fixture,
+        &[
+            "export",
+            "--format",
+            "json",
+            "--out",
+            out_dir.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.lines().count(), ids.len() + 1);
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(fixture.home().join("a")).unwrap().count(), 1);
+    let names = exported_files(&out_dir);
+    assert_eq!(names.len(), ids.len() + 1);
+    assert!(names.contains(&"ok-id.json".to_string()));
+    assert!(names.contains(&"from-key.json".to_string()));
+    for name in &names {
+        assert!(!name.starts_with('.'), "{name}");
+        let exported: Session =
+            serde_json::from_str(&fs::read_to_string(out_dir.join(name)).unwrap()).unwrap();
+        assert!(
+            ids.contains(&exported.id.as_str()) || exported.id == "from-key",
+            "{name}"
+        );
+    }
+    assert_eq!(
+        json(&ok(&fixture, &["show", "from-key", "--json"]))["title"],
+        "Blank"
+    );
 }
 
 #[test]

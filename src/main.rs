@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     let result = run(cli, &opts, &mut out, &mut err).and_then(|()| Ok(out.flush()?));
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) if out.closed() || is_broken_pipe(&error) => ExitCode::SUCCESS,
+        Err(error) if out.closed() && is_broken_pipe(&error) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = out.flush();
             report(&error, &mut err);
@@ -138,26 +138,20 @@ fn report(error: &anyhow::Error, err: &mut dyn Write) {
     }
 }
 
+/// Whether writing to a closed pipe caused `error`. Export files report their
+/// failures as `cursor_session::Error`, which hides the io::Error, so a
+/// broken pipe there is an error like any other.
 fn is_broken_pipe(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| io_error_kind(cause) == Some(ErrorKind::BrokenPipe))
 }
 
-/// The io::ErrorKind behind a cause, including errors that wrap an io::Error
-/// transparently and so never expose it through `source()`.
 fn io_error_kind(cause: &(dyn StdError + 'static)) -> Option<ErrorKind> {
     if let Some(error) = cause.downcast_ref::<io::Error>() {
         return Some(error.kind());
     }
-    if let Some(error) = cause.downcast_ref::<serde_json::Error>() {
-        return error.io_error_kind();
-    }
-    match cause.downcast_ref::<cursor_session::Error>()? {
-        cursor_session::Error::Write(error) => Some(error.kind()),
-        cursor_session::Error::Json(error) => error.io_error_kind(),
-        _ => None,
-    }
+    cause.downcast_ref::<serde_json::Error>()?.io_error_kind()
 }
 
 #[cfg(test)]
@@ -335,11 +329,9 @@ mod tests {
         let cases = [
             anyhow::Error::from(pipe()),
             anyhow::Error::from(pipe()).context("writing output"),
-            anyhow::Error::from(Error::Write(pipe())),
-            anyhow::Error::from(Error::Json(serde_json::Error::io(pipe()))),
             anyhow::Error::from(serde_json::Error::io(pipe())).context("serializing"),
             anyhow::Error::from(Error::Io {
-                path: PathBuf::from("out.md"),
+                path: PathBuf::from("state.vscdb"),
                 source: pipe(),
             }),
         ];
@@ -347,9 +339,12 @@ mod tests {
             assert!(is_broken_pipe(error), "{error:#}");
         }
 
+        // Export files that are pipes (a FIFO as --out) fail like any file.
         let others = [
             anyhow::anyhow!("session not found: x"),
             anyhow::Error::from(io::Error::from(ErrorKind::PermissionDenied)),
+            anyhow::Error::from(Error::Write(pipe())).context("could not write out/a.md"),
+            anyhow::Error::from(Error::Json(serde_json::Error::io(pipe()))),
             anyhow::Error::from(Error::Write(io::Error::from(ErrorKind::WriteZero))),
         ];
         for error in &others {

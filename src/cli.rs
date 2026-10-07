@@ -84,7 +84,12 @@ pub struct ListArgs {
     #[arg(long, value_enum)]
     pub source: Option<Source>,
     /// Keep only the N most recently updated sessions
-    #[arg(long, value_name = "N", value_parser = at_least_one)]
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = at_least_one,
+        allow_negative_numbers = true
+    )]
     pub limit: Option<usize>,
     /// Print a JSON array of session summaries
     #[arg(long)]
@@ -100,8 +105,14 @@ pub struct ShowArgs {
     /// Only read this store; the other one is never opened
     #[arg(long, value_enum)]
     pub source: Option<Source>,
-    /// Maximum number of messages to print (from the end)
-    #[arg(long, value_name = "N", conflicts_with = "all")]
+    /// Print only the last N messages [default: 20 in a terminal, all when piped]
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = at_least_one,
+        allow_negative_numbers = true,
+        conflicts_with = "all"
+    )]
     pub limit: Option<usize>,
     /// Print the full transcript
     #[arg(long)]
@@ -119,10 +130,10 @@ pub struct ExportArgs {
     #[arg(long, value_enum, default_value_t = Format::Md)]
     pub format: Format,
     /// Directory to write into (created if missing)
-    #[arg(long, default_value = "exports")]
+    #[arg(long, value_name = "DIR", default_value = "exports")]
     pub out: PathBuf,
     /// Export only this session (ID or unique prefix)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "workspace")]
     pub session_id: Option<String>,
     /// Filter by workspace path or MD5 hash
     #[arg(long)]
@@ -144,6 +155,7 @@ fn at_least_one(value: &str) -> Result<usize, String> {
     match value.parse::<usize>() {
         Ok(0) => Err("must be at least 1".to_string()),
         Ok(n) => Ok(n),
+        Err(_) if value.starts_with('-') => Err("must be at least 1".to_string()),
         Err(err) => Err(err.to_string()),
     }
 }
@@ -174,11 +186,25 @@ mod tests {
     }
 
     #[test]
-    fn list_limit_must_be_positive() {
-        let err = Cli::try_parse_from(["cursor-session", "list", "--limit", "0"])
-            .err()
-            .unwrap();
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-        assert!(Cli::try_parse_from(["cursor-session", "list", "--limit", "3"]).is_ok());
+    fn limit_must_be_positive() {
+        for command in ["list", "show"] {
+            let args = |limit| {
+                let id = (command == "show").then_some("abc");
+                ["cursor-session", command]
+                    .into_iter()
+                    .chain(id)
+                    .chain(["--limit", limit])
+                    .collect::<Vec<_>>()
+            };
+            for limit in ["0", "-1"] {
+                let err = Cli::try_parse_from(args(limit)).err().unwrap();
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::ValueValidation,
+                    "{command} {limit}"
+                );
+            }
+            assert!(Cli::try_parse_from(args("3")).is_ok());
+        }
     }
 }
