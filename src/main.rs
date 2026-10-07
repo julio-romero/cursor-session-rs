@@ -27,6 +27,11 @@ fn main() -> ExitCode {
     };
 
     let opts = OutputOpts::detect(cli.color);
+    if opts.color {
+        // `opts.color` already applied --color and NO_COLOR. crossterm, which
+        // colors the table, would otherwise apply NO_COLOR again.
+        crossterm::style::force_color_output(true);
+    }
     let mut out = PipeWriter::new(stdout_sink(&opts));
     let mut err = diagnostics(io::stderr().lock());
     let result = run(cli, &opts, &mut out, &mut err).and_then(|()| Ok(out.flush()?));

@@ -421,6 +421,10 @@ pub fn format_message_header(role: &str, timestamp: Option<&str>, use_color: boo
 /// terminal, which selects the fitted table; `None` selects the plain layout.
 /// Color is independent of the layout. The plain layout and `render_show` keep
 /// stored text byte for byte; a terminal writer applies [`TerminalFilter`].
+///
+/// The table's colors come from crossterm, which also drops them while
+/// NO_COLOR is set, unless the program called
+/// `crossterm::style::force_color_output(true)` as the binary does.
 pub fn render_list(sessions: &[Session], use_color: bool, term_width: Option<usize>) -> String {
     if sessions.is_empty() {
         return "No sessions found\n".to_string();
@@ -475,12 +479,10 @@ fn render_list_table(sessions: &[Session], use_color: bool, term_width: usize) -
     let mut table = Table::new();
     table.load_preset(presets::UTF8_FULL_CONDENSED);
     table.set_content_arrangement(ContentArrangement::Dynamic);
-    // Styling follows `use_color`, never comfy-table's own stdout check or
-    // crossterm's NO_COLOR check: the caller already applied --color and NO_COLOR.
+    // Styling follows `use_color`, never comfy-table's own stdout check.
     table.force_no_tty();
     if use_color {
         table.enforce_styling();
-        crossterm::style::force_color_output(true);
     }
     table.set_width(width);
     table.set_header(vec![
@@ -735,11 +737,13 @@ mod tests {
 
     #[test]
     fn table_without_color_keeps_layout_and_drops_ansi() {
+        // As in the binary, so the test also passes under NO_COLOR.
+        crossterm::style::force_color_output(true);
         let sessions = sample_sessions();
         for width in [40, 60, 80, 120, 200] {
             let colored = render_list(&sessions, true, Some(width));
             let plain = render_list(&sessions, false, Some(width));
-            // Cyan SOURCE cell, also when the test runs under NO_COLOR.
+            // Cyan SOURCE cell.
             assert!(colored.contains("\u{1b}[38;5;14m"));
             assert!(!has_ansi(&plain));
             assert!(plain.contains('│'));
@@ -959,8 +963,8 @@ mod tests {
 
     #[test]
     fn comfy_table_shares_our_crossterm() {
-        // `force_color_output` in `render_list_table` reaches comfy-table only
-        // when both resolve to the same crossterm.
+        // The binary's `force_color_output` reaches comfy-table only when both
+        // resolve to the same crossterm.
         let lock =
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).unwrap();
         let crossterms = lock
