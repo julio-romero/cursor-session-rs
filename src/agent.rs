@@ -65,9 +65,15 @@ struct TranscriptPart {
 }
 
 /// Loads the Agent CLI sessions. A location that cannot be read is reported in
-/// `warnings` while the other one loads; when no location that was found can be
+/// `notices` while the other one loads; when no location that was found can be
 /// read, loading fails, so that this is not mistaken for having no sessions.
-pub fn load_sessions(paths: &StoragePaths, warnings: &mut Vec<String>) -> Result<Vec<Session>> {
+/// So does a transcript format this version cannot read. Files that cannot be
+/// read are reported in `warnings`.
+pub fn load_sessions(
+    paths: &StoragePaths,
+    warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
+) -> Result<Vec<Session>> {
     let mut by_id: HashMap<String, Session> = HashMap::new();
     // Below the chats root (one workspace or one session), transcripts only
     // fill in the sessions found there.
@@ -75,26 +81,40 @@ pub fn load_sessions(paths: &StoragePaths, warnings: &mut Vec<String>) -> Result
     let mut unreadable = Vec::new();
 
     let chats = paths.chats_dir.as_deref().and_then(|dir| {
-        let scanned = scan_chats(dir, paths.chats_scope, warnings);
+        let scanned = scan_chats(dir, paths.chats_scope, warnings, notices);
         readable(dir, scanned, &mut unreadable)
     });
     let transcripts = paths.projects_dir.as_deref().and_then(|dir| {
         let scanned = scan_transcripts(dir, warnings);
-        readable(dir, scanned, &mut unreadable)
+        readable(dir, scanned, &mut unreadable).map(|found| (dir, found))
     });
     let read_any = chats.is_some() || transcripts.is_some();
     let mut unreadable = unreadable.into_iter();
-    if !read_any && let Some((dir, err)) = unreadable.next() {
-        return Err(Error::access(&dir, err));
+    if !read_any && let Some((path, source)) = unreadable.next() {
+        return Err(Error::AgentAccess { path, source });
     }
     for (dir, err) in unreadable {
-        warnings.push(format!("could not read {}: {err}", dir.display()));
+        notices.push(format!("could not read {}: {err}", dir.display()));
     }
+    let transcripts = match transcripts {
+        Some((dir, found)) if found.unrecognized > 0 && found.unrecognized == found.read => {
+            return Err(Error::SchemaMismatch {
+                store: Source::Agent,
+                path: dir.to_path_buf(),
+                detail: match found.read {
+                    1 => "its one transcript has no readable message".to_string(),
+                    n => format!("none of its {n} transcripts has a readable message"),
+                },
+            });
+        }
+        Some((_, found)) => found.by_id,
+        None => HashMap::new(),
+    };
 
     for session in chats.unwrap_or_default() {
         by_id.insert(session.id.clone(), session);
     }
-    for (id, messages) in transcripts.unwrap_or_default() {
+    for (id, messages) in transcripts {
         if let Some(session) = by_id.get_mut(&id) {
             if session.messages.is_empty() {
                 session.messages = messages;
@@ -143,6 +163,8 @@ fn readable<T>(
 struct Unreadable {
     kind: &'static str,
     details: Vec<String>,
+    /// How many of them hold a format this version does not know.
+    unrecognized: usize,
 }
 
 impl Unreadable {
@@ -150,11 +172,17 @@ impl Unreadable {
         Self {
             kind,
             details: Vec::new(),
+            unrecognized: 0,
         }
     }
 
     fn add(&mut self, path: &Path, reason: impl std::fmt::Display) {
         self.details.push(format!("{}: {reason}", path.display()));
+    }
+
+    fn add_unrecognized(&mut self, path: &Path, reason: impl std::fmt::Display) {
+        self.unrecognized += 1;
+        self.add(path, reason);
     }
 
     fn report(self, warnings: &mut Vec<String>) {
@@ -211,6 +239,7 @@ fn scan_chats(
     chats_dir: &Path,
     scope: ChatsScope,
     warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
 ) -> io::Result<Vec<Session>> {
     let mut session_dirs = Vec::new();
     match scope {
@@ -235,12 +264,28 @@ fn scan_chats(
 
     let mut meta_files = Unreadable::new("meta.json");
     let mut stores = Unreadable::new("store.db");
-    let sessions = session_dirs
+    let sessions: Vec<Session> = session_dirs
         .iter()
         .filter_map(|(dir, hash)| load_chat_session(dir, hash, &mut meta_files, &mut stores))
         .collect();
     meta_files.report(warnings);
-    stores.report(warnings);
+    // Not one store.db in a format this version knows: rather than a skipped
+    // file, the format changed, and names and models are missing throughout.
+    let found = session_dirs
+        .iter()
+        .filter(|(dir, _)| dir.join("store.db").is_file())
+        .count();
+    if stores.unrecognized > 0 && stores.unrecognized == found {
+        notices.push(format!(
+            "unrecognized store.db format in {}: none of its {found} store.db files could be \
+             read ({}); session names and models are left out. Cursor may have changed its \
+             storage format.",
+            chats_dir.display(),
+            stores.details[0]
+        ));
+    } else {
+        stores.report(warnings);
+    }
     Ok(sessions)
 }
 
@@ -300,7 +345,8 @@ fn load_chat_session(
             session.model = store_meta.model;
         }
         Ok(None) => {}
-        Err(reason) => stores.add(&store_path, reason),
+        Err(StoreError::Format(reason)) => stores.add_unrecognized(&store_path, reason),
+        Err(StoreError::Other(reason)) => stores.add(&store_path, reason),
     }
 
     if session.title.is_empty() {
@@ -321,9 +367,17 @@ struct StoreMeta {
     created_at: Option<i64>,
 }
 
+/// Why an existing `store.db` is unusable.
+enum StoreError {
+    /// It has no `meta` table or column, or a value that is not JSON: a
+    /// format this version does not know.
+    Format(String),
+    Other(String),
+}
+
 /// Reads the optional `meta` row of an agent `store.db`. `Ok(None)` means
-/// there is nothing to read; `Err` carries why an existing store is unusable.
-fn read_store_meta(path: &Path) -> std::result::Result<Option<StoreMeta>, String> {
+/// there is nothing to read.
+fn read_store_meta(path: &Path) -> std::result::Result<Option<StoreMeta>, StoreError> {
     if !path.is_file() {
         return Ok(None);
     }
@@ -340,13 +394,20 @@ fn read_store_meta(path: &Path) -> std::result::Result<Option<StoreMeta>, String
             source,
         })
     })
-    .map_err(|err| reason(&err))?
+    .map_err(|err| {
+        if is_missing_schema(&err) {
+            StoreError::Format(reason(&err))
+        } else {
+            StoreError::Other(reason(&err))
+        }
+    })?
     .flatten();
     let Some(value) = value else {
         return Ok(None);
     };
-    let json =
-        decode_meta_json(&value).ok_or("`meta` value is neither JSON nor hex-encoded JSON")?;
+    let json = decode_meta_json(&value).ok_or_else(|| {
+        StoreError::Format("`meta` value is neither JSON nor hex-encoded JSON".to_string())
+    })?;
     Ok(Some(StoreMeta {
         name: json.get("name").and_then(Value::as_str).map(str::to_string),
         model: json
@@ -355,6 +416,17 @@ fn read_store_meta(path: &Path) -> std::result::Result<Option<StoreMeta>, String
             .map(str::to_string),
         created_at: json.get("createdAt").and_then(Value::as_i64),
     }))
+}
+
+/// Whether a query failed for want of the table or column it names.
+fn is_missing_schema(err: &Error) -> bool {
+    matches!(
+        err,
+        Error::Database {
+            source: rusqlite::Error::SqliteFailure(_, Some(message)),
+            ..
+        } if message.starts_with("no such table") || message.starts_with("no such column")
+    )
 }
 
 fn decode_meta_json(raw: &[u8]) -> Option<Value> {
@@ -407,14 +479,22 @@ fn select_transcript(
     }
 }
 
+/// What [`scan_transcripts`] found.
+struct Transcripts {
+    /// The messages of each session.
+    by_id: HashMap<String, Vec<Message>>,
+    /// Transcripts read that held messages or should have.
+    read: usize,
+    /// Those of them in which no message could be read.
+    unrecognized: usize,
+}
+
 /// The messages of each transcript under `projects_dir`, by session ID. Fails
 /// only when `projects_dir` itself cannot be read.
-fn scan_transcripts(
-    projects_dir: &Path,
-    warnings: &mut Vec<String>,
-) -> io::Result<HashMap<String, Vec<Message>>> {
+fn scan_transcripts(projects_dir: &Path, warnings: &mut Vec<String>) -> io::Result<Transcripts> {
     let mut candidates = HashMap::new();
     let mut unreadable = Unreadable::new("transcript");
+    let mut read = 0;
     for project in read_subdirs(projects_dir)? {
         let transcripts = project.join("agent-transcripts");
         if !transcripts.is_dir() {
@@ -441,20 +521,26 @@ fn scan_transcripts(
             let Some(path) = transcript_path(&dir, &id, warnings) else {
                 continue;
             };
-            let messages = match read_jsonl(&path) {
-                Ok(messages) => messages,
+            let transcript = match read_transcript(&path) {
+                Ok(transcript) => transcript,
                 Err(err) => {
                     unreadable.add(&path, reason(&err));
                     continue;
                 }
             };
-            if !messages.is_empty() {
+            if transcript.unrecognized {
+                read += 1;
+                unreadable.add_unrecognized(&path, "no user or assistant message could be read");
+                continue;
+            }
+            if !transcript.messages.is_empty() {
+                read += 1;
                 let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
                 select_transcript(
                     &mut candidates,
                     id,
                     TranscriptCandidate {
-                        messages,
+                        messages: transcript.messages,
                         modified,
                         path,
                     },
@@ -462,11 +548,16 @@ fn scan_transcripts(
             }
         }
     }
+    let unrecognized = unreadable.unrecognized;
     unreadable.report(warnings);
-    Ok(candidates
-        .into_iter()
-        .map(|(id, candidate)| (id, candidate.messages))
-        .collect())
+    Ok(Transcripts {
+        by_id: candidates
+            .into_iter()
+            .map(|(id, candidate)| (id, candidate.messages))
+            .collect(),
+        read,
+        unrecognized,
+    })
 }
 
 fn transcript_path(dir: &Path, id: &str, warnings: &mut Vec<String>) -> Option<PathBuf> {
@@ -485,13 +576,26 @@ fn transcript_path(dir: &Path, id: &str, warnings: &mut Vec<String>) -> Option<P
             return None;
         }
     };
+    // Only regular files: a FIFO or a device would never end.
     entries
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl") && p.is_file())
 }
 
 pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
+    Ok(read_transcript(path)?.messages)
+}
+
+/// The messages of one transcript.
+struct Transcript {
+    messages: Vec<Message>,
+    /// Whether it holds lines but no message could be read from them, which
+    /// lines of other roles (system, tool) alone do not make it.
+    unrecognized: bool,
+}
+
+fn read_transcript(path: &Path) -> Result<Transcript> {
     let io_err = |source| Error::Io {
         path: path.to_path_buf(),
         source,
@@ -499,6 +603,9 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
     let file = fs::File::open(path).map_err(io_err)?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
+    // Lines that should hold a message: the user's, the assistant's, and
+    // those this version cannot read.
+    let mut expected = 0;
     for line in reader.split(b'\n') {
         let line = line.map_err(io_err)?;
         // An invalid byte costs its character, not the rest of the transcript.
@@ -507,17 +614,17 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
         if line.is_empty() {
             continue;
         }
-        let Ok(entry) = serde_json::from_str::<TranscriptLine>(line) else {
-            continue;
-        };
-        let Some(role) = entry.role else {
+        let entry = serde_json::from_str::<TranscriptLine>(line).ok();
+        let Some((role, message)) = entry.and_then(|entry| Some((entry.role?, entry.message)))
+        else {
+            expected += 1;
             continue;
         };
         if role != "user" && role != "assistant" {
             continue;
         }
-        let raw_content = entry
-            .message
+        expected += 1;
+        let raw_content = message
             .map(|m| extract_content(&m.content))
             .unwrap_or_default();
         let timestamp = extract_timestamp_tag(&raw_content);
@@ -535,7 +642,11 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
             timestamp,
         });
     }
-    Ok(messages)
+    let unrecognized = messages.is_empty() && expected > 0;
+    Ok(Transcript {
+        messages,
+        unrecognized,
+    })
 }
 
 fn extract_content(content: &TranscriptContent) -> String {
@@ -710,9 +821,10 @@ mod tests {
             projects_dir: projects_dir.map(Path::to_path_buf),
             ..Default::default()
         };
-        let mut warnings = Vec::new();
-        let mut sessions = load_sessions(&paths, &mut warnings).unwrap();
+        let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+        let mut sessions = load_sessions(&paths, &mut warnings, &mut notices).unwrap();
         sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        warnings.extend(notices);
         (sessions, warnings)
     }
 
@@ -765,6 +877,119 @@ mod tests {
             warnings[1].starts_with("ignored 2 unreadable store.db files (first: "),
             "{}",
             warnings[1]
+        );
+    }
+
+    fn line(key: &str, role: &str, text: &str) -> String {
+        format!("{{\"{key}\":\"{role}\",\"message\":{{\"content\":\"{text}\"}}}}\n")
+    }
+
+    fn load_transcripts(projects: &Path) -> Result<(Vec<Session>, Vec<String>)> {
+        let paths = StoragePaths {
+            projects_dir: Some(projects.to_path_buf()),
+            ..Default::default()
+        };
+        let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+        let sessions = load_sessions(&paths, &mut warnings, &mut notices)?;
+        assert!(notices.is_empty(), "{notices:?}");
+        Ok((sessions, warnings))
+    }
+
+    #[test]
+    fn transcripts_in_a_format_this_version_cannot_read_are_a_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let path = |id: &str| {
+            projects
+                .join("p")
+                .join("agent-transcripts")
+                .join(id)
+                .join(format!("{id}.jsonl"))
+        };
+        // `role` became `type`.
+        for id in ["a", "b"] {
+            let text = line("type", "user", "hello") + &line("type", "assistant", "hi");
+            write(&path(id), &text);
+        }
+        // Only tool output: nothing to show, but nothing unknown either.
+        write(&path("tools"), &line("role", "tool", "ran"));
+        let err = load_transcripts(&projects).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "unrecognized Cursor Agent CLI storage format in {}: none of its 2 transcripts \
+                 has a readable message. Cursor may have changed its storage format.",
+                projects.display()
+            )
+        );
+        assert_eq!(err.skippable(), Some(Source::Agent));
+
+        // With a transcript that still reads, the others are skipped files.
+        write(&path("c"), &line("role", "user", "hello"));
+        let (sessions, warnings) = load_transcripts(&projects).unwrap();
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["c"]);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].starts_with("ignored 2 unreadable transcript files (first: ")
+                && warnings[0].ends_with(": no user or assistant message could be read)"),
+            "{}",
+            warnings[0]
+        );
+
+        // A message of a known role whose text moved elsewhere counts too.
+        fs::remove_file(path("c")).unwrap();
+        write(
+            &path("c"),
+            "{\"role\":\"user\",\"message\":{\"parts\":[\"hello\"]}}\n",
+        );
+        assert!(matches!(
+            load_transcripts(&projects),
+            Err(Error::SchemaMismatch { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_regular_files_are_read_as_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        let session = projects.join("p").join("agent-transcripts").join("endless");
+        fs::create_dir_all(&session).unwrap();
+        // Read to its end, this would never finish.
+        std::os::unix::fs::symlink("/dev/zero", session.join("a.jsonl")).unwrap();
+        let (sessions, warnings) = load_transcripts(&projects).unwrap();
+        assert!(sessions.is_empty() && warnings.is_empty());
+    }
+
+    #[test]
+    fn store_dbs_in_a_format_this_version_cannot_read_are_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let chats = dir.path().join("chats");
+        for id in ["s1", "s2"] {
+            let session = chats.join("ws").join(id);
+            fs::create_dir_all(&session).unwrap();
+            let conn = rusqlite::Connection::open(session.join("store.db")).unwrap();
+            conn.execute_batch("CREATE TABLE meta2 (key TEXT PRIMARY KEY, value BLOB);")
+                .unwrap();
+        }
+        let paths = StoragePaths {
+            chats_dir: Some(chats.clone()),
+            ..Default::default()
+        };
+        let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+        let sessions = load_sessions(&paths, &mut warnings, &mut notices).unwrap();
+        // The sessions still load, under their IDs.
+        assert_eq!(sessions.len(), 2);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(notices.len(), 1);
+        let notice = &notices[0];
+        assert!(
+            notice.starts_with(&format!(
+                "unrecognized store.db format in {}: none of its 2 store.db files could be read (",
+                chats.display()
+            )) && notice.contains(": no such table: meta); session names and models are left out."),
+            "{notice}"
         );
     }
 
@@ -870,23 +1095,29 @@ mod tests {
             eprintln!("skipped: permissions are not enforced for this user (root)");
             return;
         }
-        let mut warnings = Vec::new();
-        let partial = load_sessions(&paths(&chats), &mut warnings);
+        let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+        let partial = load_sessions(&paths(&chats), &mut warnings, &mut notices);
         lock(&projects, 0o000);
-        let failed = load_sessions(&paths(&chats), &mut Vec::new());
+        let failed = load_sessions(&paths(&chats), &mut Vec::new(), &mut Vec::new());
         // A location that is gone holds no sessions; the other one still fails.
-        let gone = load_sessions(&paths(&dir.path().join("gone")), &mut Vec::new());
+        let gone = load_sessions(
+            &paths(&dir.path().join("gone")),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
         lock(&chats, 0o755);
         lock(&projects, 0o755);
 
         let partial = partial.unwrap();
         assert_eq!(partial.len(), 1);
         assert_eq!(partial[0].id, "s2");
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].starts_with(&format!("could not read {}: ", chats.display())));
+        // Not a skipped file: every session there is missing, so it is a notice.
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].starts_with(&format!("could not read {}: ", chats.display())));
         for (result, failing) in [(failed, &chats), (gone, &projects)] {
             assert!(
-                matches!(&result, Err(Error::Io { path, .. }) if path == failing),
+                matches!(&result, Err(Error::AgentAccess { path, .. }) if path == failing),
                 "{result:?}"
             );
         }
@@ -897,6 +1128,10 @@ mod tests {
             projects_dir: Some(gone),
             ..Default::default()
         };
-        assert!(load_sessions(&empty, &mut Vec::new()).unwrap().is_empty());
+        assert!(
+            load_sessions(&empty, &mut Vec::new(), &mut Vec::new())
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -17,6 +17,22 @@ impl Source {
             Source::Ide => "ide",
         }
     }
+
+    /// The Cursor product that writes this store.
+    pub fn product(self) -> &'static str {
+        match self {
+            Source::Agent => "Cursor Agent CLI",
+            Source::Ide => "Cursor IDE",
+        }
+    }
+
+    /// The `--source` option that leaves this store unread, and what for.
+    pub fn skip_option(self) -> &'static str {
+        match self {
+            Source::Agent => "`--source ide` to skip Agent CLI sessions",
+            Source::Ide => "`--source agent` to skip IDE sessions",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

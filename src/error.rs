@@ -1,12 +1,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::model::Source;
+
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// How many candidates an ambiguous ID hint lists before summarising the rest.
 const MAX_ID_CANDIDATES: usize = 10;
 const TRY_AGAIN: &str = "try again in a moment; Cursor may be writing to it right now";
-const SKIP_IDE: &str = "rerun with `--source agent` to skip IDE sessions";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,10 +31,15 @@ pub enum Error {
     },
 
     #[error(
-        "unrecognized Cursor IDE storage format in {}: {detail}. Cursor may have changed its storage format.",
+        "unrecognized {} storage format in {}: {detail}. Cursor may have changed its storage format.",
+        store.product(),
         path.display()
     )]
-    SchemaMismatch { path: PathBuf, detail: String },
+    SchemaMismatch {
+        store: Source,
+        path: PathBuf,
+        detail: String,
+    },
 
     #[error("failed to read sqlite database: {}", path.display())]
     Database {
@@ -43,6 +49,10 @@ pub enum Error {
 
     #[error("could not access {}", path.display())]
     Io { path: PathBuf, source: io::Error },
+
+    /// None of the Agent CLI locations that were found could be read.
+    #[error("could not access {}", path.display())]
+    AgentAccess { path: PathBuf, source: io::Error },
 
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -80,9 +90,33 @@ impl Error {
         }
     }
 
+    /// The store this error comes from, when `--source` with the other store
+    /// gets past it. [`Error::hints`] then starts with how.
+    pub fn skippable(&self) -> Option<Source> {
+        match self {
+            Error::SchemaMismatch { store, .. } => Some(*store),
+            Error::AgentAccess { .. } => Some(Source::Agent),
+            Error::Database { source, .. } if is_busy(source) => None,
+            Error::Database { path, .. } | Error::Io { path, .. } if is_ide_db(path) => {
+                Some(Source::Ide)
+            }
+            _ => None,
+        }
+    }
+
     /// Extra guidance lines to show under the error message: lowercase
     /// imperatives without a closing period, after any indented candidates.
     pub fn hints(&self) -> Vec<String> {
+        let mut hints: Vec<String> = self
+            .skippable()
+            .map(|store| format!("rerun with {}", store.skip_option()))
+            .into_iter()
+            .collect();
+        hints.extend(self.advice());
+        hints
+    }
+
+    fn advice(&self) -> Vec<String> {
         match self {
             Error::NoHome => vec!["set HOME or pass --storage <path>".to_string()],
             Error::UnsupportedStorage { .. } => vec![
@@ -106,23 +140,12 @@ impl Error {
                 hints
             }
             Error::SchemaMismatch { .. } => vec![
-                SKIP_IDE.to_string(),
                 "report it at https://github.com/julio-romero/cursor-session-rs/issues and \
                  include your Cursor version"
                     .to_string(),
             ],
-            Error::Database { source, .. }
-                if matches!(
-                    source.sqlite_error_code(),
-                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
-                ) =>
-            {
-                vec![TRY_AGAIN.to_string()]
-            }
+            Error::Database { source, .. } if is_busy(source) => vec![TRY_AGAIN.to_string()],
             Error::Changed { .. } => vec![TRY_AGAIN.to_string()],
-            Error::Database { path, .. } | Error::Io { path, .. } if is_ide_db(path) => {
-                vec![SKIP_IDE.to_string()]
-            }
             Error::Snapshot { .. } => vec![
                 format!(
                     "make sure {} is writable and has room for a copy of the database, or point \
@@ -139,6 +162,13 @@ impl Error {
             _ => Vec::new(),
         }
     }
+}
+
+fn is_busy(source: &rusqlite::Error) -> bool {
+    matches!(
+        source.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 /// Whether `path` is an IDE database, which `--source agent` leaves unread.
@@ -169,8 +199,14 @@ mod tests {
                 matches: (0..12).map(|n| format!("a{n}  agent  Title")).collect(),
             },
             Error::SchemaMismatch {
+                store: Source::Ide,
                 path: path.clone(),
                 detail: "no table".into(),
+            },
+            Error::SchemaMismatch {
+                store: Source::Agent,
+                path: PathBuf::from("projects"),
+                detail: "no transcript".into(),
             },
             Error::Database {
                 path: path.clone(),
@@ -183,16 +219,27 @@ mod tests {
             Error::Changed { path },
             Error::NoStorage,
         ];
+        let skip_ide = "rerun with `--source agent` to skip IDE sessions";
         let ide_db = Error::Io {
             path: PathBuf::from("/Cursor/User/globalStorage/state.vscdb"),
             source: io::Error::from(io::ErrorKind::PermissionDenied),
         };
-        assert_eq!(ide_db.hints(), [SKIP_IDE]);
-        let chats = Error::Io {
+        assert_eq!(ide_db.hints(), [skip_ide]);
+        assert_eq!(ide_db.skippable(), Some(Source::Ide));
+        let chats = Error::AgentAccess {
             path: PathBuf::from("/home/.cursor/chats"),
             source: io::Error::from(io::ErrorKind::PermissionDenied),
         };
-        assert!(chats.hints().is_empty());
+        assert_eq!(
+            chats.hints(),
+            ["rerun with `--source ide` to skip Agent CLI sessions"]
+        );
+        // `--storage` naming a path that cannot be read: no store to skip.
+        let storage = Error::Io {
+            path: PathBuf::from("/home/.cursor/chats"),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        assert!(storage.hints().is_empty());
         let not_a_database = Error::Database {
             path: PathBuf::from("backup.vscdb.backup"),
             source: rusqlite::Error::SqliteFailure(
@@ -200,9 +247,9 @@ mod tests {
                 None,
             ),
         };
-        assert_eq!(not_a_database.hints(), [SKIP_IDE]);
+        assert_eq!(not_a_database.hints(), [skip_ide]);
 
-        for error in errors.iter().chain([&ide_db]) {
+        for error in errors.iter().chain([&ide_db, &chats]) {
             let hints = error.hints();
             let (candidates, advice): (Vec<_>, Vec<_>) =
                 hints.iter().partition(|hint| hint.starts_with("  "));
@@ -215,6 +262,28 @@ mod tests {
                 assert_eq!(candidates.len(), 11);
                 assert!(hints[..11].iter().all(|hint| hint.starts_with("  ")));
             }
+            if let Some(store) = error.skippable() {
+                assert_eq!(hints[0], format!("rerun with {}", store.skip_option()));
+            }
         }
+    }
+
+    #[test]
+    fn schema_mismatch_names_the_store() {
+        let mismatch = |store| Error::SchemaMismatch {
+            store,
+            path: PathBuf::from("x"),
+            detail: "detail".into(),
+        };
+        assert!(
+            mismatch(Source::Agent)
+                .to_string()
+                .starts_with("unrecognized Cursor Agent CLI storage format in x: detail.")
+        );
+        assert!(
+            mismatch(Source::Ide)
+                .to_string()
+                .starts_with("unrecognized Cursor IDE storage format in x: detail.")
+        );
     }
 }

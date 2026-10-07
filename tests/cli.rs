@@ -684,9 +684,10 @@ fn healthcheck_fails_when_a_store_is_broken() {
     assert!(out.contains("sessions loaded: 4 (agent: 4, ide: 0)\n"));
     assert!(out.contains("ide store failed: unrecognized Cursor IDE storage format in "));
     // The store's own advice follows its failure.
+    // healthcheck takes no --source, so its advice names the commands that do.
     assert!(out.ends_with(
         "Cursor may have changed its storage format.\n  \
-         rerun with `--source agent` to skip IDE sessions\n  \
+         `list`, `show` and `export` accept `--source agent` to skip IDE sessions\n  \
          report it at https://github.com/julio-romero/cursor-session-rs/issues and include \
          your Cursor version\n"
     ));

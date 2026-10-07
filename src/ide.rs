@@ -5,8 +5,8 @@ use std::path::Path;
 
 use rusqlite::Connection;
 use rusqlite::types::ValueRef;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::detect::StoragePaths;
@@ -16,55 +16,96 @@ use crate::{Error, Result};
 
 const KV_TABLE: &str = "cursorDiskKV";
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Composer {
-    #[serde(default)]
-    composer_id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    created_at: Option<i64>,
-    #[serde(default)]
-    last_updated_at: Option<i64>,
-    #[serde(default)]
-    full_conversation_headers_only: Vec<ConversationHeader>,
-    /// Older Cursor versions keep the messages in the composer itself.
-    #[serde(default)]
-    conversation: Vec<Value>,
-}
+// Every field is optional and read leniently (see `lenient`), so that one
+// value of an unexpected type costs that value, not its chat or message.
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct Composer {
+    #[serde(default, deserialize_with = "lenient")]
+    composer_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_ms")]
+    created_at: Option<i64>,
+    #[serde(default, deserialize_with = "lenient_ms")]
+    last_updated_at: Option<i64>,
+    #[serde(default, deserialize_with = "lenient")]
+    full_conversation_headers_only: Vec<ConversationHeader>,
+    /// Older Cursor versions keep the messages in the composer itself.
+    #[serde(default, deserialize_with = "lenient")]
+    conversation: Vec<Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ConversationHeader {
+    #[serde(default, deserialize_with = "lenient")]
     bubble_id: Option<String>,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default, deserialize_with = "lenient")]
     kind: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Bubble {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     bubble_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     text: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     rich_text: Option<String>,
-    #[serde(default)]
-    timestamp: Option<i64>,
-    #[serde(rename = "type")]
+    #[serde(default, deserialize_with = "timestamp")]
+    timestamp: Option<String>,
+    #[serde(rename = "type", default, deserialize_with = "lenient")]
     kind: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     code_blocks: Vec<CodeBlock>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct CodeBlock {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     language: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     content: Option<String>,
+}
+
+/// A value of the expected type, or the default for `null` and any other.
+fn lenient<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned + Default,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+/// Epoch milliseconds, also with a fraction (`performance.now()` based) or
+/// as an RFC 3339 string.
+fn lenient_ms<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<i64>, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_f64().filter(|ms| ms.is_finite()).map(|ms| ms as i64)),
+        Value::String(text) => chrono::DateTime::parse_from_rfc3339(&text)
+            .ok()
+            .map(|time| time.timestamp_millis()),
+        _ => None,
+    })
+}
+
+/// A message time as stored: a number as its digits, or a string as it is.
+fn timestamp<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(text) if !text.is_empty() => Some(text),
+        _ => None,
+    })
 }
 
 pub fn load_sessions(paths: &StoragePaths, warnings: &mut Vec<String>) -> Result<Vec<Session>> {
@@ -124,7 +165,8 @@ fn read_sessions(
 
     // `bubbleId:<chat id>:<message id>` rows, by chat and then message ID.
     let mut bubbles: HashMap<String, HashMap<String, Bubble>> = HashMap::new();
-    let skipped = read_rows(conn, db_path, "bubbleId:", |key, value| {
+    let mut read = 0;
+    let skipped_bubbles = read_rows(conn, db_path, "bubbleId:", |key, value| {
         let Some(bubble) = parse_object::<Bubble>(value) else {
             return false;
         };
@@ -138,13 +180,17 @@ fn read_sessions(
             .entry(chat.to_string())
             .or_default()
             .insert(id, bubble);
+        read += 1;
         true
     })?;
-    warn_skipped(warnings, skipped, "message", db_path);
+    #[cfg(test)]
+    AFTER_BUBBLES.with_borrow_mut(|hook| hook.as_mut().map(|hook| hook()));
 
     let mut sessions = Vec::new();
     // Chats with stored messages, and those of them that lead to none.
     let (mut stored, mut unlinked) = (0, 0);
+    // Chats that list messages, and those of them with a message to show.
+    let (mut listing, mut shown) = (0, 0);
     let skipped = read_rows(conn, db_path, "composerData:", |key, value| {
         let Some(composer) = parse_object::<Composer>(value) else {
             return false;
@@ -163,11 +209,19 @@ fn read_sessions(
         let Some(id) = id else {
             return false;
         };
-        let chat_bubbles = bubbles.get(&id);
+        let lists = !composer.full_conversation_headers_only.is_empty()
+            || !composer.conversation.is_empty();
+        // Each chat takes its messages, so their text is not held twice.
+        let chat_bubbles = bubbles.remove(&id);
+        let has_stored = chat_bubbles.is_some();
         let (session, linked) = composer_session(id, composer, chat_bubbles);
-        if chat_bubbles.is_some() {
+        if has_stored {
             stored += 1;
             unlinked += usize::from(!linked);
+        }
+        if lists {
+            listing += 1;
+            shown += usize::from(!session.messages.is_empty());
         }
         sessions.push(session);
         true
@@ -176,6 +230,7 @@ fn read_sessions(
     // Rows that are all unreadable, or chats that all lead to none of their
     // messages, mean the format changed rather than that there is nothing.
     let mismatch = |detail| Error::SchemaMismatch {
+        store: Source::Ide,
         path: db_path.to_path_buf(),
         detail,
     };
@@ -185,11 +240,24 @@ fn read_sessions(
             _ => format!("none of its {skipped} composerData rows could be read"),
         }));
     }
+    if read == 0 && skipped_bubbles > 0 {
+        return Err(mismatch(match skipped_bubbles {
+            1 => "its bubbleId row could not be read".to_string(),
+            _ => format!("none of its {skipped_bubbles} bubbleId rows could be read"),
+        }));
+    }
     if unlinked > 0 && unlinked == stored {
         return Err(mismatch(
             "no chat lists the messages stored for it".to_string(),
         ));
     }
+    if listing > 0 && shown == 0 {
+        return Err(mismatch(match listing {
+            1 => "its one chat that lists messages has no readable message".to_string(),
+            _ => format!("none of its {listing} chats that list messages has a readable message"),
+        }));
+    }
+    warn_skipped(warnings, skipped_bubbles, "message", db_path);
     warn_skipped(warnings, skipped, "composer", db_path);
     if unlinked > 0 {
         warnings.push(format!(
@@ -198,6 +266,14 @@ fn read_sessions(
         ));
     }
     Ok(sessions)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs on this thread between reading the messages and reading the chats.
+    #[allow(clippy::type_complexity)]
+    static AFTER_BUBBLES: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Confirms `cursorDiskKV(key, value)` exists. `Ok(false)` means the database
@@ -216,6 +292,7 @@ fn check_schema(conn: &Connection, db_path: &Path) -> Result<bool> {
         return Ok(false);
     }
     let mismatch = |detail| Error::SchemaMismatch {
+        store: Source::Ide,
         path: db_path.to_path_buf(),
         detail,
     };
@@ -311,7 +388,7 @@ fn warn_skipped(warnings: &mut Vec<String>, skipped: usize, kind: &str, db_path:
 fn composer_session(
     id: String,
     composer: Composer,
-    bubbles: Option<&HashMap<String, Bubble>>,
+    mut bubbles: Option<HashMap<String, Bubble>>,
 ) -> (Session, bool) {
     let mut messages = Vec::new();
     let mut linked = false;
@@ -319,17 +396,17 @@ fn composer_session(
         let bubble = header
             .bubble_id
             .as_ref()
-            .and_then(|bubble_id| bubbles?.get(bubble_id));
+            .and_then(|bubble_id| bubbles.as_mut()?.remove(bubble_id));
         if let Some(bubble) = bubble {
             linked = true;
             messages.extend(message(header.kind.or(bubble.kind), bubble));
         }
     }
     if composer.full_conversation_headers_only.is_empty() {
-        for value in &composer.conversation {
-            if let Ok(bubble) = Bubble::deserialize(value) {
+        for value in composer.conversation {
+            if let Ok(bubble) = serde_json::from_value::<Bubble>(value) {
                 linked = true;
-                messages.extend(message(bubble.kind, &bubble));
+                messages.extend(message(bubble.kind, bubble));
             }
         }
     }
@@ -352,7 +429,8 @@ fn composer_session(
 }
 
 /// A message from `bubble`, unless it has no text or code.
-fn message(kind: Option<i64>, bubble: &Bubble) -> Option<Message> {
+fn message(kind: Option<i64>, mut bubble: Bubble) -> Option<Message> {
+    let timestamp = bubble.timestamp.take();
     let content = extract_bubble_text(bubble);
     if content.is_empty() {
         return None;
@@ -364,16 +442,18 @@ fn message(kind: Option<i64>, bubble: &Bubble) -> Option<Message> {
     Some(Message {
         role: role.to_string(),
         content,
-        timestamp: bubble.timestamp.map(|ms| ms.to_string()),
+        timestamp,
     })
 }
 
-fn extract_bubble_text(bubble: &Bubble) -> String {
+fn extract_bubble_text(bubble: Bubble) -> String {
     let mut parts = Vec::new();
-    if let Some(text) = bubble.text.as_deref() {
-        let text = text.trim();
-        if !text.is_empty() {
-            parts.push(text.to_string());
+    if let Some(text) = bubble.text {
+        let trimmed = text.trim();
+        if trimmed.len() == text.len() && !text.is_empty() {
+            parts.push(text);
+        } else if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
         }
     }
     if parts.is_empty()
@@ -386,14 +466,18 @@ fn extract_bubble_text(bubble: &Bubble) -> String {
             parts.push(extracted);
         }
     }
-    for block in &bubble.code_blocks {
-        if let Some(content) = block.content.as_deref() {
+    for block in bubble.code_blocks {
+        if let Some(content) = block.content {
             if content.is_empty() {
                 continue;
             }
             let lang = block.language.as_deref().unwrap_or("");
             parts.push(format!("```{lang}\n{content}\n```"));
         }
+    }
+    // The text alone, as most messages are, is moved rather than copied.
+    if parts.len() == 1 {
+        return parts.pop().unwrap_or_default();
     }
     parts.join("\n\n")
 }
@@ -506,9 +590,11 @@ mod tests {
             ),
             ("composerData:number", SqlValue::Integer(7)),
             ("composerData:null", SqlValue::Null),
+            ("bubbleId:c1:bad", SqlValue::Text(r#"{"bubbleId":"#.into())),
+            // Odd field types cost only those fields.
             (
-                "bubbleId:c1:bad",
-                SqlValue::Text(r#"{"bubbleId":5}"#.into()),
+                "bubbleId:c1:odd",
+                SqlValue::Text(r#"{"bubbleId":5,"text":["a"],"codeBlocks":null}"#.into()),
             ),
         ]);
         create_db(&path, &rows);
@@ -524,6 +610,35 @@ mod tests {
                 format!("skipped 3 unreadable composer rows in {}", path.display()),
             ]
         );
+    }
+
+    #[test]
+    fn chats_and_their_messages_come_from_one_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        create_db(&path, &well_formed(false));
+        // Cursor has the database open, so it is read in place while it writes.
+        let writer = Connection::open(&path).unwrap();
+        writer.pragma_update(None, "journal_mode", "wal").unwrap();
+        writer
+            .execute("INSERT INTO ItemTable VALUES ('open', 'yes')", [])
+            .unwrap();
+        // A chat and its message, committed between reading messages and chats.
+        AFTER_BUBBLES.set(Some(Box::new(move || {
+            writer
+                .execute_batch(
+                    r#"INSERT INTO cursorDiskKV VALUES ('bubbleId:late:b1', '{"type":1,"text":"late"}');
+                       INSERT INTO cursorDiskKV VALUES ('composerData:late', '{"fullConversationHeadersOnly":[{"bubbleId":"b1"}]}');"#,
+                )
+                .unwrap();
+        })));
+        let (sessions, warnings) = load(&path);
+        AFTER_BUBBLES.set(None);
+        let sessions = sessions.unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["c1"]);
+        assert_eq!(load(&path).0.unwrap().len(), 2);
     }
 
     #[test]

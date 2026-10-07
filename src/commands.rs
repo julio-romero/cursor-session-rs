@@ -38,6 +38,7 @@ fn load(
     err: &mut dyn Write,
 ) -> Result<Vec<Session>> {
     let loaded = load_sessions(paths, opts)?;
+    print_warnings(&loaded.notices, true, err)?;
     print_warnings(&loaded.warnings, verbose, err)?;
     Ok(loaded.sessions)
 }
@@ -243,6 +244,7 @@ fn cmd_healthcheck(
 
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
+    let mut notices = Vec::new();
     let mut failed: Vec<(Source, anyhow::Error)> = [chats, transcripts]
         .into_iter()
         .filter_map(|checked| checked.err())
@@ -253,6 +255,7 @@ fn cmd_healthcheck(
             Ok(loaded) => {
                 sessions.extend(loaded.sessions);
                 warnings.extend(loaded.warnings);
+                notices.extend(loaded.notices);
             }
             // The agent store fails with the location check's own error when
             // none of its locations can be read.
@@ -265,6 +268,7 @@ fn cmd_healthcheck(
             }
         }
     }
+    print_warnings(&notices, true, err)?;
     print_warnings(&warnings, args.verbose, err)?;
 
     let sessions = model::merge_sessions(sessions);
@@ -290,7 +294,7 @@ fn cmd_healthcheck(
     }
     for (source, error) in &failed {
         writeln!(out, "{} store failed: {error:#}", source.as_str())?;
-        for hint in hints(error) {
+        for hint in hints(error, paths, true) {
             writeln!(out, "  {hint}")?;
         }
     }
@@ -310,13 +314,29 @@ fn cmd_healthcheck(
     }
 }
 
-/// The guidance of the library error behind `error`, if any.
-pub fn hints(error: &anyhow::Error) -> Vec<String> {
-    error
+/// The guidance of the library error behind `error`, if any. The `--source`
+/// that skips the failed store is only offered when the other store was
+/// found; `healthcheck`, which takes no `--source`, names the commands that do.
+pub fn hints(error: &anyhow::Error, paths: &StoragePaths, healthcheck: bool) -> Vec<String> {
+    let Some(error) = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<Error>())
-        .map(Error::hints)
-        .unwrap_or_default()
+    else {
+        return Vec::new();
+    };
+    let mut hints = error.hints();
+    if let Some(store) = error.skippable() {
+        let other_found = match store {
+            Source::Agent => paths.global_storage_db.is_some(),
+            Source::Ide => paths.chats_dir.is_some() || paths.projects_dir.is_some(),
+        };
+        if !other_found {
+            hints.remove(0);
+        } else if healthcheck {
+            hints[0] = format!("`list`, `show` and `export` accept {}", store.skip_option());
+        }
+    }
+    hints
 }
 
 /// Checks that a found location can be opened, since the loaders skip what

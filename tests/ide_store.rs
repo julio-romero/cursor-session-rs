@@ -266,6 +266,56 @@ fn changed_row_formats() -> Vec<(Vec<(String, SqlValue)>, &'static str)> {
             ],
             "no chat lists the messages stored for it",
         ),
+        (
+            vec![
+                composer(
+                    "m1",
+                    &composer_json("m1", "Encoded", 1, 1, &[("b1", 1), ("b2", 2)]),
+                    Stored::Text,
+                ),
+                encoded("bubbleId:m1:b1"),
+                encoded("bubbleId:m1:b2"),
+            ],
+            "none of its 2 bubbleId rows could be read",
+        ),
+        // The messages are kept under a key this version does not know.
+        (
+            vec![
+                composer(
+                    "k1",
+                    &composer_json("k1", "Moved", 1, 1, &[("b1", 1)]),
+                    Stored::Text,
+                ),
+                (
+                    "messageV2:k1:b1".to_string(),
+                    Stored::Text.value(&text_bubble("b1", 1, "hello")),
+                ),
+            ],
+            "its one chat that lists messages has no readable message",
+        ),
+        // The text is kept in a field this version does not know.
+        (
+            ["t1", "t2"]
+                .into_iter()
+                .flat_map(|id| {
+                    [
+                        composer(
+                            id,
+                            &composer_json(id, "Renamed", 1, 1, &[("b1", 1), ("b2", 2)]),
+                            Stored::Text,
+                        ),
+                        bubble(id, "b1", &json!({"type": 1, "content": "hi"}), Stored::Text),
+                        bubble(
+                            id,
+                            "b2",
+                            &json!({"type": 2, "content": "hello"}),
+                            Stored::Text,
+                        ),
+                    ]
+                })
+                .collect(),
+            "none of its 2 chats that list messages has a readable message",
+        ),
     ]
 }
 
@@ -292,6 +342,81 @@ fn changed_row_formats_are_a_clear_error() {
             4
         );
     }
+}
+
+#[test]
+fn odd_field_types_cost_only_those_fields() {
+    let fixture = Fixture::new();
+    let chat = |id: &str, fields: serde_json::Value| {
+        let mut json = composer_json(id, id, 1_757_000_000_000, 1_757_000_000_000, &[("b1", 1)]);
+        for (key, value) in fields.as_object().unwrap() {
+            json[key] = value.clone();
+        }
+        [
+            composer(id, &json, Stored::Text),
+            bubble(id, "b1", &text_bubble("b1", 1, "question"), Stored::Text),
+        ]
+    };
+    let mut rows: Vec<_> = [
+        chat("null-headers", json!({"fullConversationHeadersOnly": null})),
+        chat("fractional", json!({"createdAt": 1_757_000_000_000.5})),
+        chat("iso-time", json!({"lastUpdatedAt": "2025-09-04T15:33:20Z"})),
+        chat("numeric-name", json!({"name": 42})),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    rows.extend([
+        composer(
+            "odd-bubbles",
+            &composer_json("odd-bubbles", "Odd bubbles", 1, 1, &[("b1", 1), ("b2", 2)]),
+            Stored::Text,
+        ),
+        bubble(
+            "odd-bubbles",
+            "b1",
+            &json!({"type": 1, "text": "when?", "timestamp": "2023-11-14T22:13:20.000Z"}),
+            Stored::Text,
+        ),
+        bubble(
+            "odd-bubbles",
+            "b2",
+            &json!({"type": 2, "text": "now", "codeBlocks": null, "bubbleId": 7}),
+            Stored::Text,
+        ),
+    ]);
+    let db = fixture.write_ide_db(Journal::Delete, &rows);
+    let (sessions, warnings) = load_db(&db);
+    // Without its headers, that chat no longer lists its stored message.
+    assert_eq!(
+        warnings,
+        [format!(
+            "1 chat(s) in {} list none of their stored messages",
+            db.display()
+        )]
+    );
+    let mut sessions = sessions.unwrap();
+    sessions.sort_by(|a, b| a.id.cmp(&b.id));
+    let summary: Vec<(&str, &str, usize)> = sessions
+        .iter()
+        .map(|s| (s.id.as_str(), s.title.as_str(), s.messages.len()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("fractional", "fractional", 1),
+            ("iso-time", "iso-time", 1),
+            ("null-headers", "null-headers", 0),
+            ("numeric-name", "Untitled", 1),
+            ("odd-bubbles", "Odd bubbles", 2),
+        ]
+    );
+    assert_eq!(sessions[0].created_at_ms, Some(1_757_000_000_000));
+    assert_eq!(sessions[1].updated_at_ms, Some(1_757_000_000_000));
+    assert_eq!(
+        sessions[4].messages[0].timestamp.as_deref(),
+        Some("2023-11-14T22:13:20.000Z")
+    );
 }
 
 #[test]
@@ -478,12 +603,15 @@ fn malformed_rows_are_skipped_and_reported() {
         .iter()
         .map(|s| (s.id.as_str(), s.title.as_str(), s.messages.len()))
         .collect();
+    // Fields of an unexpected type are left out, not their chat.
     assert_eq!(
         summary,
         [
+            ("bad-headers", "Untitled", 0),
             ("dangling", "Bubbles are gone", 0),
             ("keyed", "Named by its key", 0),
             ("ok", "Still loads", 2),
+            ("wrong-types", "Untitled", 0),
         ]
     );
     let ok = sessions.iter().find(|s| s.id == "ok").unwrap();
@@ -494,8 +622,8 @@ fn malformed_rows_are_skipped_and_reported() {
     assert_eq!(
         warnings,
         [
-            format!("skipped 3 unreadable message rows in {}", db.display()),
-            format!("skipped 8 unreadable composer rows in {}", db.display()),
+            format!("skipped 2 unreadable message rows in {}", db.display()),
+            format!("skipped 6 unreadable composer rows in {}", db.display()),
         ]
     );
     assert_eq!(fixture.load().warnings, warnings);
@@ -508,12 +636,12 @@ fn malformed_rows_are_warnings_on_the_command_line() {
 
     let output = fixture.cmd().args(["-v", "list"]).output().unwrap();
     assert!(output.status.success());
-    assert!(stdout(&output).starts_with("Found 3 session(s)\n"));
+    assert!(stdout(&output).starts_with("Found 5 session(s)\n"));
     let err = stderr(&output);
     assert!(
         err.ends_with(&format!(
-            "warning: skipped 3 unreadable message rows in {path}\n\
-             warning: skipped 8 unreadable composer rows in {path}\n",
+            "warning: skipped 2 unreadable message rows in {path}\n\
+             warning: skipped 6 unreadable composer rows in {path}\n",
             path = db.display()
         )),
         "{err}"

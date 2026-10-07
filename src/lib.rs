@@ -22,14 +22,19 @@ pub struct LoadOptions {
 #[derive(Debug, Clone, Default)]
 pub struct Loaded {
     pub sessions: Vec<Session>,
+    /// Rows and files that were skipped; the binary prints them with `-v`.
     pub warnings: Vec<String>,
+    /// Problems that change what is shown although loading went on, such as
+    /// a location that could not be read; the binary always prints them.
+    pub notices: Vec<String>,
 }
 
 pub fn load_sessions(paths: &StoragePaths, opts: &LoadOptions) -> Result<Loaded> {
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
+    let mut notices = Vec::new();
     if opts.source.is_none_or(|source| source == Source::Agent) {
-        sessions.extend(agent::load_sessions(paths, &mut warnings)?);
+        sessions.extend(agent::load_sessions(paths, &mut warnings, &mut notices)?);
     }
     if opts.source.is_none_or(|source| source == Source::Ide) {
         sessions.extend(ide::load_sessions(paths, &mut warnings)?);
@@ -37,6 +42,7 @@ pub fn load_sessions(paths: &StoragePaths, opts: &LoadOptions) -> Result<Loaded>
     Ok(Loaded {
         sessions: model::merge_sessions(sessions),
         warnings,
+        notices,
     })
 }
 

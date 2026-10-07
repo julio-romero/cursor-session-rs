@@ -34,13 +34,20 @@ fn main() -> ExitCode {
     }
     let mut out = PipeWriter::new(stdout_sink(&opts));
     let mut err = diagnostics(io::stderr().lock());
-    let result = run(cli, &opts, &mut out, &mut err).and_then(|()| Ok(out.flush()?));
+    let (paths, result) = match resolve_paths(cli.storage.as_deref()) {
+        Ok(paths) => {
+            let result =
+                run(cli, &paths, &opts, &mut out, &mut err).and_then(|()| Ok(out.flush()?));
+            (paths, result)
+        }
+        Err(error) => (StoragePaths::default(), Err(error)),
+    };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if out.closed() && is_broken_pipe(&error) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = out.flush();
-            report(&error, &mut err);
+            report(&error, &paths, &mut err);
             ExitCode::FAILURE
         }
     }
@@ -94,8 +101,13 @@ fn diagnostics<W: Write>(stderr: W) -> IgnoreErrors<TerminalWriter<W>> {
     IgnoreErrors(TerminalWriter::new(stderr, false))
 }
 
-fn run(cli: Cli, opts: &OutputOpts, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
-    let paths = resolve_paths(cli.storage.as_deref())?;
+fn run(
+    cli: Cli,
+    paths: &StoragePaths,
+    opts: &OutputOpts,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
     cursor_session::remove_stale_snapshot_copies();
     if cli.verbose {
         writeln!(err, "chats: {}", shown(paths.chats_dir.as_deref()))?;
@@ -103,7 +115,7 @@ fn run(cli: Cli, opts: &OutputOpts, out: &mut dyn Write, err: &mut dyn Write) ->
         writeln!(err, "ide db: {}", shown(paths.global_storage_db.as_deref()))?;
     }
 
-    commands::run(cli.command, &paths, opts, out, err)
+    commands::run(cli.command, paths, opts, out, err)
 }
 
 /// A storage path for the verbose lines.
@@ -124,12 +136,12 @@ fn resolve_paths(storage: Option<&Path>) -> Result<StoragePaths> {
 
 /// Prints the error, its causes, and any hints from the library error. Write
 /// failures are ignored: there is nowhere left to report them.
-fn report(error: &anyhow::Error, err: &mut dyn Write) {
+fn report(error: &anyhow::Error, paths: &StoragePaths, err: &mut dyn Write) {
     let _ = writeln!(err, "error: {error}");
     for cause in error.chain().skip(1) {
         let _ = writeln!(err, "  caused by: {cause}");
     }
-    for hint in commands::hints(error) {
+    for hint in commands::hints(error, paths, false) {
         let _ = writeln!(err, "{hint}");
     }
 }
@@ -160,8 +172,12 @@ mod tests {
     use super::*;
 
     fn reported(error: &anyhow::Error) -> String {
+        reported_with(error, &StoragePaths::default())
+    }
+
+    fn reported_with(error: &anyhow::Error, paths: &StoragePaths) -> String {
         let mut buf = Vec::new();
-        report(error, &mut buf);
+        report(error, paths, &mut buf);
         String::from_utf8(buf).unwrap()
     }
 
@@ -226,7 +242,9 @@ mod tests {
             width: None,
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        run(parse_cli(argv).unwrap(), &opts, &mut out, &mut err).unwrap();
+        let cli = parse_cli(argv).unwrap();
+        let paths = resolve_paths(cli.storage.as_deref()).unwrap();
+        run(cli, &paths, &opts, &mut out, &mut err).unwrap();
         let resolved = StoragePaths::from_custom(&projects, None).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
@@ -250,6 +268,42 @@ mod tests {
         assert_eq!(
             reported(&error),
             "error: could not load sessions\n  caused by: reading /nope\n  caused by: no such file\n"
+        );
+    }
+
+    #[test]
+    fn skip_hints_only_name_a_store_that_was_found() {
+        let error = || {
+            anyhow::Error::from(Error::SchemaMismatch {
+                store: cursor_session::model::Source::Ide,
+                path: PathBuf::from("state.vscdb"),
+                detail: "detail".into(),
+            })
+        };
+        let skip = "rerun with `--source agent` to skip IDE sessions";
+        // `--storage state.vscdb`: there are no agent sessions to fall back on.
+        let ide_only = StoragePaths {
+            global_storage_db: Some(PathBuf::from("state.vscdb")),
+            ..Default::default()
+        };
+        assert!(!reported_with(&error(), &ide_only).contains(skip));
+        let both = StoragePaths {
+            chats_dir: Some(PathBuf::from("chats")),
+            ..ide_only.clone()
+        };
+        assert!(reported_with(&error(), &both).contains(&format!("\n{skip}\n")));
+        assert_eq!(
+            commands::hints(&error(), &both, true)[0],
+            "`list`, `show` and `export` accept `--source agent` to skip IDE sessions"
+        );
+
+        let agent = anyhow::Error::from(Error::AgentAccess {
+            path: PathBuf::from("chats"),
+            source: io::Error::from(ErrorKind::PermissionDenied),
+        });
+        assert!(
+            reported_with(&agent, &both)
+                .ends_with("\nrerun with `--source ide` to skip Agent CLI sessions\n")
         );
     }
 
@@ -297,7 +351,7 @@ mod tests {
         })
         .context("query \u{1b}[2Jcc");
         let mut buf = Vec::new();
-        report(&error, &mut diagnostics(&mut buf));
+        report(&error, &StoragePaths::default(), &mut diagnostics(&mut buf));
         let text = String::from_utf8(buf).unwrap();
         assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
         assert!(text.starts_with("error: query cc\n  caused by: "));
@@ -316,7 +370,11 @@ mod tests {
                 Err(ErrorKind::BrokenPipe.into())
             }
         }
-        report(&anyhow::anyhow!("boom"), &mut Closed);
+        report(
+            &anyhow::anyhow!("boom"),
+            &StoragePaths::default(),
+            &mut Closed,
+        );
     }
 
     #[test]
