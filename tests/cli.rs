@@ -357,6 +357,23 @@ fn show_json_has_the_documented_keys() {
         "error: session not found: c0ffee00\n\
          rerun without `--source agent` to search IDE sessions too\n"
     );
+    assert_eq!(
+        fails(
+            &fixture,
+            &[
+                "export",
+                "--session-id",
+                "c0ffee00",
+                "--source",
+                "agent",
+                "--out",
+                "none"
+            ]
+        ),
+        "error: session not found: c0ffee00\n\
+         rerun without `--source agent` to search IDE sessions too\n"
+    );
+    assert!(!fixture.home().join("none").exists());
     // With only the IDE database to read, `--source agent` reads nothing.
     let db = fixture.ide_db_path();
     let storage = ["--storage", db.to_str().unwrap()];
@@ -974,6 +991,36 @@ fn export_selects_by_id_workspace_and_source() {
 }
 
 #[test]
+fn ids_that_differ_only_in_case_are_exported_to_files_of_their_own() {
+    let fixture = Fixture::new();
+    let lower = "abcdef00-0000-4000-8000-000000000001";
+    let upper = lower.to_uppercase();
+    for (id, cwd, updated) in [
+        (lower, PROJECT_X, 1_757_000_000_002_i64),
+        (upper.as_str(), PROJECT_Y, 1_757_000_000_001),
+    ] {
+        fixture.write_meta_json(
+            cwd,
+            id,
+            &serde_json::json!({"title": id, "updatedAtMs": updated, "cwd": cwd}),
+        );
+    }
+    let out = ok(&fixture, &["export", "--out", "cased"]);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    // The newer keeps its plain name; the other one's gets a hash added, as
+    // macOS and Windows would take both names for one file.
+    let files = exported_files(&fixture.home().join("cased"));
+    assert_eq!(files.len(), 2, "{files:?}");
+    assert!(files.contains(&format!("{lower}.md")), "{files:?}");
+    assert!(
+        files
+            .iter()
+            .any(|name| name.starts_with(&format!("{upper}_")) && name.ends_with(".md")),
+        "{files:?}"
+    );
+}
+
+#[test]
 fn meta_json_in_a_new_format_is_a_notice_and_its_workspace_still_matches() {
     let fixture = Fixture::new();
     for id in [
@@ -1161,9 +1208,13 @@ fn notices_print_without_verbose() {
             "CREATE TABLE meta2 (key TEXT PRIMARY KEY, value BLOB);",
         );
     }
+    // A session that was never used holds an empty store.db, which counts
+    // neither way.
+    fixture.write_meta_json(PROJECT_X, "s3", &serde_json::json!({"title": "s3"}));
+    write(&fixture.session_dir(PROJECT_X, "s3").join("store.db"), "");
     let output = run(&fixture, &["list", "--json"]);
     assert!(output.status.success());
-    assert_eq!(ids(&json(&stdout(&output))).len(), 2);
+    assert_eq!(ids(&json(&stdout(&output))).len(), 3);
     let err = stderr(&output);
     assert!(
         err.starts_with(&format!(

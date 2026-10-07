@@ -620,9 +620,36 @@ fn text_cut_inside_an_emoji_costs_only_that_character() {
                 ),
             ),
             row("bubbleId:cut-ide:b1", format!(r#"{{"type":1,"text":"Done {cut}"}}"#)),
-            row("bubbleId:cut-ide:b2", r#"{"type":2,"text":"ok"}"#.to_string()),
+            // Rich text is JSON inside a JSON string, with the cut inside.
+            row(
+                "bubbleId:cut-ide:b2",
+                format!(
+                    r#"{{"type":2,"text":"","richText":"{{\"root\":{{\"children\":[{{\"text\":\"Rich {}\"}}]}}}}"}}"#,
+                    cut.replace('\\', "\\\\")
+                ),
+            ),
         ],
     );
+    write(
+        &fixture.session_dir(PROJECT_X, "cut-meta").join("meta.json"),
+        &format!(r#"{{"title":"Plan {cut}"}}"#),
+    );
+    // A store.db `meta` value as plain JSON, and hex-encoded.
+    let store_meta = |id: &str, value: &str| {
+        write_sql_db(
+            &fixture.session_dir(PROJECT_X, id).join("store.db"),
+            &format!(
+                "CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB);
+                 INSERT INTO meta VALUES ('0', '{value}');"
+            ),
+        );
+    };
+    store_meta("cut-store", &format!(r#"{{"name":"Named {cut}"}}"#));
+    let hex: String = format!(r#"{{"name":"Hex {cut}"}}"#)
+        .bytes()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    store_meta("cut-hex", &hex);
     write(
         &fixture
             .projects_dir()
@@ -637,9 +664,17 @@ fn text_cut_inside_an_emoji_costs_only_that_character() {
 
     let loaded = fixture.load();
     assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    assert!(loaded.notices.is_empty(), "{:?}", loaded.notices);
     let ide = get(&loaded.sessions, "cut-ide");
     assert_eq!(ide.title, "Fix the build \u{fffd}");
-    assert_eq!(contents(ide), ["Done \u{fffd}", "ok"]);
+    assert_eq!(contents(ide), ["Done \u{fffd}", "Rich \u{fffd}"]);
+    for (id, title) in [
+        ("cut-meta", "Plan \u{fffd}"),
+        ("cut-store", "Named \u{fffd}"),
+        ("cut-hex", "Hex \u{fffd}"),
+    ] {
+        assert_eq!(get(&loaded.sessions, id).title, title);
+    }
     let agent = get(&loaded.sessions, "cut-agent");
     assert_eq!(contents(agent), ["hi", "Sure \u{fffd}"]);
 }

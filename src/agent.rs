@@ -1114,16 +1114,21 @@ mod tests {
 
         // A message of a known role whose text moved elsewhere counts too,
         // and so do roles this version does not know.
+        for id in ["a", "b"] {
+            fs::remove_file(path(id)).unwrap();
+        }
         for text in [
             "{\"role\":\"user\",\"message\":{\"parts\":[\"hello\"]}}\n".to_string(),
             line("role", "human", "hello") + &line("role", "ai", "hi"),
         ] {
             fs::remove_file(path("c")).unwrap();
             write(&path("c"), &text);
-            assert!(matches!(
-                load_transcripts(&projects),
-                Err(Error::SchemaMismatch { .. })
-            ));
+            let err = load_transcripts(&projects).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(": its one transcript has no readable message."),
+                "{err}"
+            );
         }
     }
 
