@@ -1,12 +1,13 @@
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::{Result, bail};
 use cursor_session::detect::StoragePaths;
 use cursor_session::export;
 use cursor_session::model::{self, Session, SessionSummary, Source};
 use cursor_session::ui;
-use cursor_session::{Error, LoadOptions, Loaded, filter_workspace, find_session, load_sessions};
+use cursor_session::{Error, LoadOptions, filter_workspace, find_session, load_sessions};
 use serde::Serialize;
 
 use crate::cli::{Commands, ExportArgs, ListArgs, ShowArgs};
@@ -142,12 +143,23 @@ fn cmd_healthcheck(
     err: &mut dyn Write,
     verbose: bool,
 ) -> Result<()> {
-    // Check each store on its own so one failure does not hide the other.
-    let [agent_store, ide_store] =
-        [Source::Agent, Source::Ide].map(|source| check_store(paths, source));
-    let status = |store: &cursor_session::Result<Loaded>| {
-        if store.is_ok() { "ok" } else { "failed" }
+    // Check each location and store on its own so one failure does not hide
+    // another. The agent loader skips a location it cannot read and loads the
+    // other.
+    let load = |source| {
+        load_sessions(
+            paths,
+            &LoadOptions {
+                source: Some(source),
+            },
+        )
     };
+    let chats = check_readable(paths.chats_dir.as_deref());
+    let transcripts = check_readable(paths.projects_dir.as_deref());
+    let agent_store = load(Source::Agent);
+    let ide_store =
+        check_readable(paths.global_storage_db.as_deref()).and_then(|()| load(Source::Ide));
+    let status = |ok: bool| if ok { "ok" } else { "failed" };
 
     writeln!(out, "Cursor session healthcheck\n")?;
     match &paths.chats_dir {
@@ -155,7 +167,7 @@ fn cmd_healthcheck(
             out,
             "agent chats: {} ({})",
             dir.display(),
-            status(&agent_store)
+            status(chats.is_ok() && agent_store.is_ok())
         )?,
         None => writeln!(out, "agent chats: not found (~/.cursor/chats)")?,
     }
@@ -164,18 +176,27 @@ fn cmd_healthcheck(
             out,
             "transcripts: {}/{{project}}/agent-transcripts ({})",
             dir.display(),
-            status(&agent_store)
+            status(transcripts.is_ok() && agent_store.is_ok())
         )?,
         None => writeln!(out, "transcripts: not found (~/.cursor/projects)")?,
     }
     match &paths.global_storage_db {
-        Some(db) => writeln!(out, "ide db: {} ({})", db.display(), status(&ide_store))?,
+        Some(db) => writeln!(
+            out,
+            "ide db: {} ({})",
+            db.display(),
+            status(ide_store.is_ok())
+        )?,
         None => writeln!(out, "ide db: not found (state.vscdb)")?,
     }
 
     let mut sessions = Vec::new();
     let mut warnings = Vec::new();
-    let mut failed = Vec::new();
+    let mut failed: Vec<(Source, anyhow::Error)> = [chats, transcripts]
+        .into_iter()
+        .filter_map(|checked| checked.err())
+        .map(|error| (Source::Agent, error.into()))
+        .collect();
     for (source, result) in [(Source::Agent, agent_store), (Source::Ide, ide_store)] {
         match result {
             Ok(loaded) => {
@@ -211,9 +232,11 @@ fn cmd_healthcheck(
     {
         return Err(Error::NoStorage.into());
     }
-    match failed.as_slice() {
+    let mut failed_stores: Vec<Source> = failed.iter().map(|(source, _)| *source).collect();
+    failed_stores.dedup();
+    match failed_stores.as_slice() {
         [] => Ok(()),
-        [(source, _)] => bail!(
+        [source] => bail!(
             "healthcheck failed: the {} store could not be loaded",
             source.as_str()
         ),
@@ -221,28 +244,21 @@ fn cmd_healthcheck(
     }
 }
 
-/// Loads one store after checking that its paths can be opened, since the
-/// loaders skip paths they cannot read.
-fn check_store(paths: &StoragePaths, source: Source) -> cursor_session::Result<Loaded> {
-    let found = match source {
-        Source::Agent => vec![&paths.chats_dir, &paths.projects_dir],
-        Source::Ide => vec![&paths.global_storage_db],
+/// Checks that a found location can be opened, since the loaders skip what
+/// they cannot read.
+fn check_readable(path: Option<&Path>) -> cursor_session::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
     };
-    for path in found.into_iter().flatten() {
-        let readable = if path.is_dir() {
-            fs::read_dir(path).map(drop)
-        } else {
-            fs::File::open(path).map(drop)
-        };
-        readable.map_err(|source| Error::Io {
-            path: path.clone(),
-            source,
-        })?;
-    }
-    let opts = LoadOptions {
-        source: Some(source),
+    let readable = if path.is_dir() {
+        fs::read_dir(path).map(drop)
+    } else {
+        fs::File::open(path).map(drop)
     };
-    load_sessions(paths, &opts)
+    readable.map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -493,6 +509,45 @@ mod tests {
         assert!(out.contains("state.vscdb (failed)\n"));
         assert!(out.contains("agent-transcripts (ok)\n"));
         assert!(out.contains("ide store failed: could not access "));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn healthcheck_reports_each_agent_location_on_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let chats = dir.path().join("chats");
+        fs::create_dir(&chats).unwrap();
+        fs::set_permissions(&chats, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&chats).is_ok(); // root ignores permissions
+        let paths = StoragePaths {
+            chats_dir: Some(chats.clone()),
+            projects_dir: Some(fixture_projects()),
+            ..Default::default()
+        };
+        let (result, out) = run_args(&paths, &["healthcheck"]);
+        fs::set_permissions(&chats, fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            return;
+        }
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "healthcheck failed: the agent store could not be loaded"
+        );
+        assert!(out.contains(&format!("agent chats: {} (failed)\n", chats.display())));
+        assert!(out.contains("agent-transcripts (ok)\n"), "{out}");
+        assert!(
+            out.contains("sessions loaded: 1 (agent: 1, ide: 0)\n"),
+            "{out}"
+        );
+        let failures: Vec<&str> = out.lines().filter(|l| l.contains(" failed: ")).collect();
+        assert_eq!(failures.len(), 1, "{out}");
+        assert!(failures[0].starts_with(&format!(
+            "agent store failed: could not access {}: ",
+            chats.display()
+        )));
     }
 
     #[test]
