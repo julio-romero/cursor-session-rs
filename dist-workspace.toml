@@ -24,3 +24,6 @@ publish-jobs = ["homebrew", "./publish-crates"]
 
 [dist.github-custom-job-permissions]
 "publish-crates" = { contents = "read" }
+
+[dist.github-action-commits]
+"actions/checkout" = "v7"
