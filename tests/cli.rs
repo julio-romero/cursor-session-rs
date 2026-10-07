@@ -974,6 +974,58 @@ fn export_selects_by_id_workspace_and_source() {
 }
 
 #[test]
+fn meta_json_in_a_new_format_is_a_notice_and_its_workspace_still_matches() {
+    let fixture = Fixture::new();
+    for id in [
+        "5e550000-1111-4222-8333-444455556666",
+        "5e550001-1111-4222-8333-444455556666",
+    ] {
+        fixture.write_meta_json(
+            PROJECT_X,
+            id,
+            &serde_json::json!({"schemaVersion": 2, "name": "Renamed", "workingDirectory": PROJECT_X}),
+        );
+        fixture.write_transcript(
+            "Users-demo-project-x",
+            id,
+            Layout::Nested,
+            &[plain_message("user", "hello")],
+        );
+    }
+    let output = run(&fixture, &["list", "--json"]);
+    assert!(output.status.success());
+    assert_eq!(ids(&json(&stdout(&output))).len(), 2);
+    let err = stderr(&output);
+    assert!(
+        err.starts_with(&format!(
+            "warning: unrecognized meta.json format in {}: none of its 2 meta.json files could \
+             be read (",
+            fixture.chats_dir().display()
+        )),
+        "{err}"
+    );
+    assert_eq!(err.lines().count(), 1, "{err}");
+
+    let healthcheck = run(&fixture, &["healthcheck"]);
+    assert!(healthcheck.status.success());
+    assert!(
+        stdout(&healthcheck).contains(&format!(
+            "agent chats: {} (incomplete)\n",
+            fixture.chats_dir().display()
+        )),
+        "{}",
+        stdout(&healthcheck)
+    );
+    // Without the recorded path, the workspace directory's hash still matches.
+    let output = run(
+        &fixture,
+        &["export", "--workspace", PROJECT_X, "--out", "x"],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(exported_files(&fixture.home().join("x")).len(), 2);
+}
+
+#[test]
 fn verbose_shows_only_paths_inside_the_fixture() {
     let fixture = standard();
     let output = run(&fixture, &["-v", "list", "--json"]);

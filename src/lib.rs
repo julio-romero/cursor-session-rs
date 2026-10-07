@@ -101,9 +101,17 @@ fn has_prefix_ignore_case(id: &str, prefix: &str) -> bool {
 /// directory above it (absolute), by whole directory names in its path
 /// (`api`, `src/api`), or by the MD5 hash of its path that names its
 /// directory under `~/.cursor/chats`. `/` and `\` both separate directories,
-/// and a trailing one is ignored.
+/// and a trailing one is ignored. A session is also found by the MD5 hash of
+/// the exact path given, so that one whose `meta.json` records no path is too.
 pub fn filter_workspace<'a>(sessions: &'a [Session], workspace: &str) -> Vec<&'a Session> {
     let wanted = separated(workspace);
+    let hashed = is_absolute(&wanted).then(|| {
+        let path = match workspace.trim_end_matches(['/', '\\']) {
+            "" => workspace,
+            trimmed => trimmed,
+        };
+        detect::workspace_md5(path)
+    });
     sessions
         .iter()
         .filter(|session| {
@@ -111,10 +119,9 @@ pub fn filter_workspace<'a>(sessions: &'a [Session], workspace: &str) -> Vec<&'a
                 .workspace
                 .as_deref()
                 .is_some_and(|cwd| in_workspace(&separated(cwd), &wanted))
-                || session
-                    .workspace_hash
-                    .as_deref()
-                    .is_some_and(|hash| hash == workspace)
+                || session.workspace_hash.as_deref().is_some_and(|hash| {
+                    hash == workspace || hashed.as_deref().is_some_and(|hashed| hash == hashed)
+                })
         })
         .collect()
 }
@@ -129,10 +136,14 @@ fn separated(path: &str) -> String {
     }
 }
 
+/// Whether `path`, with `/` as its separator, is absolute on Unix or Windows.
+fn is_absolute(path: &str) -> bool {
+    path.starts_with('/')
+        || path.as_bytes().get(1) == Some(&b':') && path.as_bytes()[0].is_ascii_alphabetic()
+}
+
 fn in_workspace(cwd: &str, wanted: &str) -> bool {
-    let absolute = wanted.starts_with('/')
-        || wanted.as_bytes().get(1) == Some(&b':') && wanted.as_bytes()[0].is_ascii_alphabetic();
-    if absolute {
+    if is_absolute(wanted) {
         let below = format!("{}/", wanted.trim_end_matches('/'));
         cwd == wanted || cwd.starts_with(&below)
     } else {
@@ -249,6 +260,18 @@ mod tests {
         assert_eq!(found("hash-gateway"), ["gateway"]);
         for nothing in [".", "", "v1", "dana/src/ap"] {
             assert_eq!(found(nothing), Vec::<&str>::new(), "{nothing:?}");
+        }
+
+        // Without its path, a session is found by the hash of the exact path.
+        let unrecorded = [Session {
+            workspace_hash: Some(detect::workspace_md5("/Users/dana/src/web")),
+            ..session("unrecorded", Source::Agent)
+        }];
+        let found = |workspace: &str| filter_workspace(&unrecorded, workspace).len();
+        assert_eq!(found("/Users/dana/src/web"), 1);
+        assert_eq!(found("/Users/dana/src/web/"), 1);
+        for nothing in ["/Users/dana/src", "web", "src/web"] {
+            assert_eq!(found(nothing), 0, "{nothing:?}");
         }
     }
 

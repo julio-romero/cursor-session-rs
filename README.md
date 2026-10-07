@@ -215,7 +215,8 @@ that stops early (`| head`), every file is still written.
   `src/billing-api`; or the MD5 hash that names its directory under
   `~/.cursor/chats`. A trailing `/` makes no difference, and `.`, `..` and `~`
   are resolved first, so `--workspace .` is the current directory. Only Agent
-  CLI sessions record a workspace.
+  CLI sessions record a workspace. A session whose `meta.json` holds no path is
+  still found by its exact path, through that hash.
 - `--source agent|ide` reads only that store, and `--limit N` exports only the
   N most recently updated of the selected sessions.
 - An unknown `--session-id` gives `session not found`, a `--workspace` that
@@ -573,8 +574,11 @@ them yields a message, for example because their roles are no longer `user` and
 format` and `--source ide` skips those sessions. When no `store.db` can be read
 because its tables or values changed, the sessions still list, without a model
 and under their `meta.json` title or else their ID, and a `warning:` line says
-so. An empty `store.db`, as a session that was never used leaves, is not a
-change of format.
+so. When no `meta.json` can be read, because it holds none of the keys this
+version reads, the sessions list under their `store.db` name or else their ID,
+without workspace or times, and a `warning:` line says so too. A value of an
+unexpected type costs only that value. An empty `store.db` or `meta.json`, as a
+session that was never used leaves, is not a change of format.
 
 Please [open an issue](https://github.com/julio-romero/cursor-session-rs/issues)
 with your Cursor version.

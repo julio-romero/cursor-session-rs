@@ -10,24 +10,57 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::detect::{ChatsScope, StoragePaths};
-use crate::json;
+use crate::json::{self, lenient, lenient_ms};
 use crate::model::{Message, Session, Source};
 use crate::sqlite::with_readonly;
 use crate::{Error, Result};
 
+/// A session's `meta.json`. Each field is read leniently, so that one value of
+/// an unexpected type costs that value, not the others.
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct MetaJson {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     title: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_ms")]
     created_at_ms: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_ms")]
     updated_at_ms: Option<i64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     cwd: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     has_conversation: Option<bool>,
+}
+
+/// The keys of `meta.json` that are read.
+const META_KEYS: [&str; 5] = [
+    "title",
+    "createdAtMs",
+    "updatedAtMs",
+    "cwd",
+    "hasConversation",
+];
+
+impl MetaJson {
+    /// Parses a `meta.json`: `None` when it is blank or an empty object, which
+    /// holds nothing to read, and `Err` with why its format is not one this
+    /// version knows.
+    fn parse(raw: &str) -> std::result::Result<Option<Self>, String> {
+        if raw.trim().is_empty() {
+            return Ok(None);
+        }
+        let value: Value = json::from_str(raw).map_err(|err| err.to_string())?;
+        let Value::Object(fields) = &value else {
+            return Err("not a JSON object".to_string());
+        };
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        if !META_KEYS.iter().any(|key| fields.contains_key(*key)) {
+            return Err(format!("none of the keys {} found", META_KEYS.join(", ")));
+        }
+        Ok(Some(serde_json::from_value(value).unwrap_or_default()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,6 +222,30 @@ impl Unreadable {
         self.add(path, reason);
     }
 
+    /// Reports a notice when every file of this kind that held something has
+    /// a format this version does not know, and the files as warnings
+    /// otherwise.
+    fn report_format_change(
+        self,
+        dir: &Path,
+        left_out: &str,
+        warnings: &mut Vec<String>,
+        notices: &mut Vec<String>,
+    ) {
+        if self.unrecognized > 0 && self.unrecognized == self.read {
+            let kind = self.kind;
+            notices.push(format!(
+                "unrecognized {kind} format in {}: none of its {} {kind} files could be read \
+                 ({}); {left_out}. Cursor may have changed its storage format.",
+                dir.display(),
+                self.read,
+                self.details[0]
+            ));
+        } else {
+            self.report(warnings);
+        }
+    }
+
     fn report(self, warnings: &mut Vec<String>) {
         let kind = self.kind;
         match self.details.as_slice() {
@@ -272,21 +329,21 @@ fn scan_chats(
         .iter()
         .filter_map(|(dir, hash)| load_chat_session(dir, hash, &mut meta_files, &mut stores))
         .collect();
-    meta_files.report(warnings);
-    // Not one store.db in a format this version knows: rather than a skipped
-    // file, the format changed, and names and models are missing throughout.
-    if stores.unrecognized > 0 && stores.unrecognized == stores.read {
-        notices.push(format!(
-            "unrecognized store.db format in {}: none of its {} store.db files could be read \
-             ({}); the session names and models they hold are left out. Cursor may \
-             have changed its storage format.",
-            chats_dir.display(),
-            stores.read,
-            stores.details[0]
-        ));
-    } else {
-        stores.report(warnings);
-    }
+    // Not one file of a kind in a format this version knows: rather than a
+    // skipped file, the format changed, and what they hold is missing
+    // throughout.
+    meta_files.report_format_change(
+        chats_dir,
+        "the session titles, workspaces and times they hold are left out",
+        warnings,
+        notices,
+    );
+    stores.report_format_change(
+        chats_dir,
+        "the session names and models they hold are left out",
+        warnings,
+        notices,
+    );
     Ok(sessions)
 }
 
@@ -303,14 +360,22 @@ fn load_chat_session(
         let raw = match fs::read_to_string(&meta_path) {
             Ok(raw) => raw,
             Err(err) => {
+                meta_files.read += 1;
                 meta_files.add(&meta_path, err);
                 return None;
             }
         };
-        json::from_str(&raw).unwrap_or_else(|err| {
-            meta_files.add(&meta_path, err);
-            MetaJson::default()
-        })
+        match MetaJson::parse(&raw) {
+            Ok(meta) => {
+                meta_files.read += usize::from(meta.is_some());
+                meta.unwrap_or_default()
+            }
+            Err(reason) => {
+                meta_files.read += 1;
+                meta_files.add_unrecognized(&meta_path, reason);
+                MetaJson::default()
+            }
+        }
     } else if store_path.is_file() {
         MetaJson::default()
     } else {
@@ -644,13 +709,17 @@ fn read_transcript(path: &Path) -> Result<Transcript> {
         if matches!(role.as_str(), "system" | "tool") {
             continue;
         }
-        expected += 1;
-        if role != "user" && role != "assistant" {
+        let known = role == "user" || role == "assistant";
+        let content = message.map(|m| m.content).unwrap_or_default();
+        // A line of only tool calls or images has nothing to show either.
+        if known && holds_only_hidden(&content) {
             continue;
         }
-        let raw_content = message
-            .map(|m| extract_content(&m.content))
-            .unwrap_or_default();
+        expected += 1;
+        if !known {
+            continue;
+        }
+        let raw_content = extract_content(&content);
         let timestamp = extract_timestamp_tag(&raw_content);
         let content = if role == "user" {
             clean_user_text(&raw_content)
@@ -671,6 +740,15 @@ fn read_transcript(path: &Path) -> Result<Transcript> {
         messages,
         unrecognized,
     })
+}
+
+/// Content parts that are never shown.
+const HIDDEN_PARTS: [&str; 3] = ["tool_use", "tool_result", "image"];
+
+/// Whether `content` has parts and all of them are of a kind never shown.
+fn holds_only_hidden(content: &TranscriptContent) -> bool {
+    matches!(content, TranscriptContent::Parts(parts) if !parts.is_empty()
+        && parts.iter().all(|part| part.kind.as_deref().is_some_and(|kind| HIDDEN_PARTS.contains(&kind))))
 }
 
 fn extract_content(content: &TranscriptContent) -> String {
@@ -904,6 +982,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn meta_json_fields_are_read_one_by_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let chats = dir.path().join("chats");
+        write(
+            &chats.join("ws").join("s1").join("meta.json"),
+            r#"{"title":"Kept","createdAtMs":"2025-09-04T15:33:20Z","updatedAtMs":1757000000000.5,"cwd":42}"#,
+        );
+        let (sessions, warnings) = load(&chats, ChatsScope::All, None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let session = &sessions[0];
+        assert_eq!(session.title, "Kept");
+        assert_eq!(session.created_at_ms, Some(1_757_000_000_000));
+        assert_eq!(session.updated_at_ms, Some(1_757_000_000_000));
+        assert_eq!(session.workspace, None);
+    }
+
+    #[test]
+    fn meta_json_in_a_format_this_version_cannot_read_is_a_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let chats = dir.path().join("chats");
+        let meta = |id: &str| chats.join("ws").join(id).join("meta.json");
+        for id in ["s1", "s2"] {
+            write(
+                &meta(id),
+                r#"{"schemaVersion":2,"name":"Renamed","workingDirectory":"/w"}"#,
+            );
+        }
+        // One that holds nothing to read is no sign either way.
+        write(&meta("s3"), "{}");
+        let paths = StoragePaths {
+            chats_dir: Some(chats.clone()),
+            ..Default::default()
+        };
+        let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+        let sessions = load_sessions(&paths, &mut warnings, &mut notices).unwrap();
+        // The sessions still load, under their IDs.
+        assert_eq!(sessions.len(), 3);
+        assert!(sessions.iter().all(|s| s.title == s.id));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(notices.len(), 1);
+        let notice = &notices[0];
+        assert!(
+            notice.starts_with(&format!(
+                "unrecognized meta.json format in {}: none of its 2 meta.json files could be \
+                 read (",
+                chats.display()
+            )) && notice.ends_with(
+                ": none of the keys title, createdAtMs, updatedAtMs, cwd, hasConversation \
+                 found); the session titles, workspaces and times they hold are left out. \
+                 Cursor may have changed its storage format."
+            ),
+            "{notice}"
+        );
+
+        // With one in a known format, the others are skipped files.
+        write(&meta("s3"), r#"{"title":"Known"}"#);
+        let (sessions, warnings) = load(&chats, ChatsScope::All, None);
+        assert_eq!(sessions[2].title, "Known");
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].starts_with("ignored 2 unreadable meta.json files (first: "),
+            "{}",
+            warnings[0]
+        );
+    }
+
     fn line(key: &str, role: &str, text: &str) -> String {
         format!("{{\"{key}\":\"{role}\",\"message\":{{\"content\":\"{text}\"}}}}\n")
     }
@@ -935,8 +1080,14 @@ mod tests {
             let text = line("type", "user", "hello") + &line("type", "assistant", "hi");
             write(&path(id), &text);
         }
-        // Only tool output: nothing to show, but nothing unknown either.
+        // Only tool output or tool calls: nothing to show, but nothing unknown
+        // either.
         write(&path("tools"), &line("role", "tool", "ran"));
+        write(
+            &path("calls"),
+            "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\
+             \"name\":\"Shell\",\"input\":{}}]}}\n",
+        );
         let err = load_transcripts(&projects).unwrap_err();
         assert_eq!(
             err.to_string(),
