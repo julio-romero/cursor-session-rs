@@ -146,18 +146,25 @@ fn cmd_export(
         source: args.source,
     };
     let sessions = load(paths, &load_opts, args.verbose, err)?;
-    let selected: Vec<&Session> = if let Some(id) = &args.session_id {
+    let workspace = args.workspace.as_deref().map(resolve_workspace);
+    let mut selected: Vec<&Session> = if let Some(id) = &args.session_id {
         vec![find_session(&sessions, id)?]
-    } else if let Some(workspace) = &args.workspace {
-        filter_workspace(&sessions, &resolve_workspace(workspace))
+    } else if let Some(workspace) = &workspace {
+        filter_workspace(&sessions, workspace)
     } else {
         sessions.iter().collect()
     };
     if selected.is_empty() {
-        if args.workspace.is_some() {
-            bail!("no sessions matched");
+        if let Some(workspace) = workspace {
+            return Err(Error::NoWorkspaceMatch {
+                workspace: workspace.into_owned(),
+            }
+            .into());
         }
         bail!("no sessions to export");
+    }
+    if let Some(limit) = args.limit {
+        selected.truncate(limit);
     }
     let out_dir = detect::expand_home(&args.out)?;
     fs::create_dir_all(&out_dir)
@@ -743,7 +750,10 @@ mod tests {
         let (result, _) = run_args(&paths, &["export"]);
         assert_eq!(result.unwrap_err().to_string(), "no sessions to export");
         let (result, _) = run_args(&paths, &["export", "--workspace", "/nowhere"]);
-        assert_eq!(result.unwrap_err().to_string(), "no sessions matched");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "no sessions matched workspace `/nowhere`"
+        );
     }
 
     #[test]

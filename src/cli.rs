@@ -35,7 +35,7 @@ const EXPORT_EXAMPLES: &str = "\
 Examples:
   cursor-session export
   cursor-session export --format json --session-id f4eea6d2 --out sessions
-  cursor-session export --workspace ~/src/billing-api";
+  cursor-session export --workspace ~/src/billing-api --limit 5";
 
 const HEALTHCHECK_EXAMPLES: &str = "\
 Examples:
@@ -59,8 +59,8 @@ Exit codes:
     next_help_heading = "Global Options"
 )]
 pub struct Cli {
-    /// Read only this location: a home, .cursor, chats or session directory, store.db, or
-    /// state.vscdb
+    /// Read only this location: a home, .cursor, chats, workspace, session or projects
+    /// directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
     #[arg(long, global = true, value_name = "PATH")]
     pub storage: Option<PathBuf>,
 
@@ -175,13 +175,22 @@ pub struct ExportArgs {
     /// Export only this session (ID or unique prefix)
     #[arg(long, conflicts_with = "workspace", value_parser = not_blank)]
     pub session_id: Option<String>,
-    /// Export the sessions of a workspace: its path or a directory above it,
-    /// directory names in its path, or the MD5 hash of its path
+    /// Export the Agent CLI sessions of a workspace: its path or a directory
+    /// above it, directory names in its path, or the MD5 hash of its path
     #[arg(long, value_parser = not_blank)]
     pub workspace: Option<String>,
     /// Only read this store; the other one is never opened
     #[arg(long, value_enum)]
     pub source: Option<Source>,
+    /// Export only the N most recently updated of the selected sessions
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = at_least_one,
+        allow_negative_numbers = true,
+        conflicts_with = "session_id"
+    )]
+    pub limit: Option<usize>,
     #[arg(from_global)]
     pub verbose: bool,
 }
@@ -241,7 +250,7 @@ mod tests {
 
     #[test]
     fn limit_must_be_positive() {
-        for command in ["list", "show"] {
+        for command in ["list", "show", "export"] {
             let args = |limit| {
                 let id = (command == "show").then_some("abc");
                 ["cursor-session", command]

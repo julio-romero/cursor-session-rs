@@ -892,14 +892,31 @@ fn export_selects_by_id_workspace_and_source() {
     );
     assert_eq!(exported_files(&fixture.home().join("ide")).len(), 4);
 
+    let no_match = |workspace: &str| {
+        format!(
+            "error: no sessions matched workspace `{workspace}`\n\
+             list the recorded workspaces with `cursor-session list --json | jq -r \
+             '.[].workspace // empty' | sort -u`; IDE sessions record none\n"
+        )
+    };
     assert_eq!(
         fails(
             &fixture,
             &["export", "--workspace", "/nowhere", "--out", "none"]
         ),
-        "error: no sessions matched\n"
+        no_match("/nowhere")
     );
     assert!(!fixture.home().join("none").exists());
+    // The N most recently updated of the selection.
+    let out = ok(
+        &fixture,
+        &["export", "--source", "ide", "--limit", "2", "--out", "two"],
+    );
+    assert_eq!(out.lines().count(), 2);
+    assert_eq!(
+        exported_files(&fixture.home().join("two")),
+        [format!("{SHARED_ID}.md"), format!("{IDE_BLOB_ID}.md")]
+    );
 
     // Whole directories match, with or without a trailing separator.
     let tab_completed = format!("{PROJECT_X}/");
@@ -913,14 +930,17 @@ fn export_selects_by_id_workspace_and_source() {
     // Part of a name is not a directory, and `.` is the current one (the
     // fixture home), not any path with a dot in it.
     for workspace in ["/Users/demo/project", "project", "."] {
-        assert_eq!(
-            fails(
-                &fixture,
-                &["export", "--workspace", workspace, "--out", "none"]
-            ),
-            "error: no sessions matched\n",
-            "{workspace}"
+        let err = fails(
+            &fixture,
+            &["export", "--workspace", workspace, "--out", "none"],
         );
+        assert!(
+            err.starts_with("error: no sessions matched workspace `"),
+            "{err}"
+        );
+        if workspace != "." {
+            assert_eq!(err, no_match(workspace));
+        }
     }
 }
 

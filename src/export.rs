@@ -15,9 +15,9 @@ const WINDOWS_DEVICES: [&str; 4] = ["con", "prn", "aux", "nul"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
-    Jsonl,
     Md,
     Json,
+    Jsonl,
     Yaml,
 }
 

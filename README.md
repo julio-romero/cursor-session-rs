@@ -169,7 +169,7 @@ Done. `WEBHOOK_MAX_ATTEMPTS` (default 5) is read in `Config::from_env`, and the 
 cursor-session export                                          # every session, Markdown, into ./exports
 cursor-session export --format json --session-id 3f9c --out sessions
 cursor-session export --format jsonl --workspace /Users/dana/src/billing-api
-cursor-session export --format yaml --source ide
+cursor-session export --format yaml --source ide --limit 10
 ```
 
 Each session is written to `<out>/<session-id>.<ext>`, one `wrote <path>` line
@@ -196,9 +196,11 @@ that stops early (`| head`), every file is still written.
   `~/.cursor/chats`. A trailing `/` makes no difference, and `.`, `..` and `~`
   are resolved first, so `--workspace .` is the current directory. Only Agent
   CLI sessions record a workspace.
+- `--source agent|ide` reads only that store, and `--limit N` exports only the
+  N most recently updated of the selected sessions.
 - An unknown `--session-id` gives `session not found`, a `--workspace` that
-  matches nothing gives `no sessions matched`, and no sessions at all gives
-  `no sessions to export`. A file or directory that cannot be written gives
+  matches nothing gives `no sessions matched workspace` with a way to list the
+  recorded ones, and no sessions at all gives `no sessions to export`. A file or directory that cannot be written gives
   `could not write <path>` or `could not create <dir>` with the reason. All exit 1.
 - Exports contain the stored text unchanged. Times in `json` and `yaml` exports
   are epoch milliseconds; this is not the `--json` format described below.

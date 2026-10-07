@@ -75,6 +75,10 @@ pub enum Error {
     #[error("no Cursor session storage found")]
     NoStorage,
 
+    /// `export --workspace` selected no session.
+    #[error("no sessions matched workspace `{workspace}`")]
+    NoWorkspaceMatch { workspace: String },
+
     #[error("session ID is empty")]
     EmptyId,
 }
@@ -124,8 +128,8 @@ impl Error {
         match self {
             Error::NoHome => vec!["set HOME or pass `--storage <path>`".to_string()],
             Error::UnsupportedStorage { .. } => vec![
-                "pass a home or .cursor directory, ~/.cursor/chats, a session directory, store.db, \
-                 state.vscdb, or the directory that contains state.vscdb"
+                "pass a home, .cursor, chats, workspace, session or projects directory, a \
+                 store.db or state.vscdb file, or the directory that holds state.vscdb"
                     .to_string(),
             ],
             Error::SessionNotFound { .. } | Error::EmptyId => {
@@ -163,6 +167,11 @@ impl Error {
             Error::NoStorage => {
                 vec!["pass `--storage <path>` if your Cursor data lives elsewhere".to_string()]
             }
+            Error::NoWorkspaceMatch { .. } => vec![
+                "list the recorded workspaces with `cursor-session list --json | jq -r \
+                 '.[].workspace // empty' | sort -u`; IDE sessions record none"
+                    .to_string(),
+            ],
             _ => Vec::new(),
         }
     }
@@ -229,6 +238,9 @@ mod tests {
             },
             Error::Changed { path },
             Error::NoStorage,
+            Error::NoWorkspaceMatch {
+                workspace: "api".into(),
+            },
         ];
         let skip_ide = "rerun with `--source agent` to skip IDE sessions";
         let ide_db = Error::Io {
