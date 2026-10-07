@@ -550,6 +550,34 @@ fn a_closed_pipe_ends_the_output_quietly() {
     }
 }
 
+/// Any other failure to write to stdout is an error, also for help.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_stdout_is_an_error() {
+    let fixture = standard();
+    for args in [
+        &["list"][..],
+        &["show", AGENT_ID, "--json"],
+        &["--help"],
+        &["--version"],
+    ] {
+        let output = fixture
+            .command()
+            .args(args)
+            .stdout(fs::File::create("/dev/full").unwrap())
+            .output()
+            .unwrap();
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(1), "{args:?}: {err}");
+        assert!(
+            err.starts_with(
+                "error: could not write to stdout\n  caused by: No space left on device"
+            ),
+            "{args:?}: {err}"
+        );
+    }
+}
+
 #[test]
 fn a_closed_pipe_does_not_stop_an_export() {
     // 4000 `wrote` lines, far more than a pipe holds.

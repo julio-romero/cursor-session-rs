@@ -24,7 +24,14 @@ fn main() -> ExitCode {
         Ok(cli) => cli,
         Err(error) => {
             // Help and version go to stdout and exit 0; usage errors exit 2.
-            print_clap(&error, choice);
+            if let Err(failed) = print_clap(&error, choice)
+                && failed.kind() != ErrorKind::BrokenPipe
+            {
+                let failed = anyhow::Error::from(failed).context("could not write to stdout");
+                let mut err = diagnostics(io::stderr().lock());
+                report(&failed, &StoragePaths::default(), &mut err);
+                return ExitCode::FAILURE;
+            }
             return ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(2));
         }
     };
@@ -69,15 +76,18 @@ fn parse_cli(args: Vec<OsString>) -> Result<Cli, clap::Error> {
 
 /// Prints help, the version or a usage error where clap sends it, colored by
 /// the rules of the commands' own output. They come before `--color` has a
-/// parsed value, so `choice` is read from the raw arguments.
-fn print_clap(error: &clap::Error, choice: ColorChoice) {
-    let _ = if error.use_stderr() {
+/// parsed value, so `choice` is read from the raw arguments. Only a failure
+/// to write to stdout is returned.
+fn print_clap(error: &clap::Error, choice: ColorChoice) -> io::Result<()> {
+    if error.use_stderr() {
         let color = stream_color(io::stderr().is_terminal(), choice);
-        write!(io::stderr().lock(), "{}", render_clap(error, color))
-    } else {
-        let color = stream_color(io::stdout().is_terminal(), choice);
-        write!(io::stdout().lock(), "{}", render_clap(error, color))
-    };
+        let _ = write!(io::stderr().lock(), "{}", render_clap(error, color));
+        return Ok(());
+    }
+    let color = stream_color(io::stdout().is_terminal(), choice);
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{}", render_clap(error, color))?;
+    stdout.flush()
 }
 
 fn render_clap(error: &clap::Error, color: bool) -> String {
