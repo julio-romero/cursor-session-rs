@@ -17,6 +17,15 @@ use serde_json::Value;
 
 const SUBCOMMANDS: [&str; 4] = ["list", "show", "export", "healthcheck"];
 
+/// The start of a usage line. clap names the program after the file it ran
+/// from, which ends in `.exe` on Windows.
+fn usage(rest: &str) -> String {
+    format!(
+        "Usage: cursor-session{} {rest}",
+        std::env::consts::EXE_SUFFIX
+    )
+}
+
 fn run(fixture: &Fixture, args: &[&str]) -> Output {
     fixture.cmd().args(args).output().unwrap()
 }
@@ -106,10 +115,7 @@ fn help_describes_every_subcommand() {
 
     for command in SUBCOMMANDS {
         let help = ok(&fixture, &[command, "--help"]);
-        assert!(
-            help.contains(&format!("Usage: cursor-session {command}")),
-            "{help}"
-        );
+        assert!(help.contains(&usage(command)), "{help}");
     }
     for flag in ["--json", "--source <SOURCE>", "--limit <N>"] {
         assert!(ok(&fixture, &["list", "--help"]).contains(flag), "{flag}");
@@ -138,7 +144,7 @@ fn usage_errors_exit_2() {
         let err = stderr(&output);
         if args.is_empty() {
             // Without a subcommand the help itself is the message.
-            assert!(err.contains("\nUsage: cursor-session "), "{err}");
+            assert!(err.contains(&format!("\n{}", usage("[OPTIONS]"))), "{err}");
         } else {
             assert!(err.starts_with("error: "), "{args:?}: {err}");
             assert!(err.contains("try '--help'"), "{args:?}: {err}");
@@ -790,9 +796,14 @@ fn storage_reads_only_the_given_location() {
 /// script(1), and ConPTY would need a new dependency, so these run on Unix.
 #[cfg(unix)]
 mod tty {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
     use super::*;
 
     const WIDTH: usize = 100;
+    const TTY_TIMEOUT: Duration = Duration::from_secs(60);
 
     fn quote(arg: &str) -> String {
         format!("'{}'", arg.replace('\'', r"'\''"))
@@ -821,23 +832,42 @@ mod tty {
         } else {
             cmd.args(["-q", "/dev/null", "/bin/sh"]).arg(&inner);
         }
+        let errors = fixture.home().join("tty.err");
         let mut child = cmd
             .env("SHELL", "/bin/sh")
             .env("COLUMNS", WIDTH.to_string())
             .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(fs::File::create(&errors).unwrap())
             .spawn()
             .expect("script(1) runs commands in a pseudo-terminal");
         // BSD script echoes ^D into the output when its input ends, so the
         // input stays open until the command is done.
         let input = child.stdin.take();
-        let output = child.wait_with_output().unwrap();
+        let mut pipe = child.stdout.take().unwrap();
+        let (done, finished) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let mut out = Vec::new();
+            pipe.read_to_end(&mut out).unwrap();
+            done.send(()).unwrap();
+            out
+        });
+        // A script(1) that never exits fails the test instead of hanging CI.
+        let timed_out = finished.recv_timeout(TTY_TIMEOUT).is_err();
+        if timed_out {
+            child.kill().unwrap();
+        }
+        let status = child.wait().unwrap();
         drop(input);
-        assert!(output.status.success(), "{args:?}: {output:?}");
-        assert_eq!(stderr(&output), "");
-        stdout(&output).replace("\r\n", "\n")
+        let out = String::from_utf8(reader.join().unwrap()).unwrap();
+        assert!(
+            !timed_out,
+            "{args:?} still running after {TTY_TIMEOUT:?}: {out:?}"
+        );
+        assert!(status.success(), "{args:?}: {status}: {out:?}");
+        assert_eq!(fs::read_to_string(&errors).unwrap(), "");
+        out.replace("\r\n", "\n")
     }
 
     #[test]
@@ -891,5 +921,15 @@ mod tty {
             run_tty(&fixture, &["show", "long", "--limit", "3"], &env),
             show(&session.messages[27..], Some(27))
         );
+        // JSON holds every message unless --limit asks for fewer.
+        let shown = json(&run_tty(&fixture, &["show", "long", "--json"], &env));
+        assert_eq!(shown["messages"].as_array().unwrap().len(), 30);
+        assert_eq!(shown, json(&ok(&fixture, &["show", "long", "--json"])));
+        let shown = json(&run_tty(
+            &fixture,
+            &["show", "long", "--json", "--limit", "3"],
+            &env,
+        ));
+        assert_eq!(shown["messages"].as_array().unwrap().len(), 3);
     }
 }

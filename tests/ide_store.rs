@@ -333,7 +333,8 @@ fn malformed_rows_are_skipped_and_reported() {
     let ok = sessions.iter().find(|s| s.id == "ok").unwrap();
     let contents: Vec<&str> = ok.messages.iter().map(|m| m.content.as_str()).collect();
     assert_eq!(contents, ["question", "answer"]);
-    // NULL values are absent rows, not malformed ones.
+    // NULL values are absent rows, not malformed ones: the loader filters them
+    // out by design, as it does for a NULL store.db meta value, so they never warn.
     assert_eq!(
         warnings,
         [

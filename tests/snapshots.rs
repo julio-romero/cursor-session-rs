@@ -9,6 +9,7 @@ use common::*;
 use cursor_session::export::{self, Format};
 use cursor_session::model::Session;
 use cursor_session::ui;
+use unicode_width::UnicodeWidthStr;
 
 const WIDTHS: [usize; 7] = [40, 60, 80, 100, 120, 160, 200];
 
@@ -26,6 +27,19 @@ fn list_table_at_each_width() {
     for width in WIDTHS {
         let rendered = ui::render_list(&sessions, false, Some(width));
         assert!(!rendered.contains('\u{1b}'));
+        let table = rendered
+            .lines()
+            .skip(2)
+            .take_while(|line| line.starts_with(['┌', '│', '╞', '└']));
+        assert!(
+            table.clone().all(|line| line.width() <= width),
+            "{rendered}"
+        );
+        if width >= 80 {
+            // The header and every session take one line each, the wide title too.
+            let rows = table.filter(|line| line.starts_with('│'));
+            assert_eq!(rows.count(), sessions.len() + 1, "{rendered}");
+        }
         insta::assert_snapshot!(format!("list_table_{width:03}"), rendered);
     }
 }

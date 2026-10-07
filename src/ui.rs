@@ -3,6 +3,7 @@ use std::io::IsTerminal;
 
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets};
 use owo_colors::OwoColorize;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::{Message, Session, Source};
 
@@ -107,6 +108,32 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
         return text.to_string();
     }
     let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Like [`truncate_chars`], but `max` counts terminal columns, as the table does.
+pub fn truncate_width(text: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if text.width() <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        used += c.width().unwrap_or(0);
+        if used >= max {
+            break;
+        }
+        out.push(c);
+    }
+    // A few sequences, such as an emoji presentation selector, are wider than
+    // their characters.
+    while out.width() >= max {
+        out.pop();
+    }
     out.push('…');
     out
 }
@@ -501,7 +528,7 @@ fn render_list_table(sessions: &[Session], use_color: bool, term_width: usize) -
             source_cell(session.source),
             Cell::new(session.message_count()),
             Cell::new(session.updated_display()).fg(Color::DarkGrey),
-            Cell::new(truncate_chars(&one_line(&session.title), max_title)),
+            Cell::new(truncate_width(&one_line(&session.title), max_title)),
         ]);
     }
 
@@ -793,6 +820,42 @@ mod tests {
         }
         assert!(title_width(usize::MAX) >= MIN_TITLE_WIDTH);
         assert_eq!(id_prefix_width(0), 8);
+    }
+
+    #[test]
+    fn titles_are_cut_by_terminal_columns() {
+        let cases = [
+            ("Langfuse", 8, "Langfuse"),
+            ("Langfuse", 5, "Lang…"),
+            ("データパイプラインの再設計", 17, "データパイプライ…"),
+            ("データパイプライン", 4, "デ…"),
+            ("e\u{301}e\u{301}e\u{301}", 2, "e\u{301}…"),
+            ("ok \u{2764}\u{fe0f} done", 6, "ok \u{2764}\u{fe0f}…"),
+            ("ok \u{2764}\u{fe0f} done", 5, "ok \u{2764}…"),
+            ("abc", 0, ""),
+        ];
+        for (title, max, expected) in cases {
+            let cut = truncate_width(title, max);
+            assert_eq!(cut, expected, "{title:?} at {max}");
+            assert!(cut.width() <= max, "{cut:?}");
+        }
+    }
+
+    #[test]
+    fn wide_title_leaves_the_full_id_on_one_line() {
+        let mut session = sample_session();
+        session.title = "データパイプラインの再設計レビュー 🚀 — überprüfe den Ablauf".into();
+        for width in [80, 100, 120] {
+            let rendered = render_list(std::slice::from_ref(&session), false, Some(width));
+            let id = shorten_id(&session.id, id_prefix_width(width));
+            assert!(rendered.contains(&format!("│ {id} ┆")), "{rendered}");
+            // Found, blank line, top border, header, separator, row, bottom border.
+            assert!(
+                rendered.lines().nth(6).unwrap().starts_with('└'),
+                "{rendered}"
+            );
+            assert!(rendered.lines().all(|line| line.width() <= width));
+        }
     }
 
     fn control_session() -> Session {
