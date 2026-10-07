@@ -514,11 +514,23 @@ pub fn format_message_header(role: &str, timestamp: Option<&str>, use_color: boo
 /// NO_COLOR is set, unless the program called
 /// `crossterm::style::force_color_output(true)` as the binary does.
 pub fn render_list(sessions: &[Session], use_color: bool, term_width: Option<usize>) -> String {
+    render_list_among(sessions, sessions, use_color, term_width)
+}
+
+/// Renders `sessions` as [`render_list`] does, with the table's IDs shortened
+/// only as far as they stay distinct among `among`: every session `show`
+/// looks through, of which `--limit` lists only the first.
+pub fn render_list_among(
+    sessions: &[Session],
+    among: &[Session],
+    use_color: bool,
+    term_width: Option<usize>,
+) -> String {
     if sessions.is_empty() {
         return "No sessions found\n".to_string();
     }
     match term_width {
-        Some(width) => render_list_table(sessions, use_color, width),
+        Some(width) => render_list_table(sessions, among, use_color, width),
         None => render_list_plain(sessions, use_color),
     }
 }
@@ -561,7 +573,12 @@ fn render_list_plain(sessions: &[Session], use_color: bool) -> String {
     out
 }
 
-fn render_list_table(sessions: &[Session], use_color: bool, term_width: usize) -> String {
+fn render_list_table(
+    sessions: &[Session],
+    among: &[Session],
+    use_color: bool,
+    term_width: usize,
+) -> String {
     let width = u16::try_from(term_width).unwrap_or(u16::MAX);
     let term_width = usize::from(width);
     let mut table = Table::new();
@@ -581,7 +598,7 @@ fn render_list_table(sessions: &[Session], use_color: bool, term_width: usize) -
         header_cell("TITLE"),
     ]);
 
-    let id_width = distinct_id_width(sessions, id_prefix_width(term_width));
+    let id_width = distinct_id_width(among, id_prefix_width(term_width));
     let max_title = title_width_beside(term_width, id_width);
     for session in sessions {
         table.add_row(vec![
@@ -812,6 +829,10 @@ mod tests {
         ];
         assert_eq!(distinct_id_width(&cased, 8), ID_FULL_WIDTH);
         assert_eq!(distinct_id_width(&sessions[..1], 8), 8);
+        // Listing only the first, its ID stays distinct from the second's.
+        let first = render_list_among(&sessions[..1], &sessions, false, Some(80));
+        assert!(first.contains("│ f4eea6d2-d2d3-41ad ┆"), "{first}");
+        assert!(!first.contains("9999"), "{first}");
     }
 
     #[test]

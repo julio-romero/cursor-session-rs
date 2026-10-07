@@ -101,18 +101,19 @@ fn cmd_list(
     let load_opts = LoadOptions {
         source: args.source,
     };
-    let mut sessions = load(paths, &load_opts, args.verbose, err)?;
-    if let Some(limit) = args.limit {
-        sessions.truncate(limit);
-    }
+    let sessions = load(paths, &load_opts, args.verbose, err)?;
+    let listed = &sessions[..args
+        .limit
+        .map_or(sessions.len(), |limit| limit.min(sessions.len()))];
     if args.json {
-        let summaries: Vec<SessionSummary> = sessions.iter().map(Session::summary).collect();
+        let summaries: Vec<SessionSummary> = listed.iter().map(Session::summary).collect();
         return write_json(out, &summaries);
     }
+    // The IDs shown must tell apart those left out too, as `show` sees them.
     write!(
         out,
         "{}",
-        ui::render_list(&sessions, opts.color, opts.width)
+        ui::render_list_among(listed, &sessions, opts.color, opts.width)
     )?;
     Ok(())
 }
@@ -642,6 +643,37 @@ mod tests {
 
         let (_, out) = run_args(&paths, &["list", "--limit", "2"]);
         assert!(out.starts_with("Found 2 session(s)\n"));
+    }
+
+    #[test]
+    fn listed_ids_tell_apart_the_sessions_limit_leaves_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_ide(dir.path());
+        let terminal = OutputOpts {
+            tty: true,
+            color: false,
+            width: Some(98),
+        };
+        let table = |argv: &[&str]| {
+            let cli =
+                Cli::try_parse_from(std::iter::once("cursor-session").chain(argv.iter().copied()))
+                    .unwrap();
+            let mut out = Vec::new();
+            run(cli.command, &paths, &terminal, &mut out, &mut Vec::new()).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        // The two IDE chats differ only in the last character of their IDs.
+        for argv in [&["list"][..], &["list", "--limit", "1"]] {
+            let out = table(argv);
+            assert!(
+                out.contains("│ c0ffee00-0000-4000-8000-000000000002 ┆"),
+                "{argv:?}: {out}"
+            );
+            assert!(!out.contains("IDs shortened"), "{argv:?}: {out}");
+        }
+        // Alone, the agent session's ID is shortened.
+        let out = table(&["list", "--source", "agent"]);
+        assert!(out.contains("IDs shortened to "), "{out}");
     }
 
     #[test]
