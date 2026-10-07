@@ -8,6 +8,7 @@ mod sqlite;
 pub mod ui;
 
 pub use crate::error::{Error, Result};
+pub use crate::sqlite::remove_stale_snapshot_copies;
 
 use crate::detect::StoragePaths;
 use crate::model::{Session, Source};

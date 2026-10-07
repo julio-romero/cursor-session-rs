@@ -4,7 +4,6 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
@@ -25,15 +24,18 @@ type Stamp = (u64, Option<SystemTime>);
 /// read can change the file under it. When such a read fails as corrupt, or
 /// the file changed before it finished, `read` runs once more on a new
 /// connection, which by then usually reads in place. If the file changes
-/// under that read too, its result is not trusted.
+/// under that read too, its result is not trusted. A read that finds a
+/// journal a crash left, which only a connection that can write may roll
+/// back, runs once more on a copy.
 pub fn with_readonly<T>(path: &Path, mut read: impl FnMut(&Connection) -> Result<T>) -> Result<T> {
-    let db = open_readonly(path)?;
+    let db = open_readonly(path, false)?;
     let result = read(&db);
-    if !db.torn(&result) {
+    let copy = needs_rollback(&result);
+    if !copy && !db.torn(&result) {
         return result;
     }
     drop(db);
-    let db = open_readonly(path)?;
+    let db = open_readonly(path, copy)?;
     let result = read(&db);
     if db.changed() {
         return Err(Error::Changed {
@@ -41,6 +43,17 @@ pub fn with_readonly<T>(path: &Path, mut read: impl FnMut(&Connection) -> Result
         });
     }
     result
+}
+
+/// Whether `result` failed on a hot journal, which SQLite rolls back only on
+/// a connection that can write.
+fn needs_rollback<T>(result: &Result<T>) -> bool {
+    matches!(
+        result,
+        Err(Error::Database { source, .. }) if source
+            .sqlite_error()
+            .is_some_and(|error| error.extended_code == rusqlite::ffi::SQLITE_READONLY_ROLLBACK)
+    )
 }
 
 /// A read-only connection. When the database had to be copied first (see
@@ -90,7 +103,7 @@ enum Mode {
     InPlace,
     /// Only the main file, without locks (`immutable=1`).
     Immutable,
-    /// A private copy of the main file and its `-wal`.
+    /// A private copy of the main file and its `-wal` or `-journal`.
     Snapshot,
 }
 
@@ -99,16 +112,16 @@ impl Mode {
     /// open, even when a checkpoint has just emptied the `-wal`. Otherwise a
     /// WAL database with no `-wal`, or an empty one, has every commit in its
     /// main file, and a non-empty `-wal` was left behind by a crash.
-    fn of(path: &Path) -> io::Result<Mode> {
-        if !is_wal(path)? || has_sidecars(path) {
+    ///
+    /// On a `shared` filesystem the locks and `-shm` of a writer on the other
+    /// side cannot be seen, so a database there is never read in place: it is
+    /// read immutable while its journal is empty, and copied with it otherwise.
+    fn of(path: &Path, shared: bool) -> io::Result<Mode> {
+        let wal = is_wal(path)?;
+        if !shared && (!wal || has_sidecars(path)) {
             return Ok(Mode::InPlace);
         }
-        let wal_len = match fs::metadata(sidecar(path, "-wal")) {
-            Ok(meta) => meta.len(),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
-            Err(err) => return Err(err),
-        };
-        Ok(if wal_len == 0 {
+        Ok(if journal_len(path, wal)? == 0 {
             Mode::Immutable
         } else {
             Mode::Snapshot
@@ -125,20 +138,28 @@ impl Mode {
 /// would otherwise create `-wal` and `-shm` next to it to read it, or fail in a
 /// read-only directory. One whose `-wal` a crash left behind is copied, with
 /// that `-wal`, to a private temporary directory and the copy is opened; so is
-/// one whose path a `file:` URI cannot carry, unless it has both sidecars.
-fn open_readonly(path: &Path) -> Result<Db> {
-    remove_stale_snapshots_once();
+/// one whose path a `file:` URI cannot carry, unless it has both sidecars. A
+/// database on a filesystem shared with another machine or VM is never read in
+/// place (see [`Mode::of`]). With `copy`, the database is read from a copy
+/// that SQLite may write to, to roll back a journal a crash left.
+fn open_readonly(path: &Path, copy: bool) -> Result<Db> {
     let file = sqlite_path(path).map_err(|source| Error::access(path, source))?;
+    let shared = is_shared_fs(&file);
     for _ in 0..3 {
         let before = stamp(&file).map_err(|source| Error::access(path, source))?;
-        let mode = Mode::of(&file).map_err(|source| Error::access(path, source))?;
+        let mode = if copy {
+            Mode::Snapshot
+        } else {
+            Mode::of(&file, shared).map_err(|source| Error::access(path, source))?
+        };
         let uri = match mode {
             Mode::InPlace => break,
             Mode::Immutable => immutable_uri(&file),
             Mode::Snapshot => None,
         };
         if let Some(uri) = uri {
-            let conn = connect(Path::new(&uri), path, OpenFlags::SQLITE_OPEN_URI)?;
+            let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
+            let conn = connect(Path::new(&uri), path, flags)?;
             return Ok(Db {
                 conn,
                 immutable: Some((file, before)),
@@ -146,17 +167,18 @@ fn open_readonly(path: &Path) -> Result<Db> {
             });
         }
         // With both sidecars present, reading in place creates no files.
-        if mode == Mode::Immutable && has_sidecars(&file) {
+        if mode == Mode::Immutable && !shared && has_sidecars(&file) {
             break;
         }
-        let snapshot = Snapshot::copy(&file).map_err(|source| Error::Snapshot {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let snapshot = Snapshot::copy(&file, path)?;
+        #[cfg(test)]
+        AFTER_COPY.with_borrow_mut(|hook| hook.as_mut().map(|hook| hook(&file)));
         // Cursor may have opened the file during the copy, which can tear it.
         // Copy again, or read in place once its -wal and -shm exist.
-        if stamp(&file).ok() == Some(before) && Mode::of(&file).ok() == Some(mode) {
-            let conn = connect(&snapshot.db, path, OpenFlags::empty())?;
+        if stamp(&file).ok() == Some(before) && (copy || Mode::of(&file, shared).ok() == Some(mode))
+        {
+            // The copy is private, so SQLite may recover it.
+            let conn = connect(&snapshot.db, path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
             return Ok(Db {
                 conn,
                 immutable: None,
@@ -164,8 +186,13 @@ fn open_readonly(path: &Path) -> Result<Db> {
             });
         }
     }
+    if shared || copy {
+        return Err(Error::Changed {
+            path: path.to_path_buf(),
+        });
+    }
     Ok(Db {
-        conn: connect(&file, path, OpenFlags::empty())?,
+        conn: connect(&file, path, OpenFlags::SQLITE_OPEN_READ_ONLY)?,
         immutable: None,
         _snapshot: None,
     })
@@ -176,11 +203,8 @@ fn connect(file: &Path, path: &Path, flags: OpenFlags) -> Result<Connection> {
         path: path.to_path_buf(),
         source,
     };
-    let conn = Connection::open_with_flags(
-        file,
-        flags | OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(db_err)?;
+    let conn = Connection::open_with_flags(file, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .map_err(db_err)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(db_err)?;
     conn.pragma_update(None, "query_only", true)
         .map_err(db_err)?;
@@ -196,6 +220,98 @@ fn sqlite_path(path: &Path) -> io::Result<PathBuf> {
         fs::canonicalize(path)
     } else {
         std::path::absolute(path)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Overrides [`is_shared_fs`] on this thread.
+    static SHARED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// Runs on this thread after each copy, before the original is checked again.
+    #[allow(clippy::type_complexity)]
+    static AFTER_COPY: std::cell::RefCell<Option<Box<dyn FnMut(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether `path` is on a filesystem that another machine or VM may write to
+/// at the same time: a network share, or the Windows drives WSL mounts.
+/// SQLite's locks and the shared memory of WAL mode do not reach across it.
+fn is_shared_fs(path: &Path) -> bool {
+    #[cfg(test)]
+    if let Some(shared) = SHARED.get() {
+        return shared;
+    }
+    shared_fs(path)
+}
+
+/// Filesystem types (`statfs` magic numbers) that are served from elsewhere.
+#[cfg(any(target_os = "linux", test))]
+const SHARED_FS_TYPES: [u32; 11] = [
+    0x0102_1997, // 9p: WSL 2's /mnt/c, VM shares
+    0x5346_4846, // WSL 1
+    0xFF53_4D42, // CIFS
+    0xFE53_4D42, // SMB 2
+    0x0000_517B, // SMB
+    0x0000_6969, // NFS
+    0x6573_5546, // FUSE: sshfs, virtiofs, rclone
+    0x5346_414F, // AFS
+    0x00C3_6400, // Ceph
+    0x786F_4256, // VirtualBox shared folders
+    0x4750_4653, // GPFS
+];
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn shared_fs(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stat` is valid for writes.
+    if unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: statfs succeeded, so it filled `stat`.
+    is_shared(&unsafe { stat.assume_init() })
+}
+
+#[cfg(target_os = "linux")]
+fn is_shared(stat: &libc::statfs) -> bool {
+    // The field's type differs between targets; the magic numbers fit 32 bits.
+    is_shared_fs_type(stat.f_type as u32)
+}
+
+#[cfg(target_os = "macos")]
+fn is_shared(stat: &libc::statfs) -> bool {
+    stat.f_flags & (libc::MNT_LOCAL as u32) == 0
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_shared_fs_type(magic: u32) -> bool {
+    SHARED_FS_TYPES.contains(&magic)
+}
+
+#[cfg(windows)]
+fn shared_fs(path: &Path) -> bool {
+    path.to_str().is_some_and(is_unc)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn shared_fs(_: &Path) -> bool {
+    false
+}
+
+/// Whether a Windows path names a network share (`\\server\share`,
+/// `\\wsl$\...`), also in its verbatim form (`\\?\UNC\...`).
+#[cfg(any(windows, test))]
+fn is_unc(path: &str) -> bool {
+    let path = path.replace('/', "\\");
+    match path.strip_prefix(r"\\?\") {
+        Some(verbatim) => verbatim
+            .get(..4)
+            .is_some_and(|unc| unc.eq_ignore_ascii_case(r"UNC\")),
+        None => path.starts_with(r"\\") && !path.starts_with(r"\\.\"),
     }
 }
 
@@ -280,6 +396,19 @@ fn has_sidecars(path: &Path) -> bool {
     sidecar(path, "-wal").is_file() && sidecar(path, "-shm").is_file()
 }
 
+/// The size of the `-wal` or `-journal` next to `path`; 0 when there is none.
+fn journal_len(path: &Path, wal: bool) -> io::Result<u64> {
+    match fs::metadata(sidecar(path, journal_suffix(wal))) {
+        Ok(meta) => Ok(meta.len()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(err),
+    }
+}
+
+fn journal_suffix(wal: bool) -> &'static str {
+    if wal { "-wal" } else { "-journal" }
+}
+
 fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = OsString::from(path.as_os_str());
     name.push(suffix);
@@ -299,18 +428,36 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn copy(path: &Path) -> io::Result<Self> {
+    /// Copies `file`, the database at `path`, with its `-wal` or `-journal`.
+    /// A file that cannot be read is named as such; only failures to write
+    /// the copy are [`Error::Snapshot`].
+    fn copy(file: &Path, path: &Path) -> Result<Self> {
         #[cfg(test)]
         COPIES.with(|copies| copies.set(copies.get() + 1));
-        let dir = private_temp_dir()?;
+        let suffix = journal_suffix(is_wal(file).map_err(|source| Error::access(path, source))?);
+        let mut sources = vec![(
+            "",
+            File::open(file).map_err(|source| Error::access(path, source))?,
+        )];
+        let journal = sidecar(file, suffix);
+        match File::open(&journal) {
+            Ok(opened) => sources.push((suffix, opened)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(Error::access(&journal, source)),
+        }
+
+        let snapshot_err = |source| Error::Snapshot {
+            path: path.to_path_buf(),
+            source,
+        };
+        let dir = private_temp_dir().map_err(snapshot_err)?;
         let snapshot = Snapshot {
-            db: dir.join(path.file_name().unwrap_or_else(|| "db".as_ref())),
+            db: dir.join(file.file_name().unwrap_or_else(|| "db".as_ref())),
             dir,
         };
-        fs::copy(path, &snapshot.db)?;
-        let wal = sidecar(path, "-wal");
-        if wal.is_file() {
-            fs::copy(&wal, sidecar(&snapshot.db, "-wal"))?;
+        for (suffix, mut source) in sources {
+            let mut copy = File::create(sidecar(&snapshot.db, suffix)).map_err(snapshot_err)?;
+            io::copy(&mut source, &mut copy).map_err(snapshot_err)?;
         }
         Ok(snapshot)
     }
@@ -324,7 +471,12 @@ impl Drop for Snapshot {
 
 fn private_temp_dir() -> io::Result<PathBuf> {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    let temp = std::env::temp_dir();
+    create_private_dir(&std::env::temp_dir(), &COUNTER)
+}
+
+/// Creates a new directory in `temp` that only this user can enter. A name
+/// that is taken, by a directory, a file or a symlink, is never reused.
+fn create_private_dir(temp: &Path, counter: &AtomicUsize) -> io::Result<PathBuf> {
     #[cfg(unix)]
     let builder = {
         use std::os::unix::fs::DirBuilderExt;
@@ -335,7 +487,7 @@ fn private_temp_dir() -> io::Result<PathBuf> {
     #[cfg(not(unix))]
     let builder = fs::DirBuilder::new();
     loop {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let n = counter.fetch_add(1, Ordering::Relaxed);
         let dir = temp.join(format!("{SNAPSHOT_PREFIX}{}-{n}", std::process::id()));
         match builder.create(&dir) {
             Ok(()) => return Ok(dir),
@@ -345,11 +497,11 @@ fn private_temp_dir() -> io::Result<PathBuf> {
     }
 }
 
-/// Runs [`remove_stale_snapshots`] on the temporary directory, once per
-/// process, before the first database is read.
-fn remove_stale_snapshots_once() {
-    static SWEEP: Once = Once::new();
-    SWEEP.call_once(|| remove_stale_snapshots(&std::env::temp_dir(), STALE_SNAPSHOT));
+/// Removes the copies that killed processes (e.g. by Ctrl-C) left in the
+/// temporary directory. The binary runs this once at startup; the library
+/// never does on its own.
+pub fn remove_stale_snapshot_copies() {
+    remove_stale_snapshots(&std::env::temp_dir(), STALE_SNAPSHOT);
 }
 
 /// Removes snapshot directories that a killed process (e.g. by Ctrl-C) left
@@ -479,7 +631,7 @@ mod tests {
         let path = dir.path().join("state.vscdb");
         create(&path, "wal");
         let copied = copies();
-        let db = open_readonly(&path).unwrap();
+        let db = open_readonly(&path, false).unwrap();
         assert!(db.immutable.is_some());
         assert!(db._snapshot.is_none());
         assert_eq!(copies(), copied);
@@ -495,11 +647,16 @@ mod tests {
         let _writer = wal_writer(&path);
         // The second row is only in the -wal: the main file alone has one.
         let uri = immutable_uri(&sqlite_path(&path).unwrap()).unwrap();
-        let main_only = connect(Path::new(&uri), &path, OpenFlags::SQLITE_OPEN_URI).unwrap();
+        let main_only = connect(
+            Path::new(&uri),
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
         assert_eq!(rows(&main_only).unwrap().len(), 1);
 
         let copied = copies();
-        let db = open_readonly(&path).unwrap();
+        let db = open_readonly(&path, false).unwrap();
         assert!(db.immutable.is_none());
         assert!(db._snapshot.is_none());
         assert_eq!(copies(), copied);
@@ -524,7 +681,7 @@ mod tests {
         };
         let before = names(dir.path());
         let copied = copies();
-        let db = open_readonly(&path).unwrap();
+        let db = open_readonly(&path, false).unwrap();
         assert!(db.immutable.is_none());
         assert!(db._snapshot.is_none());
         assert_eq!(copies(), copied);
@@ -539,7 +696,7 @@ mod tests {
         let path = dir.path().join("state.vscdb");
         create(&path, "wal");
         let writer = wal_writer(&path);
-        let db = open_readonly(&path).unwrap();
+        let db = open_readonly(&path, false).unwrap();
         assert!(db.immutable.is_none());
         assert_eq!(rows(&db).unwrap().len(), 2);
         let contents = |suffix| fs::read(sidecar(&path, suffix)).unwrap();
@@ -574,7 +731,7 @@ mod tests {
 
         let before = listing(&crashed);
         let copied = copies();
-        let db = open_readonly(&path).unwrap();
+        let db = open_readonly(&path, false).unwrap();
         assert_eq!(copies(), copied + 1);
         let copy = db._snapshot.as_ref().map(|s| s.dir.clone()).unwrap();
         assert!(copy.join("state.vscdb").is_file());
@@ -596,7 +753,7 @@ mod tests {
         std::os::unix::fs::symlink(&path, &link).unwrap();
 
         let _writer = wal_writer(&path);
-        let db = open_readonly(&link).unwrap();
+        let db = open_readonly(&link, false).unwrap();
         assert!(db._snapshot.is_none());
         assert_eq!(rows(&db).unwrap().len(), 2);
     }
@@ -616,7 +773,7 @@ mod tests {
         create(&path, "wal");
 
         let before = listing(&parent);
-        let db = open_readonly(&path).unwrap();
+        let db = open_readonly(&path, false).unwrap();
         assert!(db.immutable.is_some());
         assert_eq!(rows(&db).unwrap().len(), 1);
         drop(db);
@@ -633,7 +790,7 @@ mod tests {
         fs::create_dir(&parent).unwrap();
         let path = parent.join("state.vscdb");
         create(&path, "wal");
-        let db = open_readonly(&path).unwrap();
+        let db = open_readonly(&path, false).unwrap();
         assert!(db.immutable.is_some());
         assert_eq!(rows(&db).unwrap().len(), 1);
     }
@@ -743,6 +900,243 @@ mod tests {
         }
     }
 
+    /// Runs `open` as if the database were on a filesystem another machine shares.
+    fn shared<T>(open: impl FnOnce() -> T) -> T {
+        SHARED.set(Some(true));
+        let opened = open();
+        SHARED.set(None);
+        opened
+    }
+
+    #[test]
+    fn a_database_on_a_shared_filesystem_is_never_read_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        create(&path, "wal");
+        // Across the share, the locks and -shm of this writer are not there to see.
+        let writer = wal_writer(&path);
+        let contents = |suffix| fs::read(sidecar(&path, suffix)).unwrap();
+        let (main, wal) = (contents(""), contents("-wal"));
+
+        let copied = copies();
+        let db = shared(|| open_readonly(&path, false)).unwrap();
+        assert!(db._snapshot.is_some());
+        assert_eq!(copies(), copied + 1);
+        assert_eq!(rows(&db).unwrap().len(), 2);
+        drop(db);
+        assert_eq!((contents(""), contents("-wal")), (main, wal));
+
+        // An emptied -wal holds no commit: the main file is read without locks.
+        writer
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        let db = shared(|| open_readonly(&path, false)).unwrap();
+        assert!(db.immutable.is_some());
+        assert_eq!(copies(), copied + 1);
+        assert_eq!(rows(&db).unwrap().len(), 2);
+    }
+
+    /// What a crash in the middle of a write leaves of a rollback-journal
+    /// database: a journal that only a writer may roll back, and a main file
+    /// that already holds part of the write.
+    fn crashed_write(dir: &Path) -> PathBuf {
+        let live = dir.join("live.db");
+        create(&live, "delete");
+        let writer = Connection::open(&live).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA cache_size = 10; PRAGMA cache_spill = 10; BEGIN;
+                 UPDATE cursorDiskKV SET value = 'changed';",
+            )
+            .unwrap();
+        for n in 0..100 {
+            writer
+                .execute(
+                    "INSERT INTO cursorDiskKV VALUES (?1, randomblob(4000))",
+                    [format!("filler{n}")],
+                )
+                .unwrap();
+        }
+        let crashed = dir.join("crashed");
+        fs::create_dir(&crashed).unwrap();
+        let path = crashed.join("store.db");
+        for suffix in ["", "-journal"] {
+            let data = fs::read(sidecar(&live, suffix)).unwrap();
+            fs::write(sidecar(&path, suffix), data).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn a_journal_left_by_a_crash_is_rolled_back_in_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = crashed_write(dir.path());
+        let crashed = path.parent().unwrap();
+        let before = listing(crashed);
+        let committed = [("k".to_string(), "v".to_string())];
+
+        let copied = copies();
+        assert_eq!(with_readonly(&path, rows).unwrap(), committed);
+        assert_eq!(copies(), copied + 1);
+        assert_eq!(listing(crashed), before);
+
+        // Across a share a journal may belong to a write in progress there.
+        let db = shared(|| open_readonly(&path, false)).unwrap();
+        assert!(db._snapshot.is_some());
+        assert_eq!(rows(&db).unwrap(), committed);
+        // Without a journal there is nothing to roll back, nor to copy.
+        let clean = dir.path().join("clean.db");
+        create(&clean, "delete");
+        let db = shared(|| open_readonly(&clean, false)).unwrap();
+        assert!(db.immutable.is_some());
+        assert_eq!(rows(&db).unwrap(), committed);
+    }
+
+    /// The crash-left WAL database of [`wal_left_by_a_crash_is_read_from_a_copy`].
+    fn crashed_wal(dir: &Path) -> PathBuf {
+        let live = dir.join("live.vscdb");
+        create(&live, "wal");
+        let writer = wal_writer(&live);
+        let crashed = dir.join("crashed");
+        fs::create_dir(&crashed).unwrap();
+        let path = crashed.join("state.vscdb");
+        for suffix in ["", "-wal"] {
+            let data = fs::read(sidecar(&live, suffix)).unwrap();
+            fs::write(sidecar(&path, suffix), data).unwrap();
+        }
+        drop(writer);
+        path
+    }
+
+    fn after_copy(hook: impl FnMut(&Path) + 'static) {
+        AFTER_COPY.set(Some(Box::new(hook)));
+    }
+
+    fn touch(path: &Path) {
+        let later = SystemTime::now() + Duration::from_secs(10);
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_copy_that_cursor_may_have_torn_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = crashed_wal(dir.path());
+
+        // Cursor opens the database during the copy: read it in place with it.
+        after_copy(|file| fs::write(sidecar(file, "-shm"), "").unwrap());
+        let copied = copies();
+        let db = open_readonly(&path, false).unwrap();
+        assert!(db._snapshot.is_none() && db.immutable.is_none());
+        assert_eq!(copies(), copied + 1);
+        assert_eq!(rows(&db).unwrap().len(), 2);
+        drop(db);
+        fs::remove_file(sidecar(&path, "-shm")).unwrap();
+
+        // The main file changes during the first copy only: copy it again.
+        let mut calls = 0;
+        after_copy(move |file| {
+            calls += 1;
+            if calls == 1 {
+                touch(file);
+            }
+        });
+        let copied = copies();
+        let db = open_readonly(&path, false).unwrap();
+        assert!(db._snapshot.is_some());
+        assert_eq!(copies(), copied + 2);
+        assert_eq!(rows(&db).unwrap().len(), 2);
+        drop(db);
+
+        // It keeps changing: across a share there is no reading it in place.
+        after_copy(touch);
+        let err = shared(|| open_readonly(&path, false)).err().unwrap();
+        assert!(
+            matches!(&err, Error::Changed { path: p } if *p == path),
+            "{err}"
+        );
+        assert!(open_readonly(&path, false).unwrap()._snapshot.is_none());
+        AFTER_COPY.set(None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_that_cannot_be_read_is_named_rather_than_the_temporary_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = crashed_wal(dir.path());
+        let wal = sidecar(&sqlite_path(&path).unwrap(), "-wal");
+        fs::set_permissions(&wal, fs::Permissions::from_mode(0o000)).unwrap();
+        if File::open(&wal).is_ok() {
+            eprintln!("skipped: permissions are not enforced for this user (root)");
+            return;
+        }
+        let err = open_readonly(&path, false).err().unwrap();
+        assert!(
+            matches!(&err, Error::Io { path: p, .. } if *p == wal),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn copies_go_to_a_new_directory_only_this_user_can_enter() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = |n: usize| {
+            temp.path()
+                .join(format!("{SNAPSHOT_PREFIX}{}-{n}", std::process::id()))
+        };
+        // Names already taken, as another user could take them in a shared /tmp.
+        fs::create_dir(name(0)).unwrap();
+        fs::write(name(0).join("planted"), "").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(temp.path().join("elsewhere"), name(1)).unwrap();
+        #[cfg(not(unix))]
+        fs::write(name(1), "").unwrap();
+
+        let dir = create_private_dir(temp.path(), &AtomicUsize::new(0)).unwrap();
+        assert_eq!(dir, name(2));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        assert!(name(0).join("planted").is_file());
+        assert!(!temp.path().join("elsewhere").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+    }
+
+    #[test]
+    fn network_paths_are_shared() {
+        for path in [
+            r"\\server\share\Cursor\state.vscdb",
+            r"\\wsl$\Ubuntu\home\dana\.cursor\chats",
+            r"\\?\UNC\server\share\state.vscdb",
+            "//server/share/state.vscdb",
+        ] {
+            assert!(is_unc(path), "{path}");
+        }
+        for path in [
+            r"C:\Users\dana\AppData\Roaming\Cursor",
+            r"\\?\C:\Users\dana",
+            r"\\.\C:\state.vscdb",
+            "relative",
+        ] {
+            assert!(!is_unc(path), "{path}");
+        }
+        assert!(!is_shared_fs(tempfile::tempdir().unwrap().path()));
+        // WSL 2's /mnt/c and an SMB share are; ext4, btrfs and tmpfs are not.
+        assert!(is_shared_fs_type(0x0102_1997) && is_shared_fs_type(0xFF53_4D42));
+        for local in [0xEF53, 0x9123_683E, 0x0102_1994] {
+            assert!(!is_shared_fs_type(local));
+        }
+    }
+
     #[test]
     fn stale_snapshots_are_removed() {
         let dir = tempfile::tempdir().unwrap();
@@ -769,7 +1163,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.vscdb");
         create(&path, "delete");
-        let db = open_readonly(&path).unwrap();
+        let db = open_readonly(&path, false).unwrap();
         assert!(db.execute("DELETE FROM cursorDiskKV", []).is_err());
     }
 
@@ -777,7 +1171,7 @@ mod tests {
     fn missing_file_is_storage_not_found() {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
-            open_readonly(&dir.path().join("state.vscdb")),
+            open_readonly(&dir.path().join("state.vscdb"), false),
             Err(Error::StorageNotFound { .. })
         ));
     }

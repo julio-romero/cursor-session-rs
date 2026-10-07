@@ -96,6 +96,7 @@ fn diagnostics<W: Write>(stderr: W) -> IgnoreErrors<TerminalWriter<W>> {
 
 fn run(cli: Cli, opts: &OutputOpts, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let paths = resolve_paths(cli.storage.as_deref())?;
+    cursor_session::remove_stale_snapshot_copies();
     if cli.verbose {
         writeln!(err, "chats: {}", shown(paths.chats_dir.as_deref()))?;
         writeln!(err, "projects: {}", shown(paths.projects_dir.as_deref()))?;

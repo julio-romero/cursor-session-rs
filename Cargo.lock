@@ -302,6 +302,7 @@ dependencies = [
  "comfy-table",
  "crossterm",
  "insta",
+ "libc",
  "md-5",
  "owo-colors",
  "predicates",
