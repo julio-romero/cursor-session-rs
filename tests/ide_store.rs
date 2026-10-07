@@ -800,7 +800,6 @@ fn a_read_waits_for_cursor_to_finish_writing() {
     assert_eq!(ids[0], "late");
 }
 
-#[cfg(unix)]
 #[test]
 fn snapshots_left_by_a_killed_process_are_removed_on_the_next_run() {
     use std::time::{Duration, SystemTime};
@@ -813,15 +812,32 @@ fn snapshots_left_by_a_killed_process_are_removed_on_the_next_run() {
         fs::write(dir.join("state.vscdb"), "copy").unwrap();
     }
     let two_hours_ago = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
-    fs::File::open(&stale)
-        .unwrap()
+    open_dir_for_times(&stale)
         .set_modified(two_hours_ago)
         .unwrap();
 
-    // A database read without a copy still sweeps the temporary directory.
+    // A run that copies no database still sweeps the temporary directory.
     assert_eq!(listed_ids(&fixture, &["list"]), STANDARD_IDS);
     assert!(!stale.exists());
     assert!(fresh.exists());
+}
+
+/// A directory opened so that its times can be set: Windows opens one only
+/// with backup semantics, and setting times needs the right to write them.
+fn open_dir_for_times(dir: &Path) -> fs::File {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .unwrap()
+    }
+    #[cfg(not(windows))]
+    fs::File::open(dir).unwrap()
 }
 
 fn write_bytes(path: &Path, bytes: &[u8]) {
