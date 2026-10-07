@@ -21,12 +21,35 @@ impl OutputOpts {
         let tty = ui::stdout_is_tty();
         let no_color = env::var_os("NO_COLOR");
         let term = env::var_os("TERM");
+        let mut color = use_color(tty, choice, no_color.as_deref(), term.as_deref());
+        if tty {
+            color = console_color(color, choice, enable_escape_sequences);
+        }
         OutputOpts {
             tty,
-            color: use_color(tty, choice, no_color.as_deref(), term.as_deref()),
+            color,
             width: tty.then(ui::terminal_width),
         }
     }
+}
+
+/// A Windows console prints escape sequences as text until virtual terminal
+/// processing is on. `enable` turns it on and says whether that worked; `auto`
+/// then keeps color only if it did, `always` keeps it anyway.
+fn console_color(color: bool, choice: ColorChoice, enable: impl FnOnce() -> bool) -> bool {
+    color && (enable() || choice == ColorChoice::Always)
+}
+
+/// Turns on virtual terminal processing for the console, which crossterm
+/// otherwise does only when it styles text itself (the table, not `show`).
+#[cfg(windows)]
+fn enable_escape_sequences() -> bool {
+    crossterm::ansi_support::supports_ansi()
+}
+
+#[cfg(not(windows))]
+fn enable_escape_sequences() -> bool {
+    true
 }
 
 /// `auto` colors only a terminal, and only when NO_COLOR is unset or empty and
@@ -184,6 +207,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_console_without_escape_sequences_gets_color_only_when_forced() {
+        let unsupported = || false;
+        assert!(!console_color(true, ColorChoice::Auto, unsupported));
+        assert!(console_color(true, ColorChoice::Always, unsupported));
+        assert!(console_color(true, ColorChoice::Auto, || true));
+        // Without color the console is left as it is.
+        let untouched = || panic!("console mode changed");
+        assert!(!console_color(false, ColorChoice::Never, untouched));
+        assert!(!console_color(false, ColorChoice::Auto, untouched));
     }
 
     #[cfg(unix)]

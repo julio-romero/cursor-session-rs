@@ -357,10 +357,13 @@ fn empty_home_lists_nothing() {
     assert_eq!(ok(&fixture, &["list", "--json"]), "[]\n");
     assert_eq!(ok(&fixture, &["list"]), "No sessions found\n");
     assert_eq!(ok(&fixture, &["list", "--source", "ide", "--json"]), "[]\n");
-    assert_eq!(
-        fails(&fixture, &["show", "abc"]),
-        "error: session not found: abc\nrun `cursor-session list` to see session IDs\n"
-    );
+    for args in [&["show", "abc"][..], &["export"]] {
+        assert_eq!(
+            fails(&fixture, args),
+            "error: no Cursor session storage found\n\
+             pass --storage <path> if your Cursor data lives elsewhere\n"
+        );
+    }
 }
 
 #[test]
@@ -954,6 +957,62 @@ fn unreadable_agent_storage_is_an_error_not_an_empty_list() {
     );
 }
 
+const ESCAPE_A: &str = "e5c00000-0000-4000-8000-00000000000a";
+const ESCAPE_B: &str = "e5c00000-0000-4000-8000-00000000000b";
+
+/// Two IDE chats sharing the prefix `e5c0`, whose titles and messages hold
+/// escape sequences that would retitle the window, clear the screen, write the
+/// clipboard or ring the bell, in their 7-bit and C1 forms.
+fn escape_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    let mut rows = Vec::new();
+    for (id, title, text, at) in [
+        (
+            ESCAPE_A,
+            "Evil \u{1b}]0;pwned\u{7} \u{1b}[2Jtitle",
+            "copy \u{1b}]52;c;aGk=\u{7} bell \u{7} clear \u{1b}[2J done",
+            1_757_000_000_000,
+        ),
+        (
+            ESCAPE_B,
+            "Second \u{9d}0;c1\u{9c} \u{1b}[41mEVIL\u{1b}[0m\u{7}",
+            "csi \u{9b}2J here, DEL \u{7f}",
+            1_757_000_000_001,
+        ),
+    ] {
+        rows.push(composer(
+            id,
+            &composer_json(id, title, at, at, &[("b1", 1)]),
+            Stored::Text,
+        ));
+        rows.push(bubble(id, "b1", &text_bubble("b1", 1, text), Stored::Text));
+    }
+    fixture.write_ide_db(Journal::Delete, &rows);
+    fixture
+}
+
+#[test]
+fn stored_escape_sequences_never_reach_stderr() {
+    let controls = ['\u{1b}', '\u{7}', '\u{9b}', '\u{9d}'];
+    let fixture = escape_fixture();
+    let err = fails(&fixture, &["show", "e5c0"]);
+    assert!(!err.contains(controls), "{err:?}");
+    assert!(
+        err.contains(&format!("\n  {ESCAPE_A}  ide    Evil  title\n")),
+        "{err:?}"
+    );
+
+    // Table names from the database reach the error message as stored.
+    let renamed = Fixture::new();
+    write_sql_db(
+        &renamed.ide_db_path(),
+        "CREATE TABLE \"x\u{1b}]0;pwned\u{7}\u{9d}0;c1\u{9c}y\" (key TEXT, value BLOB);",
+    );
+    let err = fails(&renamed, &["list"]);
+    assert!(!err.contains(controls), "{err:?}");
+    assert!(err.contains("(tables present: xy)"), "{err:?}");
+}
+
 /// The binary in a pseudo-terminal, through script(1). Windows has no
 /// script(1), and ConPTY would need a new dependency, so these run on Unix.
 #[cfg(unix)]
@@ -1060,6 +1119,55 @@ mod tty {
             run_tty(&fixture, &["list", "--json"], &[]),
             ok(&fixture, &["list", "--json"])
         );
+    }
+
+    /// Every escape sequence in `text` is SGR styling (`ESC [ ... m`), and no
+    /// other control character than a line feed is left.
+    fn only_styling(text: &str) -> bool {
+        let mut rest = text;
+        while let Some(start) = rest.find('\u{1b}') {
+            let sequence = &rest[start + 1..];
+            let Some(end) = sequence.find('m') else {
+                return false;
+            };
+            let params = &sequence[..end];
+            if !params.starts_with('[')
+                || !params[1..].chars().all(|c| c.is_ascii_digit() || c == ';')
+            {
+                return false;
+            }
+            rest = &sequence[end + 1..];
+        }
+        !text
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\u{1b}'))
+    }
+
+    #[test]
+    fn stored_escape_sequences_never_reach_the_terminal() {
+        let fixture = escape_fixture();
+        for env in [&[][..], &[("NO_COLOR", "1")]] {
+            for args in [
+                &["list"][..],
+                &["show", ESCAPE_A, "--all"],
+                &["show", ESCAPE_B, "--all"],
+            ] {
+                let out = run_tty(&fixture, args, env);
+                assert!(only_styling(&out), "{args:?} {env:?}: {out:?}");
+                assert_eq!(out.contains('\u{1b}'), env.is_empty(), "{args:?} {env:?}");
+            }
+        }
+        let shown = run_tty(&fixture, &["show", ESCAPE_A, "--all"], &[("NO_COLOR", "1")]);
+        assert!(shown.starts_with("Evil  title\n"), "{shown:?}");
+        assert!(shown.ends_with("\ncopy  bell  clear  done\n"), "{shown:?}");
+
+        // JSON escapes them all, so a terminal shows it exactly as a pipe gets it.
+        for id in [ESCAPE_A, ESCAPE_B] {
+            let piped = ok(&fixture, &["show", id, "--json"]);
+            assert_eq!(run_tty(&fixture, &["show", id, "--json"], &[]), piped);
+            let title = json(&piped)["title"].as_str().unwrap().to_string();
+            assert!(title.contains('\u{1b}') || title.contains('\u{9d}'));
+        }
     }
 
     #[test]

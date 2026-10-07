@@ -499,8 +499,10 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
     let file = fs::File::open(path).map_err(io_err)?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
-    for line in reader.lines() {
+    for line in reader.split(b'\n') {
         let line = line.map_err(io_err)?;
+        // An invalid byte costs its character, not the rest of the transcript.
+        let line = String::from_utf8_lossy(&line);
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -602,6 +604,22 @@ mod tests {
             source: denied(),
         };
         assert_eq!(reason(&io), denied().to_string());
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_transcript_line_keeps_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let mut bytes = b"{\"role\":\"user\",\"message\":{\"content\":\"first\"}}\r\n".to_vec();
+        bytes.extend(b"{\"role\":\"assistant\",\"message\":{\"content\":\"caf\xe9\"}}\n");
+        bytes.extend(b"{\"role\":\"user\",\"message\":{\"content\":\"last\"}}");
+        fs::write(&path, bytes).unwrap();
+        let contents: Vec<String> = read_jsonl(&path)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(contents, ["first", "caf\u{fffd}", "last"]);
     }
 
     #[test]

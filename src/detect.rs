@@ -268,7 +268,8 @@ impl StoragePaths {
         }
     }
 
-    fn is_empty(&self) -> bool {
+    /// Whether no location was found at all.
+    pub fn is_empty(&self) -> bool {
         self.chats_dir.is_none() && self.projects_dir.is_none() && self.global_storage_db.is_none()
     }
 }

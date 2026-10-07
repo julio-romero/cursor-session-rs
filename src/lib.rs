@@ -75,7 +75,7 @@ pub fn find_session<'a>(sessions: &'a [Session], query: &str) -> Result<&'a Sess
                         "{}  {:<5}  {}",
                         s.id,
                         s.source.as_str(),
-                        ui::truncate_chars(&s.title, CANDIDATE_TITLE_WIDTH)
+                        ui::truncate_chars(&ui::one_line(&s.title), CANDIDATE_TITLE_WIDTH)
                     )
                 })
                 .collect(),
@@ -210,6 +210,12 @@ mod tests {
         assert_eq!(hints[9], "  abc09  agent  title of abc09");
         assert_eq!(hints[10], "  and 2 more");
         assert_eq!(hints[11], "use more characters of the ID");
+
+        // A title on several lines stays on its candidate's line.
+        let mut multiline = sessions[..2].to_vec();
+        multiline[0].title = "first line\nsecond\tline\r\n".into();
+        let hints = find_session(&multiline, "abc").unwrap_err().hints();
+        assert_eq!(hints[0], "  abc00  agent  first line second line  ");
 
         let err = find_session(&sessions[..2], "abc").unwrap_err();
         assert_eq!(

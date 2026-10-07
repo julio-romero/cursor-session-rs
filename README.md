@@ -100,7 +100,8 @@ e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46  ide         3  2026-10-04 16:48  Speed up 
 - In a terminal, control characters and escape sequences in stored titles and
   messages are removed before printing. The exception is `show` with color on:
   it keeps color and style codes and resets them at the end of each line.
-  Piped output is written as stored.
+  Piped output is written as stored, so a title that contains a line break
+  spans two lines there; `list --json` is exact for scripts.
 
 ### Filter by source and count
 
@@ -264,9 +265,8 @@ with its messages.
 
 - Written to stdout, pretty-printed with two-space indentation and a trailing
   newline. No color is added and nothing is fitted to the terminal.
-- JSON escapes most control characters. The ones it leaves as is (DEL and
-  U+0080 to U+009F) go through the terminal filter that `show` uses when stdout
-  is a terminal; pipe or redirect the output to get them unchanged.
+- Every control character in a string, DEL and U+0080 to U+009F included, is
+  escaped as `\u00XX`, so the JSON is the same in a terminal and in a pipe.
 - `list --json` keeps the list order (most recently updated first) and applies
   `--source` and `--limit`. No sessions gives `[]`.
 - `show --json` includes every message, also in a terminal, unless `--limit N`
@@ -495,7 +495,8 @@ with your Cursor version.
 
 **No sessions, or not the ones you expect.** Run `cursor-session healthcheck` to
 see which locations were found and whether they load. If your data lives
-elsewhere, point `--storage` at it.
+elsewhere, point `--storage` at it. When no location is found at all, `show`
+and `export` stop with `no Cursor session storage found`.
 
 **Sessions or messages missing.** Unreadable rows and files are skipped so the
 rest still loads. `-v` prints the paths in use and a `warning:` line for each

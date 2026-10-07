@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, SecondsFormat};
+use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -124,24 +124,22 @@ pub struct MessageDetail<'a> {
     pub timestamp: Option<&'a str>,
 }
 
-fn rfc3339(ms: Option<i64>) -> Option<String> {
+/// `ms` as a UTC time in the years 0000 to 9999, which RFC 3339 and the
+/// UPDATED column can show. Anything else is taken as no time at all.
+fn utc(ms: Option<i64>) -> Option<DateTime<Utc>> {
     let dt = DateTime::from_timestamp_millis(ms?)?;
-    // RFC 3339 has no form for years outside 0000-9999.
-    (0..=9999)
-        .contains(&dt.year())
-        .then(|| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
+    (0..=9999).contains(&dt.year()).then_some(dt)
+}
+
+fn rfc3339(ms: Option<i64>) -> Option<String> {
+    utc(ms).map(|dt| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 fn format_ms(ms: Option<i64>) -> String {
-    let Some(ms) = ms else {
-        return "—".to_string();
-    };
-    let secs = ms.div_euclid(1000);
-    let nsecs = (ms.rem_euclid(1000) * 1_000_000) as u32;
-    match chrono::DateTime::from_timestamp(secs, nsecs) {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M").to_string(),
-        None => ms.to_string(),
-    }
+    utc(ms).map_or_else(
+        || "—".to_string(),
+        |dt| dt.format("%Y-%m-%d %H:%M").to_string(),
+    )
 }
 
 pub fn merge_sessions(mut sessions: Vec<Session>) -> Vec<Session> {
@@ -275,6 +273,12 @@ mod tests {
         assert_eq!(rfc3339(Some(1_700_000_000_000_000)), None);
         assert_eq!(rfc3339(Some(253_402_300_800_000)), None);
         assert_eq!(rfc3339(Some(i64::MAX)), None);
+
+        // The UPDATED column, 16 wide, shows those as missing too.
+        assert_eq!(format_ms(Some(-1)), "1969-12-31 23:59");
+        for ms in [1_700_000_000_000_000, i64::MAX, i64::MIN] {
+            assert_eq!(format_ms(Some(ms)), "—");
+        }
     }
 
     #[test]

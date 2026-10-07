@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs;
 use std::io::{BufWriter, ErrorKind, Write};
 use std::path::Path;
@@ -52,8 +53,27 @@ fn print_warnings(warnings: &[String], verbose: bool, err: &mut dyn Write) -> Re
 
 fn write_json(out: &mut dyn Write, value: &impl Serialize) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
-    writeln!(out, "{json}")?;
+    writeln!(out, "{}", escape_controls(&json))?;
     Ok(())
+}
+
+/// JSON allows DEL and the C1 controls (U+0080 to U+009F) unescaped, but a
+/// terminal acts on them, and its filter would drop them and what follows.
+/// They only occur inside strings, so escaping them keeps the JSON exact.
+fn escape_controls(json: &str) -> Cow<'_, str> {
+    let control = |c: char| matches!(c, '\u{7f}'..='\u{9f}');
+    if !json.contains(control) {
+        return Cow::Borrowed(json);
+    }
+    let mut escaped = String::with_capacity(json.len() + 16);
+    for c in json.chars() {
+        if control(c) {
+            escaped.push_str(&format!("\\u{:04x}", u32::from(c)));
+        } else {
+            escaped.push(c);
+        }
+    }
+    Cow::Owned(escaped)
 }
 
 fn cmd_list(
@@ -89,6 +109,9 @@ fn cmd_show(
     err: &mut dyn Write,
     args: &ShowArgs,
 ) -> Result<()> {
+    if paths.is_empty() {
+        return Err(Error::NoStorage.into());
+    }
     let load_opts = LoadOptions {
         source: args.source,
     };
@@ -113,6 +136,9 @@ fn cmd_export(
     err: &mut dyn Write,
     args: &ExportArgs,
 ) -> Result<()> {
+    if paths.is_empty() {
+        return Err(Error::NoStorage.into());
+    }
     let load_opts = LoadOptions {
         source: args.source,
     };
@@ -269,10 +295,7 @@ fn cmd_healthcheck(
         }
     }
 
-    if paths.chats_dir.is_none()
-        && paths.projects_dir.is_none()
-        && paths.global_storage_db.is_none()
-    {
+    if paths.is_empty() {
         return Err(Error::NoStorage.into());
     }
     let mut failed_stores: Vec<Source> = failed.iter().map(|(source, _)| *source).collect();
@@ -551,11 +574,42 @@ mod tests {
 
     #[test]
     fn export_says_whether_a_filter_matched_nothing() {
-        let paths = StoragePaths::default();
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StoragePaths {
+            projects_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
         let (result, _) = run_args(&paths, &["export"]);
         assert_eq!(result.unwrap_err().to_string(), "no sessions to export");
         let (result, _) = run_args(&paths, &["export", "--workspace", "/nowhere"]);
         assert_eq!(result.unwrap_err().to_string(), "no sessions matched");
+    }
+
+    #[test]
+    fn show_and_export_say_when_no_storage_was_found() {
+        for argv in [&["show", "abc"][..], &["export"]] {
+            let (result, out) = run_args(&StoragePaths::default(), argv);
+            assert!(
+                matches!(
+                    result.unwrap_err().downcast_ref::<Error>(),
+                    Some(Error::NoStorage)
+                ),
+                "{argv:?}"
+            );
+            assert!(out.is_empty());
+        }
+    }
+
+    #[test]
+    fn json_escapes_controls_a_terminal_would_act_on() {
+        let title = "OSC \u{9d}0;x\u{7} DEL \u{7f} NEL \u{85} ok \u{a0}é";
+        let json = serde_json::to_string_pretty(&serde_json::json!({ "title": title })).unwrap();
+        let escaped = escape_controls(&json);
+        // U+00A0 and later are printable and stay as they are.
+        assert!(escaped.contains("OSC \\u009d0;x\\u0007 DEL \\u007f NEL \\u0085 ok \u{a0}é"));
+        let parsed: Value = serde_json::from_str(&escaped).unwrap();
+        assert_eq!(parsed["title"], title);
+        assert!(matches!(escape_controls("[]"), Cow::Borrowed(_)));
     }
 
     #[test]
