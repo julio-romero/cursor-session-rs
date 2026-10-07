@@ -17,12 +17,6 @@ pub enum Error {
     #[error("unsupported storage file (expected state.vscdb or store.db)")]
     UnsupportedStorage { path: PathBuf },
 
-    #[error("no Cursor session storage found")]
-    NoStorage,
-
-    #[error("session id is empty")]
-    EmptyId,
-
     #[error("session not found: {query}")]
     SessionNotFound { query: String },
 
@@ -54,6 +48,12 @@ pub enum Error {
     /// Writing exported output failed; the writer has no path of its own.
     #[error(transparent)]
     Write(io::Error),
+
+    #[error("no Cursor session storage found")]
+    NoStorage,
+
+    #[error("session id is empty")]
+    EmptyId,
 }
 
 impl Error {
@@ -64,10 +64,7 @@ impl Error {
             Error::UnsupportedStorage { .. } => vec![
                 "Pass ~/.cursor/chats, a session directory, store.db, or state.vscdb.".to_string(),
             ],
-            Error::NoStorage => {
-                vec!["pass --storage <path> if your Cursor data lives elsewhere".to_string()]
-            }
-            Error::EmptyId | Error::SessionNotFound { .. } => {
+            Error::SessionNotFound { .. } | Error::EmptyId => {
                 vec!["run `cursor-session list` to see session IDs".to_string()]
             }
             Error::AmbiguousId { matches, .. } => {
@@ -78,6 +75,9 @@ impl Error {
                 }
                 hints.push("use more characters of the ID".to_string());
                 hints
+            }
+            Error::NoStorage => {
+                vec!["pass --storage <path> if your Cursor data lives elsewhere".to_string()]
             }
             _ => Vec::new(),
         }

@@ -1,4 +1,4 @@
-use chrono::{DateTime, SecondsFormat};
+use chrono::{DateTime, Datelike, SecondsFormat};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -121,7 +121,10 @@ pub struct MessageDetail<'a> {
 
 fn rfc3339(ms: Option<i64>) -> Option<String> {
     let dt = DateTime::from_timestamp_millis(ms?)?;
-    Some(dt.to_rfc3339_opts(SecondsFormat::Secs, true))
+    // RFC 3339 has no form for years outside 0000-9999.
+    (0..=9999)
+        .contains(&dt.year())
+        .then(|| dt.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 fn format_ms(ms: Option<i64>) -> String {
@@ -250,6 +253,19 @@ mod tests {
         let value = serde_json::to_value(bare.summary()).unwrap();
         assert_eq!(value["created_at"], serde_json::Value::Null);
         assert_eq!(value["updated_at"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn out_of_range_times_serialize_as_null() {
+        assert_eq!(rfc3339(Some(-1)).unwrap(), "1969-12-31T23:59:59Z");
+        assert_eq!(
+            rfc3339(Some(253_402_300_799_999)).unwrap(),
+            "9999-12-31T23:59:59Z"
+        );
+        // Microseconds stored where milliseconds are expected land in year 55840.
+        assert_eq!(rfc3339(Some(1_700_000_000_000_000)), None);
+        assert_eq!(rfc3339(Some(253_402_300_800_000)), None);
+        assert_eq!(rfc3339(Some(i64::MAX)), None);
     }
 
     #[test]

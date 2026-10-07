@@ -136,13 +136,9 @@ fn cmd_healthcheck(
     err: &mut dyn Write,
     verbose: bool,
 ) -> Result<()> {
-    // Load each store on its own so one failure does not hide the other.
-    let [agent_store, ide_store] = [Source::Agent, Source::Ide].map(|source| {
-        let opts = LoadOptions {
-            source: Some(source),
-        };
-        load_sessions(paths, &opts)
-    });
+    // Check each store on its own so one failure does not hide the other.
+    let [agent_store, ide_store] =
+        [Source::Agent, Source::Ide].map(|source| check_store(paths, source));
     let status = |store: &cursor_session::Result<Loaded>| {
         if store.is_ok() { "ok" } else { "failed" }
     };
@@ -199,13 +195,6 @@ fn cmd_healthcheck(
     if sessions.is_empty() {
         writeln!(out, "warning: no sessions were parsed")?;
     }
-    if !verbose && !warnings.is_empty() {
-        writeln!(
-            out,
-            "load warnings: {} (rerun with --verbose to see them)",
-            warnings.len()
-        )?;
-    }
     for (source, error) in &failed {
         writeln!(out, "{} store failed: {error:#}", source.as_str())?;
     }
@@ -224,6 +213,30 @@ fn cmd_healthcheck(
         ),
         _ => bail!("healthcheck failed: the agent and ide stores could not be loaded"),
     }
+}
+
+/// Loads one store after checking that its paths can be opened, since the
+/// loaders skip paths they cannot read.
+fn check_store(paths: &StoragePaths, source: Source) -> cursor_session::Result<Loaded> {
+    let found = match source {
+        Source::Agent => vec![&paths.chats_dir, &paths.projects_dir],
+        Source::Ide => vec![&paths.global_storage_db],
+    };
+    for path in found.into_iter().flatten() {
+        let readable = if path.is_dir() {
+            fs::read_dir(path).map(drop)
+        } else {
+            fs::File::open(path).map(drop)
+        };
+        readable.map_err(|source| Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    let opts = LoadOptions {
+        source: Some(source),
+    };
+    load_sessions(paths, &opts)
 }
 
 #[cfg(test)]
@@ -439,6 +452,25 @@ mod tests {
         assert!(out.contains("state.vscdb (failed)\n"));
         assert!(out.contains("sessions loaded: 1 (agent: 1, ide: 0)\n"));
         assert!(out.contains("ide store failed: failed to read sqlite database: "));
+    }
+
+    #[test]
+    fn healthcheck_fails_when_a_found_store_cannot_be_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        // The IDE loader skips a database it cannot open, so this alone would pass.
+        let paths = StoragePaths {
+            projects_dir: Some(fixture_projects()),
+            global_storage_db: Some(dir.path().join("state.vscdb")),
+            ..Default::default()
+        };
+        let (result, out) = run_args(&paths, &["healthcheck"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "healthcheck failed: the ide store could not be loaded"
+        );
+        assert!(out.contains("state.vscdb (failed)\n"));
+        assert!(out.contains("agent-transcripts (ok)\n"));
+        assert!(out.contains("ide store failed: could not access "));
     }
 
     #[test]
