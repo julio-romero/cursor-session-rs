@@ -686,11 +686,15 @@ fn healthcheck_passes_when_the_stores_load() {
     let expected = format!(
         "Cursor session healthcheck\n\n\
          agent chats: {} (ok)\n\
-         transcripts: {}/{{project}}/agent-transcripts (ok)\n\
+         transcripts: {} (ok)\n\
          ide db: {} (ok)\n\n\
          sessions loaded: 7 (agent: 4, ide: 3)\n",
         fixture.chats_dir().display(),
-        fixture.projects_dir().display(),
+        fixture
+            .projects_dir()
+            .join("{project}")
+            .join("agent-transcripts")
+            .display(),
         fixture.ide_db_path().display()
     );
     assert_eq!(out, expected);
