@@ -1,6 +1,6 @@
 use std::env;
 use std::ffi::OsStr;
-use std::io::{self, BufWriter, ErrorKind, Write};
+use std::io::{self, ErrorKind, Write};
 
 use cursor_session::ui;
 
@@ -48,17 +48,17 @@ pub fn use_color(
     }
 }
 
-/// Buffered writer that remembers whether the reader went away (EPIPE), so the
-/// process can exit quietly however the error was wrapped on its way up.
+/// Writer that remembers whether the reader went away (EPIPE), so the process
+/// can exit quietly however the error was wrapped on its way up.
 pub struct PipeWriter<W: Write> {
-    inner: BufWriter<W>,
+    inner: W,
     closed: bool,
 }
 
 impl<W: Write> PipeWriter<W> {
     pub fn new(inner: W) -> Self {
         Self {
-            inner: BufWriter::new(inner),
+            inner,
             closed: false,
         }
     }
@@ -94,6 +94,38 @@ impl<W: Write> Write for PipeWriter<W> {
     }
 }
 
+/// Writer for a terminal: stored text goes through `ui::TerminalFilter`, so it
+/// cannot move the cursor, retitle the window or ring the bell. `keep_color`
+/// lets SGR styling through, the only escape sequences this program writes.
+pub struct TerminalWriter<W: Write> {
+    inner: W,
+    filter: ui::TerminalFilter,
+    buf: Vec<u8>,
+}
+
+impl<W: Write> TerminalWriter<W> {
+    pub fn new(inner: W, keep_color: bool) -> Self {
+        Self {
+            inner,
+            filter: ui::TerminalFilter::new(keep_color),
+            buf: Vec::new(),
+        }
+    }
+}
+
+impl<W: Write> Write for TerminalWriter<W> {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        self.buf.clear();
+        self.filter.push(data, &mut self.buf);
+        self.inner.write_all(&self.buf)?;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Writer for diagnostics: a failing stderr must never fail or abort the program.
 pub struct IgnoreErrors<W: Write>(pub W);
 
@@ -111,6 +143,8 @@ impl<W: Write> Write for IgnoreErrors<W> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::BufWriter;
+
     use super::*;
 
     const UNSET: Option<&OsStr> = None;
@@ -170,10 +204,17 @@ mod tests {
 
     #[test]
     fn pipe_writer_records_a_closed_reader_on_flush() {
-        let mut out = PipeWriter::new(Failing(ErrorKind::BrokenPipe));
+        let mut out = PipeWriter::new(BufWriter::new(Failing(ErrorKind::BrokenPipe)));
         assert!(write!(out, "buffered").is_ok());
         assert!(!out.closed());
         assert!(out.flush().is_err());
+        assert!(out.closed());
+    }
+
+    #[test]
+    fn pipe_writer_records_a_closed_reader_on_write() {
+        let mut out = PipeWriter::new(Failing(ErrorKind::BrokenPipe));
+        assert!(writeln!(out, "line").is_err());
         assert!(out.closed());
     }
 
@@ -182,6 +223,24 @@ mod tests {
         let mut out = PipeWriter::new(Failing(ErrorKind::PermissionDenied));
         assert!(out.write_all(&[b'x'; 64 * 1024]).is_err());
         assert!(!out.closed());
+    }
+
+    #[test]
+    fn terminal_writer_filters_across_writes() {
+        let mut out = TerminalWriter::new(Vec::new(), false);
+        for chunk in [
+            "title \u{1b}]0;pw",
+            "ned\u{7} ok\r",
+            "\nred \u{1b}[3",
+            "1mtext\u{1b}[0m\n",
+        ] {
+            out.write_all(chunk.as_bytes()).unwrap();
+        }
+        assert_eq!(out.inner, b"title  ok\r\nred text\n");
+
+        let mut out = TerminalWriter::new(Vec::new(), true);
+        write!(out, "\u{1b}[36magent\u{1b}[39m \u{1b}[2J").unwrap();
+        assert_eq!(out.inner, b"\x1b[36magent\x1b[39m ");
     }
 
     #[test]

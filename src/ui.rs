@@ -111,26 +111,188 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
-/// Replaces control characters (newlines, tabs, escape sequences) with spaces so
-/// stored text stays on one line and cannot drive the terminal.
+/// Removes escape sequences and turns the remaining control characters (newlines,
+/// tabs) into spaces, so stored text fits on one table row.
 pub fn one_line(text: &str) -> Cow<'_, str> {
     if !text.chars().any(char::is_control) {
         return Cow::Borrowed(text);
     }
+    let mut filter = TerminalFilter::new(false);
+    let mut safe = Vec::with_capacity(text.len());
+    filter.push(text.as_bytes(), &mut safe);
     Cow::Owned(
-        text.chars()
+        String::from_utf8_lossy(&safe)
+            .chars()
             .map(|c| if c.is_control() { ' ' } else { c })
             .collect(),
     )
 }
 
-/// Drops control characters other than newline and tab from multi-line text.
-pub fn printable(text: &str) -> Cow<'_, str> {
-    let unsafe_control = |c: char| c.is_control() && c != '\n' && c != '\t';
-    if !text.chars().any(unsafe_control) {
-        return Cow::Borrowed(text);
+/// Longest SGR parameter list passed through; longer ones are dropped.
+const MAX_SGR_LEN: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterState {
+    Ground,
+    /// After `\r`, which is kept only as part of `\r\n`.
+    CarriageReturn,
+    /// After 0xC2, the UTF-8 lead byte of the C1 controls.
+    C1Lead,
+    Escape,
+    EscapeIntermediate,
+    /// Control sequence (`ESC [` or C1 CSI); its parameters collect in `csi`.
+    Csi,
+    /// Control string (OSC, DCS, SOS, PM, APC), dropped up to its terminator.
+    ControlString,
+    ControlStringEscape,
+    ControlStringC1Lead,
+}
+
+/// Streaming filter that makes text safe for a terminal: it removes escape
+/// sequences whole (CSI, OSC and other control strings, two-byte escapes, their
+/// C1 forms) and control characters other than `\n`, `\t` and the `\r` of `\r\n`.
+/// SGR styling (`ESC [ ... m`) is kept when `keep_sgr` is set. Input may be split
+/// anywhere, also inside a sequence or a UTF-8 character.
+#[derive(Debug, Clone)]
+pub struct TerminalFilter {
+    keep_sgr: bool,
+    state: FilterState,
+    csi: Vec<u8>,
+}
+
+impl TerminalFilter {
+    pub fn new(keep_sgr: bool) -> Self {
+        Self {
+            keep_sgr,
+            state: FilterState::Ground,
+            csi: Vec::new(),
+        }
     }
-    Cow::Owned(text.chars().filter(|&c| !unsafe_control(c)).collect())
+
+    /// Appends the safe part of `input` to `out`.
+    pub fn push(&mut self, input: &[u8], out: &mut Vec<u8>) {
+        for &byte in input {
+            self.byte(byte, out);
+        }
+    }
+
+    fn byte(&mut self, byte: u8, out: &mut Vec<u8>) {
+        match self.state {
+            FilterState::Ground => self.ground(byte, out),
+            FilterState::CarriageReturn => {
+                self.state = FilterState::Ground;
+                if byte == b'\n' {
+                    out.push(b'\r');
+                }
+                self.ground(byte, out);
+            }
+            FilterState::C1Lead => {
+                self.state = FilterState::Ground;
+                match byte {
+                    0x9b => self.start_csi(),
+                    0x90 | 0x98 | 0x9d..=0x9f => self.state = FilterState::ControlString,
+                    0x80..=0x9f => {}
+                    _ => {
+                        out.push(0xc2);
+                        self.ground(byte, out);
+                    }
+                }
+            }
+            FilterState::Escape => self.escape(byte, out),
+            FilterState::EscapeIntermediate => match byte {
+                0x20..=0x2f => {}
+                0x30..=0x7e => self.state = FilterState::Ground,
+                _ => {
+                    self.state = FilterState::Ground;
+                    self.ground(byte, out);
+                }
+            },
+            FilterState::Csi => match byte {
+                0x20..=0x3f => {
+                    if self.csi.len() <= MAX_SGR_LEN {
+                        self.csi.push(byte);
+                    }
+                }
+                0x40..=0x7e => {
+                    self.state = FilterState::Ground;
+                    if byte == b'm' && self.keep_sgr && is_sgr(&self.csi) {
+                        out.extend_from_slice(b"\x1b[");
+                        out.extend_from_slice(&self.csi);
+                        out.push(b'm');
+                    }
+                }
+                _ => {
+                    self.state = FilterState::Ground;
+                    self.ground(byte, out);
+                }
+            },
+            FilterState::ControlString => self.control_string(byte, out),
+            FilterState::ControlStringEscape => {
+                if byte == b'\\' {
+                    self.state = FilterState::Ground;
+                } else {
+                    self.escape(byte, out);
+                }
+            }
+            FilterState::ControlStringC1Lead => match byte {
+                0x9c => self.state = FilterState::Ground,
+                0x80..=0xbf => self.state = FilterState::ControlString,
+                _ => {
+                    self.state = FilterState::ControlString;
+                    self.control_string(byte, out);
+                }
+            },
+        }
+    }
+
+    fn ground(&mut self, byte: u8, out: &mut Vec<u8>) {
+        match byte {
+            0x1b => self.state = FilterState::Escape,
+            b'\r' => self.state = FilterState::CarriageReturn,
+            b'\n' | b'\t' => out.push(byte),
+            0x00..=0x1f | 0x7f => {}
+            0xc2 => self.state = FilterState::C1Lead,
+            _ => out.push(byte),
+        }
+    }
+
+    fn escape(&mut self, byte: u8, out: &mut Vec<u8>) {
+        self.state = FilterState::Ground;
+        match byte {
+            b'[' => self.start_csi(),
+            b']' | b'P' | b'X' | b'^' | b'_' => self.state = FilterState::ControlString,
+            0x20..=0x2f => self.state = FilterState::EscapeIntermediate,
+            0x30..=0x7e => {}
+            _ => self.ground(byte, out),
+        }
+    }
+
+    fn start_csi(&mut self) {
+        self.csi.clear();
+        self.state = FilterState::Csi;
+    }
+
+    fn control_string(&mut self, byte: u8, out: &mut Vec<u8>) {
+        match byte {
+            0x07 => self.state = FilterState::Ground,
+            0x1b => self.state = FilterState::ControlStringEscape,
+            0xc2 => self.state = FilterState::ControlStringC1Lead,
+            // Any other control ends an unterminated string, so it hides at
+            // most the rest of its line.
+            0x00..=0x1f | 0x7f => {
+                self.state = FilterState::Ground;
+                self.ground(byte, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_sgr(params: &[u8]) -> bool {
+    params.len() <= MAX_SGR_LEN
+        && params
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b';' | b':'))
 }
 
 pub fn title_width(term_width: usize) -> usize {
@@ -165,19 +327,17 @@ pub fn select_messages<T>(
 }
 
 pub fn format_message_header(role: &str, timestamp: Option<&str>, use_color: bool) -> String {
-    let role = paint_role(&one_line(role), use_color);
+    let role = paint_role(role, use_color);
     match timestamp {
-        Some(ts) => format!(
-            "[{role}{}]",
-            paint_dim(&format!(" ({})", one_line(ts)), use_color)
-        ),
+        Some(ts) => format!("[{role}{}]", paint_dim(&format!(" ({ts})"), use_color)),
         None => format!("[{role}]"),
     }
 }
 
 /// Renders the session list. `term_width` is the terminal width when stdout is a
 /// terminal, which selects the fitted table; `None` selects the plain layout.
-/// Color is independent of the layout.
+/// Color is independent of the layout. The plain layout and `render_show` keep
+/// stored text byte for byte; a terminal writer applies [`TerminalFilter`].
 pub fn render_list(sessions: &[Session], use_color: bool, term_width: Option<usize>) -> String {
     if sessions.is_empty() {
         return "No sessions found\n".to_string();
@@ -214,11 +374,11 @@ fn render_list_plain(sessions: &[Session], use_color: bool) -> String {
         );
         out.push_str(&format!(
             "{:<id_w$}  {}  {:>msgs_w$}  {}  {}\n",
-            one_line(&session.id),
+            session.id,
             paint_source_text(&source, session.source, use_color),
             session.message_count(),
             paint_dim(&updated, use_color),
-            one_line(&session.title),
+            session.title,
             id_w = ID_FULL_WIDTH,
             msgs_w = MSGS_WIDTH,
         ));
@@ -285,17 +445,17 @@ fn source_cell(source: Source) -> Cell {
 
 pub fn render_show_header(session: &Session, use_color: bool) -> String {
     let mut lines = Vec::new();
-    lines.push(paint_bold(&one_line(&session.title), use_color));
-    lines.push(format!("id:        {}", one_line(&session.id)));
+    lines.push(paint_bold(&session.title, use_color));
+    lines.push(format!("id:        {}", session.id));
     lines.push(format!(
         "source:    {}",
         paint_source(session.source, use_color)
     ));
     if let Some(workspace) = &session.workspace {
-        lines.push(format!("workspace: {}", one_line(workspace)));
+        lines.push(format!("workspace: {workspace}"));
     }
     if let Some(model) = &session.model {
-        lines.push(format!("model:     {}", one_line(model)));
+        lines.push(format!("model:     {model}"));
     }
     lines.push(format!(
         "created:   {}",
@@ -333,7 +493,7 @@ pub fn render_show(
             use_color,
         ));
         out.push('\n');
-        out.push_str(&printable(&message.content));
+        out.push_str(&message.content);
         out.push('\n');
     }
     out
@@ -548,24 +708,141 @@ mod tests {
         assert_eq!(id_prefix_width(0), 8);
     }
 
-    #[test]
-    fn control_characters_are_neutralized() {
+    fn control_session() -> Session {
         let mut session = sample_session();
-        session.title = "evil\u{1b}]0;pwned\u{7}\nsecond\tline".into();
-        session.messages[0].content = "\u{1b}[2Jcleared\r\n\tindented\nnext\u{9b}31m".into();
+        session.title = "Edge \u{1b}]0;pwned\u{7} title\twith\nnewline".into();
+        session.messages = vec![
+            Message {
+                role: "user".into(),
+                content: "line one\r\nline two\r\n".into(),
+                timestamp: None,
+            },
+            Message {
+                role: "assistant".into(),
+                content: "colored \u{1b}[31mred\u{1b}[0m output and bell \u{7} done".into(),
+                timestamp: None,
+            },
+        ];
+        session
+    }
 
-        for width in [Some(80), None] {
-            let rendered = render_list(std::slice::from_ref(&session), false, width);
-            assert!(!rendered.chars().any(|c| c.is_control() && c != '\n'));
-            assert!(rendered.contains("evil ]0;pwned  sec"));
-        }
+    #[test]
+    fn plain_layout_and_show_keep_stored_text_verbatim() {
+        let session = control_session();
         let plain = render_list(std::slice::from_ref(&session), false, None);
-        assert!(plain.contains("evil ]0;pwned  second line\n"));
-        assert_eq!(plain.lines().count(), 5);
+        let row = format!(
+            "{}  agent       2  {:<16}  Edge \u{1b}]0;pwned\u{7} title\twith\nnewline\n",
+            session.id,
+            session.updated_display()
+        );
+        assert!(plain.ends_with(&row), "{plain:?}");
 
         let shown = render_show(&session, &session.messages, None, false);
-        assert!(!has_ansi(&shown));
-        assert!(!shown.contains('\r'));
-        assert!(shown.contains("[2Jcleared\n\tindented\nnext31m"));
+        assert!(shown.starts_with("Edge \u{1b}]0;pwned\u{7} title\twith\nnewline\nid: "));
+        assert!(shown.ends_with(
+            "messages:  2\n\
+             \n[user]\nline one\r\nline two\r\n\n\
+             \n[assistant]\ncolored \u{1b}[31mred\u{1b}[0m output and bell \u{7} done\n"
+        ));
+    }
+
+    #[test]
+    fn table_rows_drop_escape_sequences_and_stay_on_one_line() {
+        assert_eq!(
+            one_line("Edge \u{1b}]0;pwned\u{7} title\twith\nnewline"),
+            "Edge  title with newline"
+        );
+        assert_eq!(one_line("plain title"), "plain title");
+
+        let session = control_session();
+        let rendered = render_list(std::slice::from_ref(&session), false, Some(200));
+        assert!(!rendered.chars().any(|c| c.is_control() && c != '\n'));
+        assert!(
+            rendered.contains("┆ Edge  title with newline │"),
+            "{rendered}"
+        );
+        assert_eq!(rendered.lines().count(), 7);
+    }
+
+    fn filtered(text: &str, keep_sgr: bool) -> String {
+        let mut whole = Vec::new();
+        TerminalFilter::new(keep_sgr).push(text.as_bytes(), &mut whole);
+        let mut split = Vec::new();
+        let mut filter = TerminalFilter::new(keep_sgr);
+        for byte in text.as_bytes() {
+            filter.push(std::slice::from_ref(byte), &mut split);
+        }
+        assert_eq!(whole, split, "{text:?}");
+        String::from_utf8(whole).unwrap()
+    }
+
+    #[test]
+    fn terminal_filter_removes_whole_sequences() {
+        let cases = [
+            ("line one\r\nline two\r\n", "line one\r\nline two\r\n"),
+            (
+                "colored \u{1b}[31mred\u{1b}[0m output and bell \u{7} done",
+                "colored red output and bell  done",
+            ),
+            (
+                "form\u{c}feed, lone\rcr, del\u{7f}, nul\0",
+                "formfeed, lonecr, del, nul",
+            ),
+            ("Edge \u{1b}]0;pwned\u{7} title", "Edge  title"),
+            (
+                "osc8 \u{1b}]8;;http://x\u{1b}\\link\u{1b}]8;;\u{1b}\\ end",
+                "osc8 link end",
+            ),
+            (
+                "c1 \u{9b}2Jcsi \u{9d}0;t\u{9c}ok \u{85}nel",
+                "c1 csi ok nel",
+            ),
+            (
+                "\u{1b}[2J\u{1b}[Hx \u{1b}[?25ly \u{1b}(Bz \u{1b}cw",
+                "x y z w",
+            ),
+            (
+                "unterminated \u{1b}]0;title\nnext line",
+                "unterminated \nnext line",
+            ),
+            ("dcs \u{1b}Pq#0\u{1b}\\ done", "dcs  done"),
+            (
+                "tab\tand 日本語 é ñ 👨‍👩‍👧 \u{a0}nbsp",
+                "tab\tand 日本語 é ñ 👨‍👩‍👧 \u{a0}nbsp",
+            ),
+            ("trailing\r", "trailing"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(filtered(input, false), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_filter_keeps_only_sgr_when_asked() {
+        assert_eq!(
+            filtered(
+                "a \u{1b}[1;38;5;14mb\u{1b}[0m c \u{1b}[2J\u{1b}[>4;2m",
+                true
+            ),
+            "a \u{1b}[1;38;5;14mb\u{1b}[0m c "
+        );
+        assert_eq!(filtered("x\u{9b}31my", true), "x\u{1b}[31my");
+        let long = format!("\u{1b}[{}m", "1;".repeat(MAX_SGR_LEN));
+        assert_eq!(filtered(&long, true), "");
+
+        let session = sample_session();
+        let colored = render_list(std::slice::from_ref(&session), true, Some(120));
+        assert_eq!(filtered(&colored, true), colored);
+        let colored = render_show(&session, &session.messages, Some(2), true);
+        assert_eq!(filtered(&colored, true), colored);
+    }
+
+    #[test]
+    fn comfy_table_shares_our_crossterm() {
+        // `force_color_output` in `render_list_table` reaches comfy-table only
+        // when both resolve to the same crossterm.
+        let lock =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.lock")).unwrap();
+        assert_eq!(lock.matches("name = \"crossterm\"\n").count(), 1);
     }
 }
