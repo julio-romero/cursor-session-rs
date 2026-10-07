@@ -5,6 +5,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// How many candidates an ambiguous ID hint lists before summarising the rest.
 const MAX_ID_CANDIDATES: usize = 10;
+const TRY_AGAIN: &str = "try again in a moment; Cursor may be writing to it right now";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -55,6 +56,10 @@ pub enum Error {
     /// A database whose `-wal` a crash left behind is read from a copy.
     #[error("could not copy {} to a temporary directory for reading", path.display())]
     Snapshot { path: PathBuf, source: io::Error },
+
+    /// A database read without locks changed during two reads in a row.
+    #[error("{} changed while it was being read", path.display())]
+    Changed { path: PathBuf },
 
     #[error("no Cursor session storage found")]
     NoStorage,
@@ -111,8 +116,9 @@ impl Error {
                     Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
                 ) =>
             {
-                vec!["try again in a moment; Cursor may be writing to it right now".to_string()]
+                vec![TRY_AGAIN.to_string()]
             }
+            Error::Changed { .. } => vec![TRY_AGAIN.to_string()],
             Error::Snapshot { .. } => vec![
                 format!(
                     "make sure {} is writable and has room for a copy of the database, or point \
@@ -160,9 +166,10 @@ mod tests {
                 source: busy,
             },
             Error::Snapshot {
-                path,
+                path: path.clone(),
                 source: io::Error::other("disk full"),
             },
+            Error::Changed { path },
             Error::NoStorage,
         ];
         for error in &errors {

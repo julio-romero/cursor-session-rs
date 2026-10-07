@@ -103,6 +103,14 @@ fn read_sessions(
     db_path: &Path,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Session>> {
+    // One read transaction, so that a chat and its messages come from the same
+    // commit while Cursor writes. Dropping it ends the read.
+    let _snapshot = conn
+        .unchecked_transaction()
+        .map_err(|source| Error::Database {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
     if !check_schema(conn, db_path)? {
         warnings.push(format!(
             "{} has no tables; no Cursor IDE sessions loaded",

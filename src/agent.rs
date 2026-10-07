@@ -188,6 +188,13 @@ fn subdirs(dir: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
 
 /// The underlying cause of `err`, for warnings that already name the file.
 fn reason(err: &Error) -> String {
+    if let Error::Snapshot { source, .. } = err {
+        // The file is fine; the temporary directory is not.
+        return format!(
+            "could not copy it to {} for reading: {source}",
+            std::env::temp_dir().display()
+        );
+    }
     std::error::Error::source(err).map_or_else(|| err.to_string(), ToString::to_string)
 }
 
@@ -574,6 +581,28 @@ fn extract_timestamp_tag(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_copy_blames_the_temporary_directory() {
+        let denied = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let snapshot = Error::Snapshot {
+            path: PathBuf::from("store.db"),
+            source: denied(),
+        };
+        let text = reason(&snapshot);
+        assert!(
+            text.starts_with(&format!(
+                "could not copy it to {} for reading: ",
+                std::env::temp_dir().display()
+            )),
+            "{text}"
+        );
+        let io = Error::Io {
+            path: PathBuf::from("store.db"),
+            source: denied(),
+        };
+        assert_eq!(reason(&io), denied().to_string());
+    }
 
     #[test]
     fn strips_user_query_wrapper() {

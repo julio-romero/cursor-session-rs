@@ -418,18 +418,21 @@ database is locked the read waits up to 5 seconds before giving up. A database
 in WAL mode is read depending on the files next to it:
 
 - **While Cursor is running**, the database has `-wal` and `-shm` files next to
-  it. cursor-session reads it in place like any other SQLite reader and sees
-  everything Cursor has committed. Readers do not block Cursor's writes, and
+  it, even when the `-wal` is empty. cursor-session reads it in place like any
+  other SQLite reader and sees everything Cursor has committed, each chat with
+  its messages from the same commit. Readers do not block Cursor's writes, and
   if the database is locked it waits up to 5 seconds before giving up.
 - **When Cursor is closed**, the database is opened as immutable. SQLite then
   creates no `-wal` or `-shm` files next to it, and reading works even in a
   read-only directory. If Cursor starts and changes the file during the read,
-  the read is retried.
+  the read is retried; if the file changes during the retry too, the command
+  stops with `changed while it was being read` and you can run it again.
 - **After a crash**, Cursor can leave a `-wal` file without its `-shm`. Reading
   that in place would create files next to your data, so the database and its
   `-wal` are copied to a private temporary directory, read there and deleted.
   This needs free space for the copy in `TMPDIR` (`TMP` on Windows). Starting
-  and quitting Cursor once avoids the copy.
+  and quitting Cursor once avoids the copy. If cursor-session is killed during
+  such a read, its copy stays behind until a later run removes it, an hour on.
 
 ### What is included
 

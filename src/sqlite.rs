@@ -24,7 +24,8 @@ type Stamp = (u64, Option<SystemTime>);
 /// An immutable connection takes no locks, so Cursor starting up during the
 /// read can change the file under it. When such a read fails as corrupt, or
 /// the file changed before it finished, `read` runs once more on a new
-/// connection, which by then usually reads in place.
+/// connection, which by then usually reads in place. If the file changes
+/// under that read too, its result is not trusted.
 pub fn with_readonly<T>(path: &Path, mut read: impl FnMut(&Connection) -> Result<T>) -> Result<T> {
     let db = open_readonly(path)?;
     let result = read(&db);
@@ -32,7 +33,14 @@ pub fn with_readonly<T>(path: &Path, mut read: impl FnMut(&Connection) -> Result
         return result;
     }
     drop(db);
-    read(&*open_readonly(path)?)
+    let db = open_readonly(path)?;
+    let result = read(&db);
+    if db.changed() {
+        return Err(Error::Changed {
+            path: path.to_path_buf(),
+        });
+    }
+    result
 }
 
 /// A read-only connection. When the database had to be copied first (see
@@ -57,9 +65,6 @@ impl Db {
     /// Whether `result` was read without locks from a file that changed, or
     /// that looked corrupt, as a concurrent checkpoint can make it look.
     fn torn<T>(&self, result: &Result<T>) -> bool {
-        let Some((file, opened)) = &self.immutable else {
-            return false;
-        };
         let corrupt = matches!(
             result,
             Err(Error::Database { source, .. }) if matches!(
@@ -67,7 +72,14 @@ impl Db {
                 Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
             )
         );
-        corrupt || stamp(file).ok().as_ref() != Some(opened)
+        (self.immutable.is_some() && corrupt) || self.changed()
+    }
+
+    /// Whether the file read without locks changed since it was opened.
+    fn changed(&self) -> bool {
+        self.immutable
+            .as_ref()
+            .is_some_and(|(file, opened)| stamp(file).ok().as_ref() != Some(opened))
     }
 }
 
@@ -83,11 +95,12 @@ enum Mode {
 }
 
 impl Mode {
-    /// A WAL database with no `-wal`, or an empty one, has every commit in its
-    /// main file. A non-empty `-wal` next to a `-shm` belongs to a writer that
-    /// has the database open; without a `-shm`, a crash left it behind.
+    /// A `-wal` next to a `-shm` belongs to a writer that has the database
+    /// open, even when a checkpoint has just emptied the `-wal`. Otherwise a
+    /// WAL database with no `-wal`, or an empty one, has every commit in its
+    /// main file, and a non-empty `-wal` was left behind by a crash.
     fn of(path: &Path) -> io::Result<Mode> {
-        if !is_wal(path)? {
+        if !is_wal(path)? || has_sidecars(path) {
             return Ok(Mode::InPlace);
         }
         let wal_len = match fs::metadata(sidecar(path, "-wal")) {
@@ -97,8 +110,6 @@ impl Mode {
         };
         Ok(if wal_len == 0 {
             Mode::Immutable
-        } else if has_sidecars(path) {
-            Mode::InPlace
         } else {
             Mode::Snapshot
         })
@@ -116,6 +127,7 @@ impl Mode {
 /// that `-wal`, to a private temporary directory and the copy is opened; so is
 /// one whose path a `file:` URI cannot carry, unless it has both sidecars.
 fn open_readonly(path: &Path) -> Result<Db> {
+    remove_stale_snapshots_once();
     let file = sqlite_path(path).map_err(|source| Error::access(path, source))?;
     for _ in 0..3 {
         let before = stamp(&file).map_err(|source| Error::access(path, source))?;
@@ -312,9 +324,7 @@ impl Drop for Snapshot {
 
 fn private_temp_dir() -> io::Result<PathBuf> {
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static SWEEP: Once = Once::new();
     let temp = std::env::temp_dir();
-    SWEEP.call_once(|| remove_stale_snapshots(&temp, STALE_SNAPSHOT));
     #[cfg(unix)]
     let builder = {
         use std::os::unix::fs::DirBuilderExt;
@@ -335,6 +345,13 @@ fn private_temp_dir() -> io::Result<PathBuf> {
     }
 }
 
+/// Runs [`remove_stale_snapshots`] on the temporary directory, once per
+/// process, before the first database is read.
+fn remove_stale_snapshots_once() {
+    static SWEEP: Once = Once::new();
+    SWEEP.call_once(|| remove_stale_snapshots(&std::env::temp_dir(), STALE_SNAPSHOT));
+}
+
 /// Removes snapshot directories that a killed process (e.g. by Ctrl-C) left
 /// in `temp`. No read holds a snapshot for anywhere near `max_age`.
 fn remove_stale_snapshots(temp: &Path, max_age: Duration) {
@@ -348,6 +365,9 @@ fn remove_stale_snapshots(temp: &Path, max_age: Duration) {
             .and_then(|name| name.strip_prefix(SNAPSHOT_PREFIX))
             .and_then(|rest| rest.split_once('-'))
             .is_some_and(|(pid, n)| is_number(pid) && is_number(n));
+        if !ours {
+            continue;
+        }
         // `DirEntry` metadata does not follow symlinks.
         let stale = entry.metadata().is_ok_and(|meta| {
             meta.is_dir()
@@ -357,7 +377,7 @@ fn remove_stale_snapshots(temp: &Path, max_age: Duration) {
                     .and_then(|time| time.elapsed().ok())
                     .is_some_and(|age| age >= max_age)
         });
-        if ours && stale {
+        if stale {
             let _ = fs::remove_dir_all(entry.path());
         }
     }
@@ -484,6 +504,55 @@ mod tests {
         assert!(db._snapshot.is_none());
         assert_eq!(copies(), copied);
         assert_eq!(rows(&db).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn open_wal_database_with_an_emptied_wal_is_read_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        create(&path, "wal");
+        // Cursor keeps the database open after a checkpoint that empties the -wal.
+        let writer = wal_writer(&path);
+        writer
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            .unwrap();
+        assert_eq!(fs::metadata(sidecar(&path, "-wal")).unwrap().len(), 0);
+        assert!(has_sidecars(&path));
+
+        let names = |dir: &Path| -> Vec<String> {
+            listing(dir).into_iter().map(|(name, ..)| name).collect()
+        };
+        let before = names(dir.path());
+        let copied = copies();
+        let db = open_readonly(&path).unwrap();
+        assert!(db.immutable.is_none());
+        assert!(db._snapshot.is_none());
+        assert_eq!(copies(), copied);
+        assert_eq!(rows(&db).unwrap().len(), 2);
+        drop(db);
+        assert_eq!(names(dir.path()), before);
+    }
+
+    #[test]
+    fn last_close_leaves_the_wal_of_a_cursor_that_quit_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        create(&path, "wal");
+        let writer = wal_writer(&path);
+        let db = open_readonly(&path).unwrap();
+        assert!(db.immutable.is_none());
+        assert_eq!(rows(&db).unwrap().len(), 2);
+        let contents = |suffix| fs::read(sidecar(&path, suffix)).unwrap();
+        let (main, wal) = (contents(""), contents("-wal"));
+
+        // Cursor quits after the read started; ours is then the last connection,
+        // which must not checkpoint into the database or remove its sidecars.
+        drop(writer);
+        assert_eq!(rows(&db).unwrap().len(), 2);
+        drop(db);
+        assert!(has_sidecars(&path));
+        assert_eq!(contents(""), main);
+        assert_eq!(contents("-wal"), wal);
     }
 
     #[test]
@@ -623,6 +692,36 @@ mod tests {
         .unwrap();
         assert_eq!(calls, 2);
         assert_eq!(read.len(), 2);
+    }
+
+    #[test]
+    fn a_file_that_changes_under_both_reads_is_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        create(&path, "wal");
+        let mut calls = 0;
+        let read = with_readonly(&path, |conn| {
+            calls += 1;
+            let found = rows(conn)?;
+            // Cursor starts, writes, checkpoints and quits during each read.
+            let writer = Connection::open(&path).unwrap();
+            writer
+                .execute(
+                    "INSERT INTO cursorDiskKV VALUES (?1, printf('%.*c', 65536, 'x'))",
+                    [format!("k{calls}")],
+                )
+                .unwrap();
+            writer
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .unwrap();
+            Ok(found)
+        });
+        assert_eq!(calls, 2);
+        let err = read.unwrap_err();
+        assert!(
+            matches!(&err, Error::Changed { path: p } if *p == path),
+            "{err}"
+        );
     }
 
     #[test]

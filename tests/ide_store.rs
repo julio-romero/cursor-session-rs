@@ -481,6 +481,65 @@ fn wal_left_by_a_crash_is_read_from_a_private_copy() {
     assert_eq!(fs::read_dir(fixture.tmp()).unwrap().count(), 0);
 }
 
+#[test]
+fn a_read_waits_for_cursor_to_finish_writing() {
+    let fixture = standard();
+    let db = fixture.ide_db_path();
+    let (locked, wait) = std::sync::mpsc::channel();
+    // Cursor holds the write lock of a rollback-journal database for a moment.
+    let writer = std::thread::spawn(move || {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let (key, value) = composer(
+            "late",
+            &composer_json(
+                "late",
+                "Committed late",
+                1_800_000_000_000,
+                1_800_000_000_000,
+                &[],
+            ),
+            Stored::Text,
+        );
+        conn.execute(
+            "INSERT INTO cursorDiskKV (key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .unwrap();
+        locked.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        conn.execute_batch("COMMIT").unwrap();
+    });
+    wait.recv().unwrap();
+    let ids = listed_ids(&fixture, &["list", "--source", "ide"]);
+    writer.join().unwrap();
+    assert_eq!(ids[0], "late");
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshots_left_by_a_killed_process_are_removed_on_the_next_run() {
+    use std::time::{Duration, SystemTime};
+
+    let fixture = standard();
+    let stale = fixture.tmp().join("cursor-session-1-0");
+    let fresh = fixture.tmp().join("cursor-session-2-0");
+    for dir in [&stale, &fresh] {
+        fs::create_dir(dir).unwrap();
+        fs::write(dir.join("state.vscdb"), "copy").unwrap();
+    }
+    let two_hours_ago = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+    fs::File::open(&stale)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+
+    // A database read without a copy still sweeps the temporary directory.
+    assert_eq!(listed_ids(&fixture, &["list"]), STANDARD_IDS);
+    assert!(!stale.exists());
+    assert!(fresh.exists());
+}
+
 fn write_bytes(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
