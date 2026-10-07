@@ -80,7 +80,8 @@ Found 4 session(s)
 ```
 
 Long titles are cut to fit. On narrower terminals the IDs are shortened to whole
-UUID groups (8, 13, 18 or 23 characters) and a footer says so:
+UUID groups (8, 13, 18 or 23 characters), with as many groups as it takes to
+tell every ID apart, and a footer says so:
 
 ```text
 IDs shortened to 8 chars; `show` accepts a prefix.

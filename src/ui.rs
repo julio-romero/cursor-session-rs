@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::io::IsTerminal;
 
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets};
@@ -56,6 +57,22 @@ pub fn id_prefix_width(term_width: usize) -> usize {
         .rev()
         .find(|&width| width <= available)
         .unwrap_or(ID_PREFIX_WIDTHS[0])
+}
+
+/// The narrowest UUID prefix length, from `width` up, at which the shortened
+/// IDs of `sessions` differ, so that each is a prefix `show` accepts; the
+/// full width when none is.
+fn distinct_id_width(sessions: &[Session], width: usize) -> usize {
+    ID_PREFIX_WIDTHS
+        .into_iter()
+        .filter(|&candidate| candidate >= width)
+        .find(|&candidate| {
+            let mut seen = HashSet::new();
+            sessions
+                .iter()
+                .all(|s| seen.insert(shorten_id(&s.id, candidate).to_lowercase()))
+        })
+        .unwrap_or(ID_FULL_WIDTH)
 }
 
 pub fn shorten_id(id: &str, width: usize) -> String {
@@ -450,12 +467,12 @@ fn sgr_group(code: u32) -> (u16, bool) {
 }
 
 pub fn title_width(term_width: usize) -> usize {
-    let used = id_prefix_width(term_width)
-        + SOURCE_WIDTH
-        + MSGS_WIDTH
-        + UPDATED_WIDTH
-        + COL_GUTTER * 4
-        + TABLE_CHROME;
+    title_width_beside(term_width, id_prefix_width(term_width))
+}
+
+/// How wide titles may be next to IDs `id_width` wide.
+fn title_width_beside(term_width: usize, id_width: usize) -> usize {
+    let used = id_width + SOURCE_WIDTH + MSGS_WIDTH + UPDATED_WIDTH + COL_GUTTER * 4 + TABLE_CHROME;
     term_width.saturating_sub(used).max(MIN_TITLE_WIDTH)
 }
 
@@ -564,8 +581,8 @@ fn render_list_table(sessions: &[Session], use_color: bool, term_width: usize) -
         header_cell("TITLE"),
     ]);
 
-    let id_width = id_prefix_width(term_width);
-    let max_title = title_width(term_width);
+    let id_width = distinct_id_width(sessions, id_prefix_width(term_width));
+    let max_title = title_width_beside(term_width, id_width);
     for session in sessions {
         table.add_row(vec![
             Cell::new(shorten_id(&one_line(&session.id), id_width)),
@@ -769,6 +786,32 @@ mod tests {
             shorten_id("f4eea6d2-d2d3-41ad-b290-824445295a15", 8),
             "f4eea6d2"
         );
+    }
+
+    #[test]
+    fn shortened_ids_stay_distinct() {
+        let with_id = |id: &str| Session {
+            id: id.into(),
+            ..sample_session()
+        };
+        let sessions = [
+            with_id("f4eea6d2-d2d3-41ad-b290-824445295a15"),
+            with_id("f4eea6d2-d2d3-9999-b290-824445295a15"),
+        ];
+        let rendered = render_list(&sessions, false, Some(80));
+        assert!(rendered.contains("│ f4eea6d2-d2d3-41ad ┆"), "{rendered}");
+        assert!(rendered.contains("│ f4eea6d2-d2d3-9999 ┆"), "{rendered}");
+        assert!(
+            rendered.contains("IDs shortened to 18 chars;"),
+            "{rendered}"
+        );
+        // `show` matches a prefix in any case: only the full IDs tell these apart.
+        let cased = [
+            with_id("abcdef00-0000-4000-8000-000000000001"),
+            with_id("ABCDEF00-0000-4000-8000-000000000001"),
+        ];
+        assert_eq!(distinct_id_width(&cased, 8), ID_FULL_WIDTH);
+        assert_eq!(distinct_id_width(&sessions[..1], 8), 8);
     }
 
     #[test]
