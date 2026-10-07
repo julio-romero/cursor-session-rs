@@ -16,6 +16,7 @@ jobs:
   cargo-publish:
     if: ${{ !fromJson(inputs.plan).announcement_is_prerelease }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
