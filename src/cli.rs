@@ -96,6 +96,9 @@ pub struct ListArgs {
 pub struct ShowArgs {
     /// Session ID, or a unique prefix of one (case-insensitive)
     pub session_id: String,
+    /// Only read this store; the other one is never opened
+    #[arg(long, value_enum)]
+    pub source: Option<Source>,
     /// Maximum number of messages to print (from the end)
     #[arg(long, value_name = "N", conflicts_with = "all")]
     pub limit: Option<usize>,
@@ -123,6 +126,9 @@ pub struct ExportArgs {
     /// Filter by workspace path or MD5 hash
     #[arg(long)]
     pub workspace: Option<String>,
+    /// Only read this store; the other one is never opened
+    #[arg(long, value_enum)]
+    pub source: Option<Source>,
     #[arg(from_global)]
     pub verbose: bool,
 }

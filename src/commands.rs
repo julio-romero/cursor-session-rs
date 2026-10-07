@@ -88,7 +88,10 @@ fn cmd_show(
     err: &mut dyn Write,
     args: &ShowArgs,
 ) -> Result<()> {
-    let sessions = load(paths, &LoadOptions::default(), args.verbose, err)?;
+    let load_opts = LoadOptions {
+        source: args.source,
+    };
+    let sessions = load(paths, &load_opts, args.verbose, err)?;
     let session = find_session(&sessions, &args.session_id)?;
     if args.json {
         let (messages, _) = ui::select_messages(&session.messages, false, args.limit, args.all);
@@ -109,7 +112,10 @@ fn cmd_export(
     err: &mut dyn Write,
     args: &ExportArgs,
 ) -> Result<()> {
-    let sessions = load(paths, &LoadOptions::default(), args.verbose, err)?;
+    let load_opts = LoadOptions {
+        source: args.source,
+    };
+    let sessions = load(paths, &load_opts, args.verbose, err)?;
     let selected: Vec<&Session> = if let Some(id) = &args.session_id {
         vec![find_session(&sessions, id)?]
     } else if let Some(workspace) = &args.workspace {
@@ -355,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn list_source_skips_a_broken_store() {
+    fn source_skips_a_broken_store() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("state.vscdb");
         fs::write(
@@ -373,6 +379,22 @@ mod tests {
         result.unwrap();
         assert_eq!(ids(&json(&out)), [AGENT_ID]);
         assert!(run_args(&paths, &["list"]).0.is_err());
+
+        let (result, out) = run_args(&paths, &["show", "f4eea6d2", "--source", "agent"]);
+        result.unwrap();
+        assert!(out.contains(AGENT_ID));
+        assert!(run_args(&paths, &["show", "f4eea6d2"]).0.is_err());
+
+        let out_dir = dir.path().join("exports");
+        let out_arg = out_dir.to_str().unwrap();
+        let (result, _) = run_args(
+            &paths,
+            &[
+                "export", "--source", "agent", "--format", "json", "--out", out_arg,
+            ],
+        );
+        result.unwrap();
+        assert!(out_dir.join(format!("{AGENT_ID}.json")).is_file());
     }
 
     #[test]
