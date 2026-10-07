@@ -52,7 +52,7 @@ fn prefix_lookup_is_unique() {
     let sessions = load_sessions(&paths, &LoadOptions::default())
         .unwrap()
         .sessions;
-    assert!(find_session(&sessions, "f4eea6d2").is_some());
+    assert!(find_session(&sessions, "f4eea6d2").is_ok());
 }
 
 #[test]

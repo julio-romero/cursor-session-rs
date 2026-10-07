@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// How many candidates an ambiguous ID hint lists before summarising the rest.
+const MAX_ID_CANDIDATES: usize = 10;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("could not determine home directory")]
@@ -17,8 +20,12 @@ pub enum Error {
     #[error("session not found: {query}")]
     SessionNotFound { query: String },
 
-    #[error("session id `{query}` is ambiguous ({} matches)", matches.len())]
-    AmbiguousId { query: String, matches: Vec<String> },
+    #[error("session id prefix \"{query}\" is ambiguous ({} matches)", matches.len())]
+    AmbiguousId {
+        query: String,
+        /// One `id  source  title` line per matching session, most recent first.
+        matches: Vec<String>,
+    },
 
     #[error(
         "unrecognized Cursor IDE storage format in {}: {detail}. Cursor may have changed its storage format.",
@@ -47,6 +54,12 @@ pub enum Error {
 
     #[error("could not copy {} to a temporary directory for reading", path.display())]
     Snapshot { path: PathBuf, source: io::Error },
+
+    #[error("no Cursor session storage found")]
+    NoStorage,
+
+    #[error("session id is empty")]
+    EmptyId,
 }
 
 impl Error {
@@ -69,12 +82,16 @@ impl Error {
                  state.vscdb, or the directory that contains state.vscdb."
                     .to_string(),
             ],
-            Error::SessionNotFound { .. } => {
-                vec!["Use `cursor-session list` to see IDs.".to_string()]
+            Error::SessionNotFound { .. } | Error::EmptyId => {
+                vec!["run `cursor-session list` to see session IDs".to_string()]
             }
             Error::AmbiguousId { matches, .. } => {
-                let mut hints = matches.clone();
-                hints.push("Use a longer prefix or the full ID.".to_string());
+                let mut hints: Vec<String> =
+                    matches.iter().take(MAX_ID_CANDIDATES).cloned().collect();
+                if matches.len() > MAX_ID_CANDIDATES {
+                    hints.push(format!("and {} more", matches.len() - MAX_ID_CANDIDATES));
+                }
+                hints.push("use more characters of the ID".to_string());
                 hints
             }
             Error::SchemaMismatch { .. } => vec![
@@ -96,6 +113,9 @@ impl Error {
                  elsewhere.",
                 std::env::temp_dir().display()
             )],
+            Error::NoStorage => {
+                vec!["pass --storage <path> if your Cursor data lives elsewhere".to_string()]
+            }
             _ => Vec::new(),
         }
     }
