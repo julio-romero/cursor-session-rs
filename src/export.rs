@@ -116,14 +116,13 @@ fn export_markdown(session: &Session, writer: &mut impl Write) -> io::Result<()>
     if let Some(model) = &session.model {
         writeln!(writer, "- **Model:** {model}")?;
     }
-    writeln!(writer, "- **Created:** {}", session.created_display())?;
-    writeln!(writer, "- **Updated:** {}", session.updated_display())?;
+    writeln!(writer, "- **Created:** {}", session.created_utc())?;
+    writeln!(writer, "- **Updated:** {}", session.updated_utc())?;
     writeln!(writer, "- **Messages:** {}\n", session.message_count())?;
     writeln!(writer, "---\n")?;
     for (index, message) in session.messages.iter().enumerate() {
         let ts = message
-            .timestamp
-            .as_deref()
+            .timestamp_display()
             .map(|t| format!(" ({t})"))
             .unwrap_or_default();
         writeln!(writer, "**{}:**{ts}\n", message.role)?;
@@ -173,6 +172,7 @@ mod tests {
             "Lpt9.md",
             "ünïcödé",
             &"x".repeat(MAX_PLAIN_STEM + 1),
+            &"x".repeat(300),
         ];
         let mut names = Vec::new();
         for id in ids {
@@ -189,6 +189,8 @@ mod tests {
             );
             assert!(!is_windows_device(&name), "{id:?}: {name}");
             assert!(stem.len() <= MAX_PLAIN_STEM + 13, "{id:?}");
+            // NAME_MAX is 255 bytes on every OS this runs on.
+            assert!(name.len() <= 255, "{id:?}");
             names.push(name);
         }
         names.sort();
@@ -196,5 +198,11 @@ mod tests {
         assert_eq!(names.len(), ids.len());
         assert_eq!(file_stem("a_b"), "a_b");
         assert!(file_stem("a/b").starts_with("a_b_"));
+        // A plain ID is cut and hashed once it is too long to keep.
+        let longest = "x".repeat(MAX_PLAIN_STEM);
+        assert_eq!(file_stem(&longest), longest);
+        let long = "x".repeat(MAX_PLAIN_STEM + 1);
+        assert_eq!(file_stem(&long).len(), MAX_PLAIN_STEM + 13);
+        assert!(file_stem(&long).starts_with(&format!("{longest}_")));
     }
 }

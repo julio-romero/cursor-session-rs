@@ -7,8 +7,8 @@ id:        f4eea6d2-d2d3-41ad-b290-824445295a15
 source:    agent
 workspace: /Users/demo/project-x
 model:     claude-4.5-sonnet
-created:   2025-09-04 15:33
-updated:   2025-09-04 16:33
+created:   2025-09-04 15:33 UTC
+updated:   2025-09-04 16:33 UTC
 messages:  4
 
 2 earlier message(s) omitted. Use --limit N or --all to see more.

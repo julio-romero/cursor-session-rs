@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +45,23 @@ pub struct Message {
     pub timestamp: Option<String>,
 }
 
+impl Message {
+    /// The time to show with the message: epoch milliseconds, as the IDE
+    /// stores them, as a UTC time; anything else as stored.
+    pub fn timestamp_display(&self) -> Option<Cow<'_, str>> {
+        let raw = self.timestamp.as_deref()?;
+        let ms = raw
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| raw.parse().ok())
+            .flatten();
+        Some(match utc(ms) {
+            Some(time) => Cow::Owned(format!("{} UTC", time.format("%Y-%m-%d %H:%M"))),
+            None => Cow::Borrowed(raw),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -74,9 +93,22 @@ impl Session {
         format_ms(self.updated_or_created_ms())
     }
 
-    /// The time the UPDATED column shows, which also orders the list.
+    /// [`Session::created_display`] marked as UTC, for text that also shows
+    /// local times.
+    pub fn created_utc(&self) -> String {
+        marked_utc(self.created_display())
+    }
+
+    /// [`Session::updated_display`] marked as UTC.
+    pub fn updated_utc(&self) -> String {
+        marked_utc(self.updated_display())
+    }
+
+    /// The time the UPDATED column shows, which also orders the list. A time
+    /// it cannot show (see [`utc`]) is taken as missing.
     fn updated_or_created_ms(&self) -> Option<i64> {
-        self.updated_at_ms.or(self.created_at_ms)
+        let shown = |ms: Option<i64>| ms.filter(|&ms| utc(Some(ms)).is_some());
+        shown(self.updated_at_ms).or(shown(self.created_at_ms))
     }
 
     pub fn summary(&self) -> SessionSummary<'_> {
@@ -156,6 +188,14 @@ fn format_ms(ms: Option<i64>) -> String {
         || "—".to_string(),
         |dt| dt.format("%Y-%m-%d %H:%M").to_string(),
     )
+}
+
+fn marked_utc(shown: String) -> String {
+    if shown == "—" {
+        shown
+    } else {
+        format!("{shown} UTC")
+    }
 }
 
 pub fn merge_sessions(mut sessions: Vec<Session>) -> Vec<Session> {
@@ -337,6 +377,62 @@ mod tests {
         );
         let shown: Vec<String> = merged.iter().map(Session::updated_display).collect();
         assert!(shown[..4].is_sorted_by(|a, b| a >= b), "{shown:?}");
+    }
+
+    #[test]
+    fn a_time_that_cannot_be_shown_does_not_order_the_list() {
+        // Microseconds where milliseconds belong: the year 57650.
+        let micro = Session {
+            id: "micro".into(),
+            created_at_ms: Some(1_757_000_000_000),
+            updated_at_ms: Some(1_757_000_000_000_000),
+            ..session()
+        };
+        let newer = Session {
+            id: "newer".into(),
+            created_at_ms: Some(1_757_500_000_000),
+            updated_at_ms: None,
+            ..session()
+        };
+        let merged = merge_sessions(vec![micro, newer]);
+        let ids: Vec<&str> = merged.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["newer", "micro"]);
+        // It shows its creation time, as for a session never updated.
+        assert_eq!(merged[1].updated_display(), "2025-09-04 15:33");
+        assert_eq!(merged[1].updated_utc(), "2025-09-04 15:33 UTC");
+        assert_eq!(
+            serde_json::to_value(merged[1].summary()).unwrap()["updated_at"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn epoch_milliseconds_show_as_utc_and_other_times_as_stored() {
+        let at = |timestamp: Option<&str>| Message {
+            role: "user".into(),
+            content: "x".into(),
+            timestamp: timestamp.map(str::to_string),
+        };
+        let shown = |timestamp| at(timestamp).timestamp_display().map(Cow::into_owned);
+        assert_eq!(
+            shown(Some("1757200000000")).as_deref(),
+            Some("2025-09-06 23:06 UTC")
+        );
+        for stored in [
+            "Friday, Oct 2, 2026, 10:29 AM (UTC+2)",
+            "2023-11-14T22:13:20.000Z",
+            "1757200000000.5",
+            "-1",
+            "1757200000000000000000",
+        ] {
+            assert_eq!(shown(Some(stored)).as_deref(), Some(stored));
+        }
+        assert_eq!(shown(None), None);
+        let bare = Session {
+            created_at_ms: None,
+            ..session()
+        };
+        assert_eq!(bare.created_utc(), "—");
     }
 
     #[test]

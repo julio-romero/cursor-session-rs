@@ -615,11 +615,11 @@ pub fn render_show_header(session: &Session, use_color: bool) -> String {
     }
     lines.push(format!(
         "created:   {}",
-        paint_dim(&session.created_display(), use_color)
+        paint_dim(&session.created_utc(), use_color)
     ));
     lines.push(format!(
         "updated:   {}",
-        paint_dim(&session.updated_display(), use_color)
+        paint_dim(&session.updated_utc(), use_color)
     ));
     lines.push(format!("messages:  {}", session.message_count()));
     lines.join("\n")
@@ -645,7 +645,7 @@ pub fn render_show(
         out.push('\n');
         out.push_str(&format_message_header(
             &message.role,
-            message.timestamp.as_deref(),
+            message.timestamp_display().as_deref(),
             use_color,
         ));
         out.push('\n');

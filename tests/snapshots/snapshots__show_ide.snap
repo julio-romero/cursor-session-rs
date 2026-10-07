@@ -5,14 +5,14 @@ expression: rendered
 Dynamic table proposal
 id:        c0ffee00-0000-4000-8000-000000000001
 source:    ide
-created:   2025-09-06 23:06
-updated:   2025-09-07 00:06
+created:   2025-09-06 23:06 UTC
+updated:   2025-09-07 00:06 UTC
 messages:  3
 
-[user (1757200000000)]
+[user (2025-09-06 23:06 UTC)]
 Replace this view with a dynamic table.
 
-[assistant (1757200060000)]
+[assistant (2025-09-06 23:07 UTC)]
 Here is a plan.
 
 [assistant]
