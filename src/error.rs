@@ -3,6 +3,9 @@ use std::path::PathBuf;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// How many candidates an ambiguous ID hint lists before summarising the rest.
+const MAX_ID_CANDIDATES: usize = 10;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("could not determine home directory")]
@@ -14,11 +17,21 @@ pub enum Error {
     #[error("unsupported storage file (expected state.vscdb or store.db)")]
     UnsupportedStorage { path: PathBuf },
 
+    #[error("no Cursor session storage found")]
+    NoStorage,
+
+    #[error("session id is empty")]
+    EmptyId,
+
     #[error("session not found: {query}")]
     SessionNotFound { query: String },
 
-    #[error("session id `{query}` is ambiguous ({} matches)", matches.len())]
-    AmbiguousId { query: String, matches: Vec<String> },
+    #[error("session id prefix \"{query}\" is ambiguous ({} matches)", matches.len())]
+    AmbiguousId {
+        query: String,
+        /// One `id  source  title` line per matching session, most recent first.
+        matches: Vec<String>,
+    },
 
     #[error("unexpected schema in {}: {detail}", path.display())]
     SchemaMismatch { path: PathBuf, detail: String },
@@ -51,12 +64,19 @@ impl Error {
             Error::UnsupportedStorage { .. } => vec![
                 "Pass ~/.cursor/chats, a session directory, store.db, or state.vscdb.".to_string(),
             ],
-            Error::SessionNotFound { .. } => {
-                vec!["Use `cursor-session list` to see IDs.".to_string()]
+            Error::NoStorage => {
+                vec!["pass --storage <path> if your Cursor data lives elsewhere".to_string()]
+            }
+            Error::EmptyId | Error::SessionNotFound { .. } => {
+                vec!["run `cursor-session list` to see session IDs".to_string()]
             }
             Error::AmbiguousId { matches, .. } => {
-                let mut hints = matches.clone();
-                hints.push("Use a longer prefix or the full ID.".to_string());
+                let mut hints: Vec<String> =
+                    matches.iter().take(MAX_ID_CANDIDATES).cloned().collect();
+                if matches.len() > MAX_ID_CANDIDATES {
+                    hints.push(format!("and {} more", matches.len() - MAX_ID_CANDIDATES));
+                }
+                hints.push("use more characters of the ID".to_string());
                 hints
             }
             _ => Vec::new(),

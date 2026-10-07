@@ -39,19 +39,53 @@ pub fn load_sessions(paths: &StoragePaths, opts: &LoadOptions) -> Result<Loaded>
     })
 }
 
-pub fn find_session<'a>(sessions: &'a [Session], query: &str) -> Option<&'a Session> {
+/// Title width in ambiguous-ID candidate lines.
+const CANDIDATE_TITLE_WIDTH: usize = 60;
+
+/// Looks up a session by exact ID, then by a unique case-insensitive ID prefix.
+pub fn find_session<'a>(sessions: &'a [Session], query: &str) -> Result<&'a Session> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err(Error::EmptyId);
+    }
     if let Some(exact) = sessions.iter().find(|s| s.id == query) {
-        return Some(exact);
+        return Ok(exact);
     }
-    let matches: Vec<_> = sessions
+    let matches: Vec<&Session> = sessions
         .iter()
-        .filter(|s| s.id.starts_with(query))
+        .filter(|s| has_prefix_ignore_case(&s.id, query))
         .collect();
-    if matches.len() == 1 {
-        Some(matches[0])
-    } else {
-        None
+    // A full ID typed in another case still beats longer IDs sharing it as a prefix.
+    let exact: Vec<&Session> = matches
+        .iter()
+        .copied()
+        .filter(|s| s.id.len() == query.len())
+        .collect();
+    match (matches.as_slice(), exact.as_slice()) {
+        ([], _) => Err(Error::SessionNotFound {
+            query: query.to_string(),
+        }),
+        ([only], _) | (_, [only]) => Ok(only),
+        _ => Err(Error::AmbiguousId {
+            query: query.to_string(),
+            matches: matches
+                .iter()
+                .map(|s| {
+                    format!(
+                        "{}  {:<5}  {}",
+                        s.id,
+                        s.source.as_str(),
+                        ui::truncate_chars(&s.title, CANDIDATE_TITLE_WIDTH)
+                    )
+                })
+                .collect(),
+        }),
     }
+}
+
+fn has_prefix_ignore_case(id: &str, prefix: &str) -> bool {
+    id.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 pub fn filter_workspace<'a>(sessions: &'a [Session], workspace: &str) -> Vec<&'a Session> {
@@ -107,5 +141,84 @@ mod tests {
             Err(Error::Database { .. })
         ));
         assert!(load_sessions(&paths, &LoadOptions::default()).is_err());
+    }
+
+    fn session(id: &str, source: Source) -> Session {
+        Session {
+            id: id.to_string(),
+            title: format!("title of {id}"),
+            source,
+            workspace: None,
+            workspace_hash: None,
+            created_at_ms: None,
+            updated_at_ms: None,
+            model: None,
+            messages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn find_session_prefers_exact_then_unique_prefix() {
+        let sessions = [
+            session("f4eea6d2-d2d3-41ad-b290-824445295a15", Source::Agent),
+            session("abc", Source::Ide),
+            session("abcdef", Source::Ide),
+        ];
+        let found = |query| find_session(&sessions, query).map(|s| s.id.as_str());
+        assert_eq!(found("abc").unwrap(), "abc");
+        assert_eq!(found("abcd").unwrap(), "abcdef");
+        assert_eq!(found("f4eea6d2").unwrap(), sessions[0].id);
+        assert_eq!(found("F4EEA6D2-D2D3").unwrap(), sessions[0].id);
+        assert_eq!(found("  f4eea6d2\n").unwrap(), sessions[0].id);
+        assert_eq!(found("ABC").unwrap(), "abc");
+    }
+
+    #[test]
+    fn find_session_rejects_empty_and_unknown_queries() {
+        let sessions = [session("abc", Source::Agent)];
+        assert!(matches!(find_session(&sessions, ""), Err(Error::EmptyId)));
+        assert!(matches!(
+            find_session(&sessions, " \t"),
+            Err(Error::EmptyId)
+        ));
+
+        let err = find_session(&sessions, "zzz").unwrap_err();
+        assert_eq!(err.to_string(), "session not found: zzz");
+        assert_eq!(
+            err.hints(),
+            ["run `cursor-session list` to see session IDs"]
+        );
+        assert!(matches!(
+            find_session(&[], "abc"),
+            Err(Error::SessionNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn ambiguous_prefix_lists_ten_candidates() {
+        let sessions: Vec<Session> = (0..12)
+            .map(|n| session(&format!("abc{n:02}"), Source::Agent))
+            .collect();
+        let err = find_session(&sessions, "AB").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r#"session id prefix "AB" is ambiguous (12 matches)"#
+        );
+        let hints = err.hints();
+        assert_eq!(hints.len(), 12);
+        assert_eq!(hints[0], "abc00  agent  title of abc00");
+        assert_eq!(hints[9], "abc09  agent  title of abc09");
+        assert_eq!(hints[10], "and 2 more");
+        assert_eq!(hints[11], "use more characters of the ID");
+
+        let err = find_session(&sessions[..2], "abc").unwrap_err();
+        assert_eq!(
+            err.hints(),
+            [
+                "abc00  agent  title of abc00",
+                "abc01  agent  title of abc01",
+                "use more characters of the ID",
+            ]
+        );
     }
 }

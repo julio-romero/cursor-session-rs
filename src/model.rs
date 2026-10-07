@@ -1,9 +1,12 @@
+use chrono::{DateTime, SecondsFormat};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
+    /// Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)
     Agent,
+    /// Cursor IDE composer chats (state.vscdb)
     Ide,
 }
 
@@ -54,6 +57,71 @@ impl Session {
     pub fn updated_display(&self) -> String {
         format_ms(self.updated_at_ms.or(self.created_at_ms))
     }
+
+    pub fn summary(&self) -> SessionSummary<'_> {
+        SessionSummary {
+            id: &self.id,
+            title: &self.title,
+            source: self.source,
+            workspace: self.workspace.as_deref(),
+            workspace_hash: self.workspace_hash.as_deref(),
+            model: self.model.as_deref(),
+            created_at: rfc3339(self.created_at_ms),
+            updated_at: rfc3339(self.updated_at_ms),
+            message_count: self.message_count(),
+        }
+    }
+
+    /// The summary plus `messages`, which may be a tail of `self.messages`.
+    pub fn detail<'a>(&'a self, messages: &'a [Message]) -> SessionDetail<'a> {
+        SessionDetail {
+            summary: self.summary(),
+            messages: messages
+                .iter()
+                .map(|message| MessageDetail {
+                    role: &message.role,
+                    content: &message.content,
+                    timestamp: message.timestamp.as_deref(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// JSON shape of one `list --json` entry. Every key is always present.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub source: Source,
+    pub workspace: Option<&'a str>,
+    pub workspace_hash: Option<&'a str>,
+    pub model: Option<&'a str>,
+    /// RFC 3339 UTC, whole seconds.
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub message_count: usize,
+}
+
+/// JSON shape of `show --json`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionDetail<'a> {
+    #[serde(flatten)]
+    pub summary: SessionSummary<'a>,
+    pub messages: Vec<MessageDetail<'a>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageDetail<'a> {
+    pub role: &'a str,
+    pub content: &'a str,
+    /// As stored by Cursor; not normalised.
+    pub timestamp: Option<&'a str>,
+}
+
+fn rfc3339(ms: Option<i64>) -> Option<String> {
+    let dt = DateTime::from_timestamp_millis(ms?)?;
+    Some(dt.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 fn format_ms(ms: Option<i64>) -> String {
@@ -111,5 +179,118 @@ fn merge_into(dst: &mut Session, src: Session) {
     }
     if dst.source == Source::Ide && src.source == Source::Agent {
         dst.source = Source::Agent;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session() -> Session {
+        Session {
+            id: "f4eea6d2-d2d3-41ad-b290-824445295a15".into(),
+            title: "Langfuse Semantic Layer".into(),
+            source: Source::Ide,
+            workspace: Some("/Users/manuel.romero".into()),
+            workspace_hash: None,
+            created_at_ms: Some(1_700_000_000_000),
+            updated_at_ms: Some(1_700_000_100_123),
+            model: None,
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: "hello".into(),
+                    timestamp: Some("1700000000000".into()),
+                },
+                Message {
+                    role: "assistant".into(),
+                    content: "hi".into(),
+                    timestamp: None,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn summary_json_has_stable_keys_and_rfc3339_times() {
+        let session = session();
+        let value = serde_json::to_value(session.summary()).unwrap();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "title",
+                "source",
+                "workspace",
+                "workspace_hash",
+                "model",
+                "created_at",
+                "updated_at",
+                "message_count"
+            ]
+        );
+        assert_eq!(value["source"], "ide");
+        assert_eq!(value["workspace_hash"], serde_json::Value::Null);
+        assert_eq!(value["model"], serde_json::Value::Null);
+        assert_eq!(value["created_at"], "2023-11-14T22:13:20Z");
+        assert_eq!(value["updated_at"], "2023-11-14T22:15:00Z");
+        assert_eq!(value["message_count"], 2);
+
+        let bare = Session {
+            created_at_ms: None,
+            updated_at_ms: None,
+            ..session
+        };
+        let value = serde_json::to_value(bare.summary()).unwrap();
+        assert_eq!(value["created_at"], serde_json::Value::Null);
+        assert_eq!(value["updated_at"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn detail_json_adds_messages_with_nullable_timestamps() {
+        let session = session();
+        let value = serde_json::to_value(session.detail(&session.messages[1..])).unwrap();
+        let object = value.as_object().unwrap();
+        assert_eq!(object.len(), 10);
+        assert_eq!(object.keys().next_back().unwrap(), "messages");
+        assert_eq!(value["message_count"], 2);
+        assert_eq!(
+            value["messages"],
+            serde_json::json!([{"role": "assistant", "content": "hi", "timestamp": null}])
+        );
+
+        let value = serde_json::to_value(session.detail(&session.messages)).unwrap();
+        assert_eq!(value["messages"][0]["timestamp"], "1700000000000");
+    }
+
+    #[test]
+    fn export_json_shape_is_unchanged() {
+        let mut session = session();
+        session.messages.clear();
+        let value = serde_json::to_value(&session).unwrap();
+        let keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "id",
+                "title",
+                "source",
+                "workspace",
+                "created_at_ms",
+                "updated_at_ms",
+                "messages"
+            ]
+        );
     }
 }
