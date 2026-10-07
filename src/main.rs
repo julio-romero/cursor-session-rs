@@ -242,7 +242,7 @@ mod tests {
         let error = anyhow::Error::from(ambiguous());
         let expected = format!("error: {error}\n{}", hint_lines(&ambiguous()));
         assert_eq!(reported(&error), expected);
-        assert!(expected.contains("\nf4aa\nf4bb\n"));
+        assert!(expected.contains("\n  f4aa\n  f4bb\nuse more characters of the ID\n"));
 
         let not_found = || Error::SessionNotFound {
             query: "abc".into(),
@@ -275,8 +275,8 @@ mod tests {
         let text = String::from_utf8(buf).unwrap();
         assert!(!text.contains(['\u{1b}', '\u{7}']), "{text:?}");
         assert!(text.starts_with("error: query cc\n  caused by: "));
-        assert!(text.contains("cc01  agent  Edge  title\n"));
-        assert!(text.contains("cc02  agent  Second EVIL title\n"));
+        assert!(text.contains("\n  cc01  agent  Edge  title\n"));
+        assert!(text.contains("\n  cc02  agent  Second EVIL title\n"));
     }
 
     #[test]

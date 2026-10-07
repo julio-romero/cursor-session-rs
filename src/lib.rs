@@ -206,17 +206,17 @@ mod tests {
         );
         let hints = err.hints();
         assert_eq!(hints.len(), 12);
-        assert_eq!(hints[0], "abc00  agent  title of abc00");
-        assert_eq!(hints[9], "abc09  agent  title of abc09");
-        assert_eq!(hints[10], "and 2 more");
+        assert_eq!(hints[0], "  abc00  agent  title of abc00");
+        assert_eq!(hints[9], "  abc09  agent  title of abc09");
+        assert_eq!(hints[10], "  and 2 more");
         assert_eq!(hints[11], "use more characters of the ID");
 
         let err = find_session(&sessions[..2], "abc").unwrap_err();
         assert_eq!(
             err.hints(),
             [
-                "abc00  agent  title of abc00",
-                "abc01  agent  title of abc01",
+                "  abc00  agent  title of abc00",
+                "  abc01  agent  title of abc01",
                 "use more characters of the ID",
             ]
         );

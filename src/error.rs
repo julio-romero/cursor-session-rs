@@ -74,31 +74,35 @@ impl Error {
         }
     }
 
-    /// Extra guidance lines to show under the error message.
+    /// Extra guidance lines to show under the error message: lowercase
+    /// imperatives without a closing period, after any indented candidates.
     pub fn hints(&self) -> Vec<String> {
         match self {
-            Error::NoHome => vec!["Set HOME or pass --storage <path>.".to_string()],
+            Error::NoHome => vec!["set HOME or pass --storage <path>".to_string()],
             Error::UnsupportedStorage { .. } => vec![
-                "Pass a home or .cursor directory, ~/.cursor/chats, a session directory, store.db, \
-                 state.vscdb, or the directory that contains state.vscdb."
+                "pass a home or .cursor directory, ~/.cursor/chats, a session directory, store.db, \
+                 state.vscdb, or the directory that contains state.vscdb"
                     .to_string(),
             ],
             Error::SessionNotFound { .. } | Error::EmptyId => {
                 vec!["run `cursor-session list` to see session IDs".to_string()]
             }
             Error::AmbiguousId { matches, .. } => {
-                let mut hints: Vec<String> =
-                    matches.iter().take(MAX_ID_CANDIDATES).cloned().collect();
+                let mut hints: Vec<String> = matches
+                    .iter()
+                    .take(MAX_ID_CANDIDATES)
+                    .map(|candidate| format!("  {candidate}"))
+                    .collect();
                 if matches.len() > MAX_ID_CANDIDATES {
-                    hints.push(format!("and {} more", matches.len() - MAX_ID_CANDIDATES));
+                    hints.push(format!("  and {} more", matches.len() - MAX_ID_CANDIDATES));
                 }
                 hints.push("use more characters of the ID".to_string());
                 hints
             }
             Error::SchemaMismatch { .. } => vec![
-                "Rerun with `--source agent` to skip IDE sessions.".to_string(),
-                "Please report it at https://github.com/julio-romero/cursor-session-rs/issues \
-                 and include your Cursor version."
+                "rerun with `--source agent` to skip IDE sessions".to_string(),
+                "report it at https://github.com/julio-romero/cursor-session-rs/issues and \
+                 include your Cursor version"
                     .to_string(),
             ],
             Error::Database { source, .. }
@@ -107,7 +111,7 @@ impl Error {
                     Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
                 ) =>
             {
-                vec!["Cursor may be writing to it right now; try again in a moment.".to_string()]
+                vec!["try again in a moment; Cursor may be writing to it right now".to_string()]
             }
             Error::Snapshot { .. } => vec![
                 format!(
@@ -115,7 +119,7 @@ impl Error {
                      TMPDIR (TMP on Windows) elsewhere",
                     std::env::temp_dir().display()
                 ),
-                "if Cursor crashed, start and quit it once; a database it closed cleanly is read \
+                "start and quit Cursor once if it crashed; a database it closed cleanly is read \
                  without a copy"
                     .to_string(),
             ],
@@ -123,6 +127,57 @@ impl Error {
                 vec!["pass --storage <path> if your Cursor data lives elsewhere".to_string()]
             }
             _ => Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hints_are_lowercase_imperatives_without_a_period() {
+        let path = PathBuf::from("state.vscdb");
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        );
+        let errors = [
+            Error::NoHome,
+            Error::UnsupportedStorage { path: path.clone() },
+            Error::SessionNotFound { query: "x".into() },
+            Error::EmptyId,
+            Error::AmbiguousId {
+                query: "a".into(),
+                matches: (0..12).map(|n| format!("a{n}  agent  Title")).collect(),
+            },
+            Error::SchemaMismatch {
+                path: path.clone(),
+                detail: "no table".into(),
+            },
+            Error::Database {
+                path: path.clone(),
+                source: busy,
+            },
+            Error::Snapshot {
+                path,
+                source: io::Error::other("disk full"),
+            },
+            Error::NoStorage,
+        ];
+        for error in &errors {
+            let hints = error.hints();
+            let (candidates, advice): (Vec<_>, Vec<_>) =
+                hints.iter().partition(|hint| hint.starts_with("  "));
+            assert!(!advice.is_empty(), "{error}");
+            for hint in advice {
+                assert!(hint.starts_with(|c: char| c.is_ascii_lowercase()), "{hint}");
+                assert!(!hint.ends_with('.'), "{hint}");
+            }
+            if let Error::AmbiguousId { .. } = error {
+                assert_eq!(candidates.len(), 11);
+                assert!(hints[..11].iter().all(|hint| hint.starts_with("  ")));
+            }
         }
     }
 }
