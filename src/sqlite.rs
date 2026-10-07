@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::ops::Deref;
@@ -7,7 +8,7 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
 
 use crate::{Error, Result};
 
@@ -15,11 +16,32 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SNAPSHOT_PREFIX: &str = "cursor-session-";
 const STALE_SNAPSHOT: Duration = Duration::from_secs(60 * 60);
 
+/// Size and modification time of a database file.
+type Stamp = (u64, Option<SystemTime>);
+
+/// Runs `read` on a read-only connection to `path` (see [`open_readonly`]).
+///
+/// An immutable connection takes no locks, so Cursor starting up during the
+/// read can change the file under it. When such a read fails as corrupt, or
+/// the file changed before it finished, `read` runs once more on a new
+/// connection, which by then usually reads in place.
+pub fn with_readonly<T>(path: &Path, mut read: impl FnMut(&Connection) -> Result<T>) -> Result<T> {
+    let db = open_readonly(path)?;
+    let result = read(&db);
+    if !db.torn(&result) {
+        return result;
+    }
+    drop(db);
+    read(&*open_readonly(path)?)
+}
+
 /// A read-only connection. When the database had to be copied first (see
 /// [`open_readonly`]), the copy lives as long as the connection.
-pub struct Db {
+struct Db {
     // Field order matters: the connection must close before the copy is removed.
     conn: Connection,
+    /// The file an immutable connection reads, stamped before it was opened.
+    immutable: Option<(PathBuf, Stamp)>,
     _snapshot: Option<Snapshot>,
 }
 
@@ -31,49 +53,116 @@ impl Deref for Db {
     }
 }
 
+impl Db {
+    /// Whether `result` was read without locks from a file that changed, or
+    /// that looked corrupt, as a concurrent checkpoint can make it look.
+    fn torn<T>(&self, result: &Result<T>) -> bool {
+        let Some((file, opened)) = &self.immutable else {
+            return false;
+        };
+        let corrupt = matches!(
+            result,
+            Err(Error::Database { source, .. }) if matches!(
+                source.sqlite_error_code(),
+                Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
+            )
+        );
+        corrupt || stamp(file).ok().as_ref() != Some(opened)
+    }
+}
+
+/// How [`open_readonly`] reads a database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// SQLite's normal read-only open, sharing locks with writers.
+    InPlace,
+    /// Only the main file, without locks (`immutable=1`).
+    Immutable,
+    /// A private copy of the main file and its `-wal`.
+    Snapshot,
+}
+
+impl Mode {
+    /// A WAL database with no `-wal`, or an empty one, has every commit in its
+    /// main file. A non-empty `-wal` next to a `-shm` belongs to a writer that
+    /// has the database open; without a `-shm`, a crash left it behind.
+    fn of(path: &Path) -> io::Result<Mode> {
+        if !is_wal(path)? {
+            return Ok(Mode::InPlace);
+        }
+        let wal_len = match fs::metadata(sidecar(path, "-wal")) {
+            Ok(meta) => meta.len(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+            Err(err) => return Err(err),
+        };
+        Ok(if wal_len == 0 {
+            Mode::Immutable
+        } else if sidecar(path, "-shm").is_file() {
+            Mode::InPlace
+        } else {
+            Mode::Snapshot
+        })
+    }
+}
+
 /// Opens a SQLite database for reading without ever writing next to it.
 ///
-/// The file is opened with `SQLITE_OPEN_READ_ONLY`, a busy timeout and
-/// `PRAGMA query_only`, so reads coexist with Cursor writing to it. A WAL-mode
-/// database whose `-wal` or `-shm` file is missing is not open anywhere, and
-/// SQLite would have to create those files to read it (or fail when the
-/// directory is read-only). Such a file is copied to a private temporary
-/// directory and the copy is opened instead.
-pub fn open_readonly(path: &Path) -> Result<Db> {
-    let abs = sqlite_path(path).map_err(|source| Error::access(path, source))?;
+/// A rollback-journal database, and a WAL database that another process
+/// (Cursor) has open, are opened in place with `SQLITE_OPEN_READ_ONLY`, a busy
+/// timeout and `PRAGMA query_only`, so reads coexist with writers and see
+/// every commit. A WAL database closed cleanly is opened `immutable`: SQLite
+/// would otherwise create `-wal` and `-shm` next to it to read it, or fail in a
+/// read-only directory. One whose `-wal` a crash left behind is copied, with
+/// that `-wal`, to a private temporary directory and the copy is opened; so is
+/// one whose path a `file:` URI cannot carry.
+fn open_readonly(path: &Path) -> Result<Db> {
+    let file = sqlite_path(path).map_err(|source| Error::access(path, source))?;
     for _ in 0..3 {
-        let before = stamp(&abs).map_err(|source| Error::access(path, source))?;
-        if !needs_snapshot(&abs).map_err(|source| Error::access(path, source))? {
-            break;
+        let before = stamp(&file).map_err(|source| Error::access(path, source))?;
+        let mode = Mode::of(&file).map_err(|source| Error::access(path, source))?;
+        let uri = match mode {
+            Mode::InPlace => break,
+            Mode::Immutable => immutable_uri(&file),
+            Mode::Snapshot => None,
+        };
+        if let Some(uri) = uri {
+            let conn = connect(Path::new(&uri), path, OpenFlags::SQLITE_OPEN_URI)?;
+            return Ok(Db {
+                conn,
+                immutable: Some((file, before)),
+                _snapshot: None,
+            });
         }
-        let snapshot = Snapshot::copy(&abs).map_err(|source| Error::Snapshot {
+        let snapshot = Snapshot::copy(&file).map_err(|source| Error::Snapshot {
             path: path.to_path_buf(),
             source,
         })?;
         // Cursor may have opened the file during the copy, which can tear it.
         // Copy again, or read in place once its -wal and -shm exist.
-        if stamp(&abs).ok() == Some(before) && needs_snapshot(&abs).unwrap_or(false) {
-            let conn = connect(&snapshot.db, path)?;
+        if stamp(&file).ok() == Some(before) && Mode::of(&file).ok() == Some(mode) {
+            let conn = connect(&snapshot.db, path, OpenFlags::empty())?;
             return Ok(Db {
                 conn,
+                immutable: None,
                 _snapshot: Some(snapshot),
             });
         }
     }
     Ok(Db {
-        conn: connect(&abs, path)?,
+        conn: connect(&file, path, OpenFlags::empty())?,
+        immutable: None,
         _snapshot: None,
     })
 }
 
-fn connect(file: &Path, path: &Path) -> Result<Connection> {
+fn connect(file: &Path, path: &Path, flags: OpenFlags) -> Result<Connection> {
     let db_err = |source| Error::Database {
         path: path.to_path_buf(),
         source,
     };
     let conn = Connection::open_with_flags(
         file,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        flags | OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(db_err)?;
     conn.busy_timeout(BUSY_TIMEOUT).map_err(db_err)?;
@@ -94,13 +183,70 @@ fn sqlite_path(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-fn stamp(path: &Path) -> io::Result<(u64, Option<SystemTime>)> {
-    let meta = fs::metadata(path)?;
-    Ok((meta.len(), meta.modified().ok()))
+/// `path` as a `file:` URI that opens it `immutable`, or `None` when a URI
+/// cannot name it safely.
+#[cfg(unix)]
+fn immutable_uri(path: &Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+    unix_uri(path.as_os_str().as_bytes())
 }
 
-fn needs_snapshot(path: &Path) -> io::Result<bool> {
-    Ok(is_wal(path)? && !(sidecar(path, "-wal").is_file() && sidecar(path, "-shm").is_file()))
+#[cfg(windows)]
+fn immutable_uri(path: &Path) -> Option<String> {
+    windows_uri(path.to_str()?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn immutable_uri(_: &Path) -> Option<String> {
+    None
+}
+
+/// `/dir/state.vscdb` as `file:///dir/state.vscdb?immutable=1`, from the raw
+/// bytes of an absolute path.
+#[cfg(any(unix, test))]
+fn unix_uri(path: &[u8]) -> Option<String> {
+    if path.first() != Some(&b'/') {
+        return None;
+    }
+    let mut uri = String::from("file://");
+    push_encoded(&mut uri, path);
+    uri.push_str("?immutable=1");
+    Some(uri)
+}
+
+/// `C:\dir\state.vscdb` as `file:///C:/dir/state.vscdb?immutable=1`. UNC
+/// (`\\server\share`) and verbatim (`\\?\`) paths give `None`.
+#[cfg(any(windows, test))]
+fn windows_uri(path: &str) -> Option<String> {
+    let (drive, rest) = path.split_at_checked(3)?;
+    let [letter, b':', b'\\' | b'/'] = drive.as_bytes() else {
+        return None;
+    };
+    if !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut uri = format!("file:///{}:/", char::from(*letter));
+    push_encoded(&mut uri, rest.replace('\\', "/").as_bytes());
+    uri.push_str("?immutable=1");
+    Some(uri)
+}
+
+/// Appends `path`, percent-encoding every byte outside `[A-Za-z0-9-._~/]`. In
+/// a URI, SQLite ends the path at `?` or `#` and decodes `%HH`.
+#[cfg(any(unix, windows, test))]
+fn push_encoded(uri: &mut String, path: &[u8]) {
+    for &byte in path {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+}
+
+fn stamp(path: &Path) -> io::Result<Stamp> {
+    let meta = fs::metadata(path)?;
+    Ok((meta.len(), meta.modified().ok()))
 }
 
 /// Reads the SQLite header's file format bytes, which are 2 in WAL mode.
@@ -120,6 +266,12 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Snapshots made on this thread.
+    static COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A private temporary copy of a database, removed on drop.
 struct Snapshot {
     dir: PathBuf,
@@ -128,6 +280,8 @@ struct Snapshot {
 
 impl Snapshot {
     fn copy(path: &Path) -> io::Result<Self> {
+        #[cfg(test)]
+        COPIES.with(|copies| copies.set(copies.get() + 1));
         let dir = private_temp_dir()?;
         let snapshot = Snapshot {
             db: dir.join(path.file_name().unwrap_or_else(|| "db".as_ref())),
@@ -237,51 +391,117 @@ mod tests {
         .unwrap();
     }
 
-    fn read_all(path: &Path) -> i64 {
-        let db = open_readonly(path).unwrap();
-        db.query_row("SELECT count(*) FROM cursorDiskKV", [], |row| row.get(0))
-            .unwrap()
+    /// Opens `path` for writing and commits a second row that stays in the -wal.
+    fn wal_writer(path: &Path) -> Connection {
+        let writer = Connection::open(path).unwrap();
+        writer.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        writer
+            .execute("INSERT INTO cursorDiskKV VALUES ('k2', 'v2')", [])
+            .unwrap();
+        assert!(fs::metadata(sidecar(path, "-wal")).unwrap().len() > 0);
+        writer
+    }
+
+    fn db_err(source: rusqlite::Error) -> Error {
+        Error::Database {
+            path: PathBuf::new(),
+            source,
+        }
+    }
+
+    fn rows(conn: &Connection) -> Result<Vec<(String, String)>> {
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM cursorDiskKV ORDER BY key")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(db_err)?;
+        rows.collect::<rusqlite::Result<_>>().map_err(db_err)
+    }
+
+    fn copies() -> usize {
+        COPIES.with(std::cell::Cell::get)
     }
 
     #[test]
-    fn reading_leaves_the_directory_untouched() {
-        for journal_mode in ["delete", "wal"] {
+    fn reading_a_closed_database_leaves_its_directory_untouched() {
+        for (journal_mode, empty_wal) in [("delete", false), ("wal", false), ("wal", true)] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("state.vscdb");
             create(&path, journal_mode);
             // A clean close removes the WAL sidecars, as when Cursor quits.
             assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+            if empty_wal {
+                // Persistent WAL mode truncates the -wal instead.
+                fs::write(sidecar(&path, "-wal"), "").unwrap();
+            }
             assert_eq!(is_wal(&path).unwrap(), journal_mode == "wal");
 
             let before = listing(dir.path());
-            assert_eq!(read_all(&path), 1);
+            let copied = copies();
+            assert_eq!(with_readonly(&path, rows).unwrap().len(), 1);
+            assert_eq!(copies(), copied, "{journal_mode}");
             assert_eq!(listing(dir.path()), before, "{journal_mode}");
         }
     }
 
     #[test]
-    fn wal_without_sidecars_reads_a_copy_that_is_removed_afterwards() {
+    fn closed_wal_database_is_read_immutable_without_a_copy() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.vscdb");
         create(&path, "wal");
+        let copied = copies();
         let db = open_readonly(&path).unwrap();
+        assert!(db.immutable.is_some());
+        assert!(db._snapshot.is_none());
+        assert_eq!(copies(), copied);
+        assert!(db.execute("DELETE FROM cursorDiskKV", []).is_err());
+        assert_eq!(rows(&db).unwrap(), [("k".to_string(), "v".to_string())]);
+    }
+
+    #[test]
+    fn live_wal_database_is_read_in_place_with_its_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        create(&path, "wal");
+        let _writer = wal_writer(&path);
+        // The second row is only in the -wal: the main file alone has one.
+        let uri = immutable_uri(&sqlite_path(&path).unwrap()).unwrap();
+        let main_only = connect(Path::new(&uri), &path, OpenFlags::SQLITE_OPEN_URI).unwrap();
+        assert_eq!(rows(&main_only).unwrap().len(), 1);
+
+        let copied = copies();
+        let db = open_readonly(&path).unwrap();
+        assert!(db.immutable.is_none());
+        assert!(db._snapshot.is_none());
+        assert_eq!(copies(), copied);
+        assert_eq!(rows(&db).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn wal_left_by_a_crash_is_read_from_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.vscdb");
+        create(&live, "wal");
+        let writer = wal_writer(&live);
+        // What a crash leaves behind: the database and its -wal, but no -shm.
+        let crashed = dir.path().join("crashed");
+        fs::create_dir(&crashed).unwrap();
+        let path = crashed.join("state.vscdb");
+        fs::copy(&live, &path).unwrap();
+        fs::copy(sidecar(&live, "-wal"), sidecar(&path, "-wal")).unwrap();
+        drop(writer);
+
+        let before = listing(&crashed);
+        let copied = copies();
+        let db = open_readonly(&path).unwrap();
+        assert_eq!(copies(), copied + 1);
         let copy = db._snapshot.as_ref().map(|s| s.dir.clone()).unwrap();
         assert!(copy.join("state.vscdb").is_file());
-        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(rows(&db).unwrap().len(), 2);
         drop(db);
         assert!(!copy.exists());
-
-        // While another connection has it open, the database is read in place.
-        let writer = Connection::open(&path).unwrap();
-        writer
-            .execute("INSERT INTO cursorDiskKV VALUES ('k2', 'v2')", [])
-            .unwrap();
-        let db = open_readonly(&path).unwrap();
-        assert!(db._snapshot.is_none());
-        let count: i64 = db
-            .query_row("SELECT count(*) FROM cursorDiskKV", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(listing(&crashed), before);
     }
 
     #[cfg(unix)]
@@ -295,16 +515,122 @@ mod tests {
         let link = dir.path().join("state.vscdb");
         std::os::unix::fs::symlink(&path, &link).unwrap();
 
-        let writer = Connection::open(&path).unwrap();
-        writer
-            .execute("INSERT INTO cursorDiskKV VALUES ('k2', 'v2')", [])
-            .unwrap();
+        let _writer = wal_writer(&path);
         let db = open_readonly(&link).unwrap();
         assert!(db._snapshot.is_none());
-        let count: i64 = db
-            .query_row("SELECT count(*) FROM cursorDiskKV", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(rows(&db).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reserved_characters_in_paths_reach_sqlite_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        // Unencoded, `#` and `?` would end the path and `%41` would read as `A`.
+        let name = if cfg!(windows) {
+            "a b#c%41 ü 名"
+        } else {
+            "a b#c?d%41 ü 名"
+        };
+        let parent = dir.path().join(name);
+        fs::create_dir(&parent).unwrap();
+        let path = parent.join("state #1.vscdb");
+        create(&path, "wal");
+
+        let before = listing(&parent);
+        let db = open_readonly(&path).unwrap();
+        assert!(db.immutable.is_some());
+        assert_eq!(rows(&db).unwrap().len(), 1);
+        drop(db);
+        assert_eq!(listing(&parent), before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_paths_reach_sqlite_intact() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join(std::ffi::OsStr::from_bytes(b"caf\xe9"));
+        fs::create_dir(&parent).unwrap();
+        let path = parent.join("state.vscdb");
+        create(&path, "wal");
+        let db = open_readonly(&path).unwrap();
+        assert!(db.immutable.is_some());
+        assert_eq!(rows(&db).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn uris_percent_encode_reserved_bytes() {
+        assert_eq!(
+            unix_uri(b"/a b/#?%/\xff\xc3\xbc/A-z_0.9~/x").as_deref(),
+            Some("file:///a%20b/%23%3F%25/%FF%C3%BC/A-z_0.9~/x?immutable=1")
+        );
+        assert_eq!(unix_uri(b"relative/state.vscdb"), None);
+        assert_eq!(
+            windows_uri(r"C:\Users\a b\#1%\state.vscdb").as_deref(),
+            Some("file:///C:/Users/a%20b/%231%25/state.vscdb?immutable=1")
+        );
+        assert_eq!(
+            windows_uri("d:/Cursor/ü").as_deref(),
+            Some("file:///d:/Cursor/%C3%BC?immutable=1")
+        );
+        for path in [
+            r"\\server\share\state.vscdb",
+            r"\\?\C:\state.vscdb",
+            r"\\.\C:\state.vscdb",
+            r"C:state.vscdb",
+            r"1:\state.vscdb",
+            "C:",
+        ] {
+            assert_eq!(windows_uri(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn immutable_read_runs_again_when_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        create(&path, "wal");
+        let mut calls = 0;
+        let read = with_readonly(&path, |conn| {
+            calls += 1;
+            let found = rows(conn)?;
+            if calls == 1 {
+                // Cursor starts, then writes and checkpoints during the read.
+                let writer = Connection::open(&path).unwrap();
+                writer
+                    .execute(
+                        "INSERT INTO cursorDiskKV VALUES ('k2', printf('%.*c', 65536, 'x'))",
+                        [],
+                    )
+                    .unwrap();
+                writer
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                    .unwrap();
+            }
+            Ok(found)
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(read.len(), 2);
+    }
+
+    #[test]
+    fn only_an_immutable_read_that_looks_corrupt_runs_again() {
+        let dir = tempfile::tempdir().unwrap();
+        for (journal_mode, expected) in [("wal", 2), ("delete", 1)] {
+            let path = dir.path().join(format!("{journal_mode}.vscdb"));
+            create(&path, journal_mode);
+            let mut calls = 0;
+            let result: Result<()> = with_readonly(&path, |_| {
+                calls += 1;
+                Err(db_err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+                    None,
+                )))
+            });
+            assert!(matches!(result, Err(Error::Database { .. })));
+            assert_eq!(calls, expected, "{journal_mode}");
+        }
     }
 
     #[test]

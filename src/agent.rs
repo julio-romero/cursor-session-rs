@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::detect::{ChatsScope, StoragePaths};
 use crate::model::{Message, Session, Source};
-use crate::sqlite::open_readonly;
+use crate::sqlite::with_readonly;
 use crate::{Error, Result};
 
 #[derive(Debug, Deserialize, Default)]
@@ -280,17 +280,21 @@ fn read_store_meta(path: &Path) -> std::result::Result<Option<StoreMeta>, String
     if !path.is_file() {
         return Ok(None);
     }
-    let conn = open_readonly(path).map_err(|err| reason(&err))?;
-    let value = conn
-        .query_row("SELECT value FROM meta WHERE key = '0'", [], |row| {
+    let value = with_readonly(path, |conn| {
+        conn.query_row("SELECT value FROM meta WHERE key = '0'", [], |row| {
             Ok(match row.get_ref(0)? {
                 ValueRef::Text(bytes) | ValueRef::Blob(bytes) => Some(bytes.to_vec()),
                 _ => None,
             })
         })
         .optional()
-        .map_err(|err| err.to_string())?
-        .flatten();
+        .map_err(|source| Error::Database {
+            path: path.to_path_buf(),
+            source,
+        })
+    })
+    .map_err(|err| reason(&err))?
+    .flatten();
     let Some(value) = value else {
         return Ok(None);
     };

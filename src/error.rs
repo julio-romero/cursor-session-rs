@@ -52,6 +52,7 @@ pub enum Error {
     #[error(transparent)]
     Write(io::Error),
 
+    /// A database whose `-wal` a crash left behind is read from a copy.
     #[error("could not copy {} to a temporary directory for reading", path.display())]
     Snapshot { path: PathBuf, source: io::Error },
 
@@ -108,11 +109,16 @@ impl Error {
             {
                 vec!["Cursor may be writing to it right now; try again in a moment.".to_string()]
             }
-            Error::Snapshot { .. } => vec![format!(
-                "Make sure {} is writable and has free space, or point TMPDIR (TMP on Windows) \
-                 elsewhere.",
-                std::env::temp_dir().display()
-            )],
+            Error::Snapshot { .. } => vec![
+                format!(
+                    "make sure {} is writable and has room for a copy of the database, or point \
+                     TMPDIR (TMP on Windows) elsewhere",
+                    std::env::temp_dir().display()
+                ),
+                "if Cursor crashed, start and quit it once; a database it closed cleanly is read \
+                 without a copy"
+                    .to_string(),
+            ],
             Error::NoStorage => {
                 vec!["pass --storage <path> if your Cursor data lives elsewhere".to_string()]
             }

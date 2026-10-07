@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::detect::StoragePaths;
 use crate::model::{Message, Session, Source};
-use crate::sqlite::open_readonly;
+use crate::sqlite::with_readonly;
 use crate::{Error, Result};
 
 const KV_TABLE: &str = "cursorDiskKV";
@@ -86,8 +86,23 @@ pub fn load_from_db(db_path: &Path, warnings: &mut Vec<String>) -> Result<Vec<Se
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => return Err(Error::access(db_path, source)),
     }
-    let conn = open_readonly(db_path)?;
-    if !check_schema(&conn, db_path)? {
+    // The read may run twice (see `with_readonly`); only the last one's
+    // warnings are kept.
+    let (sessions, found) = with_readonly(db_path, |conn| {
+        let mut found = Vec::new();
+        let sessions = read_sessions(conn, db_path, &mut found)?;
+        Ok((sessions, found))
+    })?;
+    warnings.extend(found);
+    Ok(sessions)
+}
+
+fn read_sessions(
+    conn: &Connection,
+    db_path: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<Vec<Session>> {
+    if !check_schema(conn, db_path)? {
         warnings.push(format!(
             "{} has no tables; no Cursor IDE sessions loaded",
             db_path.display()
@@ -96,7 +111,7 @@ pub fn load_from_db(db_path: &Path, warnings: &mut Vec<String>) -> Result<Vec<Se
     }
 
     let mut bubble_map: HashMap<String, Bubble> = HashMap::new();
-    let skipped = read_rows(&conn, db_path, "bubbleId:", |key, value| {
+    let skipped = read_rows(conn, db_path, "bubbleId:", |key, value| {
         let Ok(bubble) = serde_json::from_str::<Bubble>(value) else {
             return false;
         };
@@ -112,7 +127,7 @@ pub fn load_from_db(db_path: &Path, warnings: &mut Vec<String>) -> Result<Vec<Se
     warn_skipped(warnings, skipped, "message", db_path);
 
     let mut sessions = Vec::new();
-    let skipped = read_rows(&conn, db_path, "composerData:", |key, value| {
+    let skipped = read_rows(conn, db_path, "composerData:", |key, value| {
         let Ok(composer) = serde_json::from_str::<Composer>(value) else {
             return false;
         };
