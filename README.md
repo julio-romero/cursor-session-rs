@@ -55,6 +55,22 @@ This builds from source and needs Rust 1.88 or newer.
 [latest release](https://github.com/julio-romero/cursor-session-rs/releases/latest)
 and put `cursor-session.exe` on your `PATH`, or use `cargo install`.
 
+### Upgrade and uninstall
+
+- **Homebrew:** `brew upgrade cursor-session`, and `brew uninstall
+  cursor-session` to remove it.
+- **Shell installer:** run the install command again to upgrade. To remove it,
+  delete `cursor-session` from `$CARGO_HOME/bin` (`~/.cargo/bin` by default, or
+  the `bin` directory under `CURSOR_SESSION_INSTALL_DIR`) and the
+  `~/.config/cursor-session` directory (under `XDG_CONFIG_HOME` if that is set),
+  where the installer keeps a record of the install. The installer may also have added a line to your shell profile
+  that loads `~/.cargo/env`; keep it if you use Rust.
+- **Cargo:** `cargo install cursor-session --locked` again to upgrade, and
+  `cargo uninstall cursor-session` to remove it. The shell installer and Cargo
+  both install to `~/.cargo/bin`, so to move from the installer to Cargo, add
+  `--force`; without it, Cargo stops with `binary cursor-session already exists
+  in destination`.
+
 ## Usage
 
 ### List sessions
@@ -107,7 +123,8 @@ e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46  ide         3  2026-10-04 16:48  Speed up 
 - In a terminal, control characters and escape sequences in stored titles and
   messages are removed before printing. The exception is `show` with color on:
   it keeps color and style codes, except blinking and hidden text, and resets
-  them at the end of each line.
+  them at the end of each line. Stored colors can still make text hard to see,
+  such as black on black; `--color never` prints messages without them.
   Piped output is written as stored, so a title that contains a line break
   spans two lines there; `list --json` is exact for scripts.
 
@@ -283,9 +300,9 @@ with its messages.
 
 - Written to stdout, pretty-printed with two-space indentation and a trailing
   newline. No color is added and nothing is fitted to the terminal.
-- Control characters in strings are escaped (as `\n`, `\t` or `\u00XX`), and
-  so are DEL and U+0080 to U+009F (as `\u00XX`), so the JSON is the same in a
-  terminal and in a pipe.
+- Control characters in strings are escaped, with JSON's short escapes (`\n`,
+  `\r`, `\t`, `\b`, `\f`) or as `\u00XX`, and so are DEL and U+0080 to U+009F
+  (as `\u00XX`), so the JSON is the same in a terminal and in a pipe.
 - `list --json` keeps the list order (most recently updated first) and applies
   `--source` and `--limit`. No sessions gives `[]`.
 - `show --json` includes every message, also in a terminal, unless `--limit N`
@@ -375,7 +392,7 @@ $ cursor-session show a71d --json | jq -r '.messages[] | select(.role == "user")
 Webhook deliveries fail for good on the first 503. Add retries with exponential backoff.
 Make the attempt count configurable.
 
-$ cursor-session list --json | jq '[.[] | select(.updated_at != null and (.updated_at | fromdate) > now - 7 * 86400)] | length'
+$ cursor-session list --json | jq '[.[] | (.updated_at // .created_at) | select(. != null and fromdate > now - 7 * 86400)] | length'
 3
 ```
 
@@ -452,12 +469,16 @@ there. A database in WAL mode is read depending on the files next to it:
   read-only directory. If Cursor starts and changes the file during the read,
   the read is retried; if the file changes during the retry too, the command
   stops with `changed while it was being read` and you can run it again.
-- **After a crash**, Cursor can leave a `-wal` file without its `-shm`. Reading
-  that in place would create files next to your data, so the database and its
-  `-wal` are copied to a private temporary directory, read there and deleted.
-  This needs free space for the copy in `TMPDIR` (`TMP` on Windows). Starting
-  and quitting Cursor once avoids the copy. If cursor-session is killed during
-  such a read, its copy stays behind until a later run removes it, an hour on.
+- **After a crash**, Cursor leaves its `-wal` and `-shm` behind, which looks the
+  same as Cursor running, so the database is read in place. SQLite then rebuilds
+  the `-shm`, an index of the `-wal`, as Cursor does the next time it opens the
+  database; the database and its `-wal` are not changed. When a `-wal` is left
+  without its `-shm`, reading in place would create files next to your data, so
+  the database and its `-wal` are copied to a private temporary directory, read
+  there and deleted. This needs free space for the copy in `TMPDIR` (`TMP` on
+  Windows). Starting and quitting Cursor once avoids the copy. If cursor-session
+  is killed during such a read, its copy stays behind until a later run removes
+  it, an hour on.
 
 A database where SQLite's locks cannot do their job is never read in place. That
 is one on a filesystem that another machine or VM serves, such as a network
@@ -465,9 +486,10 @@ share or the Windows drives WSL mounts under `/mnt`, because the locks and the
 `-shm` of a Cursor on the other side do not reach across it. It is also one on a
 read-only volume, such as a Time Machine backup or a disk image mounted
 read-only, where no Cursor can be writing. Such a database is read as immutable
-while its journal is empty, and from a copy of it and its journal otherwise. If
-Cursor writes to it during every attempt, the command stops with `changed while
-it was being read`.
+while its journal is empty, and from a copy of it and its journal otherwise. On
+Windows, one on a network path (`\\server\share\...`) is always read from a copy,
+as SQLite cannot open such a path as immutable. If Cursor writes to it during
+every attempt, the command stops with `changed while it was being read`.
 
 One case can still leave files next to the database: when Cursor quits in the
 moment between cursor-session finding it open and starting to read, the read
@@ -615,8 +637,15 @@ the Homebrew and crates.io jobs fail. For each release:
    commit and push to `master`.
 2. Wait for CI to pass on that commit. The Release workflow does not run the
    tests itself.
-3. Check that `dist plan` prints `announcing vX.Y.Z`.
+3. Check that `dist plan` prints `announcing vX.Y.Z`. Use dist 0.32.0, the
+   version `dist-workspace.toml` pins; a newer dist refuses this configuration.
+   Install it with `cargo install cargo-dist --version 0.32.0 --locked`, or with
+   `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh`.
 4. Push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+After changing `dist-workspace.toml`, run `dist generate` with that same
+version to update `.github/workflows/release.yml`. Moving to a newer dist is a
+change of its own: run `dist init` with it and review the regenerated workflow.
 
 The Release workflow builds archives for the five targets, creates the GitHub
 Release with the archives, checksums and the shell installer, pushes the
