@@ -97,12 +97,20 @@ fn diagnostics<W: Write>(stderr: W) -> IgnoreErrors<TerminalWriter<W>> {
 fn run(cli: Cli, opts: &OutputOpts, out: &mut dyn Write, err: &mut dyn Write) -> Result<()> {
     let paths = resolve_paths(cli.storage.as_deref())?;
     if cli.verbose {
-        writeln!(err, "chats: {:?}", paths.chats_dir)?;
-        writeln!(err, "projects: {:?}", paths.projects_dir)?;
-        writeln!(err, "ide db: {:?}", paths.global_storage_db)?;
+        writeln!(err, "chats: {}", shown(paths.chats_dir.as_deref()))?;
+        writeln!(err, "projects: {}", shown(paths.projects_dir.as_deref()))?;
+        writeln!(err, "ide db: {}", shown(paths.global_storage_db.as_deref()))?;
     }
 
     commands::run(cli.command, &paths, opts, out, err)
+}
+
+/// A storage path for the verbose lines.
+fn shown(path: Option<&Path>) -> String {
+    path.map_or_else(
+        || "not found".to_string(),
+        |path| path.display().to_string(),
+    )
 }
 
 fn resolve_paths(storage: Option<&Path>) -> Result<StoragePaths> {
@@ -214,6 +222,34 @@ mod tests {
 
         let cli = parse_cli(args(&["--color=never", "list"])).unwrap();
         assert_eq!(cli.color, crate::cli::ColorChoice::Never);
+    }
+
+    #[test]
+    fn verbose_prints_each_storage_path_or_not_found() {
+        let projects =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/home/.cursor/projects");
+        let mut argv = args(&["-v", "list", "--storage"]);
+        argv.push(projects.clone().into_os_string());
+        let opts = OutputOpts {
+            tty: false,
+            color: false,
+            width: None,
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run(parse_cli(argv).unwrap(), &opts, &mut out, &mut err).unwrap();
+        let resolved = StoragePaths::from_custom(&projects, None).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            format!(
+                "chats: not found\nprojects: {}\nide db: not found\n",
+                resolved.projects_dir.unwrap().display()
+            )
+        );
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .starts_with("Found 1 session(s)\n")
+        );
     }
 
     #[test]
