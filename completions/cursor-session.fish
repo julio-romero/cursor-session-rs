@@ -33,6 +33,7 @@ complete -c cursor-session -n "__fish_cursor_session_needs_command" -s h -l help
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -s V -l version -d 'Print version'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "list" -d 'List sessions, most recently updated first'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "show" -d 'Show messages from a session'
+complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "search" -d 'Find the sessions whose messages hold every word of a query'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "export" -d 'Export sessions to files'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "healthcheck" -d 'Check that session stores can be found and loaded'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "completions" -d 'Print a shell completion script'
@@ -41,6 +42,7 @@ complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "help"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
 ide\t'Cursor IDE composer chats (state.vscdb)'"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -l limit -d 'Keep only the N most recently updated sessions' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -l since -d 'Keep only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)' -r
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
@@ -59,6 +61,18 @@ complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l a
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l json -d 'Print the session and its messages as JSON'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
+ide\t'Cursor IDE composer chats (state.vscdb)'"
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -s n -l limit -d 'Keep only the N best matching sessions' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l context -d 'Characters of the best message to show on each side of its first match, at most 1000' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l since -d 'Search only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l color -d 'When to use color' -r -f -a "auto\t''
+always\t''
+never\t''"
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l json -d 'Print a JSON array of the matching sessions, best first'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l format -d 'Output file format' -r -f -a "md\t''
 json\t''
 jsonl\t''
@@ -69,6 +83,7 @@ complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
 ide\t'Cursor IDE composer chats (state.vscdb)'"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l limit -d 'Export only the N most recently updated of the selected sessions' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l since -d 'Export only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)' -r
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
@@ -93,10 +108,11 @@ always\t''
 never\t''"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show export healthcheck completions man help" -f -a "list" -d 'List sessions, most recently updated first'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show export healthcheck completions man help" -f -a "show" -d 'Show messages from a session'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show export healthcheck completions man help" -f -a "export" -d 'Export sessions to files'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show export healthcheck completions man help" -f -a "healthcheck" -d 'Check that session stores can be found and loaded'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show export healthcheck completions man help" -f -a "completions" -d 'Print a shell completion script'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show export healthcheck completions man help" -f -a "man" -d 'Print a man page in roff format'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show export healthcheck completions man help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "list" -d 'List sessions, most recently updated first'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "show" -d 'Show messages from a session'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "search" -d 'Find the sessions whose messages hold every word of a query'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "export" -d 'Export sessions to files'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "healthcheck" -d 'Check that session stores can be found and loaded'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "completions" -d 'Print a shell completion script'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "man" -d 'Print a man page in roff format'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'

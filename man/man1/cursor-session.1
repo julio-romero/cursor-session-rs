@@ -52,6 +52,9 @@ List sessions, most recently updated first
 cursor\-session\-show(1)
 Show messages from a session
 .TP
+cursor\-session\-search(1)
+Find the sessions whose messages hold every word of a query
+.TP
 cursor\-session\-export(1)
 Export sessions to files
 .TP
@@ -67,6 +70,7 @@ cursor\-session list
 cursor\-session list \-\-source agent \-\-limit 10
 cursor\-session show f4eea6d2
 cursor\-session show f4eea6d2 \-\-json | jq \-r \*(Aq.messages[].content\*(Aq
+cursor\-session search retry backoff \-\-since 30d
 cursor\-session export \-\-format md \-\-session\-id f4eea6d2
 .fi
 .RE

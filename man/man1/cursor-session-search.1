@@ -1,0 +1,93 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cursor-session-search 1 "" "cursor-session 0.3.0" "User Commands"
+.SH NAME
+cursor\-session\-search \- Find the sessions whose messages hold every word of a query
+.SH SYNOPSIS
+\fBcursor\-session search\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-n\fR|\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-context\fR] [\fB\-\-since\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIQUERY\fR> 
+.SH DESCRIPTION
+Find the sessions whose messages hold every word of a query.
+.PP
+Every term must appear somewhere in a session\*(Aqs messages, in any order and
+any case (Unicode\-aware). A word with spaces in it, as the shell passes
+"connection pool", and a phrase in double quotes inside the query, as in
+\*(Aq"connection pool" timeout\*(Aq, are one term, whose words match with any
+whitespace between them. Every term is matched as written, never as a
+pattern. Titles are not searched. Put \-\- before a query that starts with \-.
+.PP
+Sessions with every term in one message come first, then those with more
+matching messages, then the most recently updated. Each result shows the
+message with the most terms, cut around its first match, with the matches
+highlighted when color is on.
+.SH OPTIONS
+.TP
+\fB\-\-source\fR \fI<SOURCE>\fR
+Only read this store; the other one is never opened
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+agent: Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)
+.IP \(bu 2
+ide: Cursor IDE composer chats (state.vscdb)
+.RE
+.TP
+\fB\-n\fR, \fB\-\-limit\fR \fI<N>\fR
+Keep only the N best matching sessions
+.TP
+\fB\-\-context\fR \fI<CHARS>\fR [default: 60]
+Characters of the best message to show on each side of its first match, at most 1000
+.TP
+\fB\-\-since\fR \fI<DURATION>\fR
+Search only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)
+.TP
+\fB\-\-json\fR
+Print a JSON array of the matching sessions, best first
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fIQUERY\fR>
+Terms that must all appear in a session\*(Aqs messages; a quoted "phrase" is one term (put \-\- before a term that starts with \-)
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-\-storage\fR \fI<PATH>\fR
+Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the storage paths in use and the rows and files that were skipped to stderr
+.TP
+\fB\-\-color\fR \fI<WHEN>\fR [default: auto]
+When to use color
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.SH EXAMPLES
+.RS 4
+.nf
+cursor\-session search retry backoff
+cursor\-session search "connection pool" timeout \-\-since 30d
+cursor\-session search migration \-\-source ide \-n 5 \-\-context 120
+cursor\-session search flaky ci \-\-json | jq \-r \*(Aq.[].id\*(Aq
+cursor\-session search \-\- \-\-force\-with\-lease
+.fi
+.RE
+.SH "EXIT STATUS"
+.RS 4
+.nf
+0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+1  Error: no sessions match, unreadable storage
+2  Usage error: unknown flag, invalid value, a query without terms or with more than 64
+.fi
+.RE

@@ -4,7 +4,7 @@
 .SH NAME
 cursor\-session\-export \- Export sessions to files
 .SH SYNOPSIS
-\fBcursor\-session export\fR [\fB\-\-format\fR] [\fB\-\-storage\fR] [\fB\-\-out\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-session\-id\fR] [\fB\-\-workspace\fR] [\fB\-\-source\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBcursor\-session export\fR [\fB\-\-format\fR] [\fB\-\-storage\fR] [\fB\-\-out\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-session\-id\fR] [\fB\-\-workspace\fR] [\fB\-\-source\fR] [\fB\-\-limit\fR] [\fB\-\-since\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Export sessions to files
 .SH OPTIONS
@@ -51,6 +51,9 @@ ide: Cursor IDE composer chats (state.vscdb)
 \fB\-\-limit\fR \fI<N>\fR
 Export only the N most recently updated of the selected sessions
 .TP
+\fB\-\-since\fR \fI<DURATION>\fR
+Export only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)
+.TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)
 .SH "GLOBAL OPTIONS"
@@ -81,6 +84,7 @@ never
 cursor\-session export
 cursor\-session export \-\-format json \-\-session\-id f4eea6d2 \-\-out sessions
 cursor\-session export \-\-workspace ~/src/billing\-api \-\-limit 5
+cursor\-session export \-\-since 2w \-\-format json
 .fi
 .RE
 .SH "EXIT STATUS"

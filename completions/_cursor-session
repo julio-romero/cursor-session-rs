@@ -37,6 +37,7 @@ _arguments "${_arguments_options[@]}" : \
 '--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
 ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '--limit=[Keep only the N most recently updated sessions]:N:_default' \
+'--since=[Keep only the sessions updated within this long\: a number and s, m, h, d or w (30d, 12h)]:DURATION:_default' \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
 '--json[Print a JSON array of session summaries]' \
@@ -62,6 +63,24 @@ ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 ':session_id -- Session ID, or a unique prefix of one (case-insensitive):_default' \
 && ret=0
 ;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+'--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
+ide\:"Cursor IDE composer chats (state.vscdb)"))' \
+'-n+[Keep only the N best matching sessions]:N:_default' \
+'--limit=[Keep only the N best matching sessions]:N:_default' \
+'--context=[Characters of the best message to show on each side of its first match, at most 1000]:CHARS:_default' \
+'--since=[Search only the sessions updated within this long\: a number and s, m, h, d or w (30d, 12h)]:DURATION:_default' \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'--json[Print a JSON array of the matching sessions, best first]' \
+'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'*::query -- Terms that must all appear in a session'\''s messages; a quoted "phrase" is one term (put -- before a term that starts with -):_default' \
+&& ret=0
+;;
 (export)
 _arguments "${_arguments_options[@]}" : \
 '--format=[Output file format]:FORMAT:(md json jsonl yaml)' \
@@ -71,6 +90,7 @@ _arguments "${_arguments_options[@]}" : \
 '--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
 ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '(--session-id)--limit=[Export only the N most recently updated of the selected sessions]:N:_default' \
+'(--session-id)--since=[Export only the sessions updated within this long\: a number and s, m, h, d or w (30d, 12h)]:DURATION:_default' \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
 '-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
@@ -131,6 +151,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (export)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -165,6 +189,7 @@ _cursor-session_commands() {
     local commands; commands=(
 'list:List sessions, most recently updated first' \
 'show:Show messages from a session' \
+'search:Find the sessions whose messages hold every word of a query' \
 'export:Export sessions to files' \
 'healthcheck:Check that session stores can be found and loaded' \
 'completions:Print a shell completion script' \
@@ -193,6 +218,7 @@ _cursor-session__subcmd__help_commands() {
     local commands; commands=(
 'list:List sessions, most recently updated first' \
 'show:Show messages from a session' \
+'search:Find the sessions whose messages hold every word of a query' \
 'export:Export sessions to files' \
 'healthcheck:Check that session stores can be found and loaded' \
 'completions:Print a shell completion script' \
@@ -231,6 +257,11 @@ _cursor-session__subcmd__help__subcmd__man_commands() {
     local commands; commands=()
     _describe -t commands 'cursor-session help man commands' commands "$@"
 }
+(( $+functions[_cursor-session__subcmd__help__subcmd__search_commands] )) ||
+_cursor-session__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help search commands' commands "$@"
+}
 (( $+functions[_cursor-session__subcmd__help__subcmd__show_commands] )) ||
 _cursor-session__subcmd__help__subcmd__show_commands() {
     local commands; commands=()
@@ -245,6 +276,11 @@ _cursor-session__subcmd__list_commands() {
 _cursor-session__subcmd__man_commands() {
     local commands; commands=()
     _describe -t commands 'cursor-session man commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__search_commands] )) ||
+_cursor-session__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session search commands' commands "$@"
 }
 (( $+functions[_cursor-session__subcmd__show_commands] )) ||
 _cursor-session__subcmd__show_commands() {

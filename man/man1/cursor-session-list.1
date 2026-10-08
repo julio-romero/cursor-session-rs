@@ -4,7 +4,7 @@
 .SH NAME
 cursor\-session\-list \- List sessions, most recently updated first
 .SH SYNOPSIS
-\fBcursor\-session list\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBcursor\-session list\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-since\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 List sessions, most recently updated first
 .SH OPTIONS
@@ -24,6 +24,9 @@ ide: Cursor IDE composer chats (state.vscdb)
 .TP
 \fB\-\-limit\fR \fI<N>\fR
 Keep only the N most recently updated sessions
+.TP
+\fB\-\-since\fR \fI<DURATION>\fR
+Keep only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)
 .TP
 \fB\-\-json\fR
 Print a JSON array of session summaries
@@ -57,6 +60,7 @@ never
 .nf
 cursor\-session list
 cursor\-session list \-\-source ide \-\-limit 5
+cursor\-session list \-\-since 7d
 cursor\-session list \-\-json | jq \-r \*(Aq.[].id\*(Aq
 .fi
 .RE
