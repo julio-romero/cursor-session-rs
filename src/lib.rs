@@ -8,6 +8,7 @@ pub mod model;
 mod sqlite;
 mod tools;
 pub mod ui;
+pub mod view;
 
 pub use crate::error::{Error, Result};
 pub use crate::sqlite::remove_stale_snapshot_copies;

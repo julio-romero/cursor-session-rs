@@ -1354,9 +1354,185 @@ fn piped_json_escapes_controls_a_terminal_would_act_on() {
 
 /// The binary in a pseudo-terminal, through script(1). Windows has no
 /// script(1), and ConPTY would need a new dependency, so these run on Unix.
+/// The roles and contents of a `show --json`'s messages.
+fn messages(detail: &Value) -> Vec<(String, String)> {
+    detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let text = |key: &str| m[key].as_str().unwrap().to_string();
+            (text("role"), text("content"))
+        })
+        .collect()
+}
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(role, content)| (role.to_string(), content.to_string()))
+        .collect()
+}
+
+const LONG_RESULT_PREVIEW: &str = "long line long line long line long line long line long line \
+     long line long line long line long line long line long line…";
+
+#[test]
+fn show_only_selects_roles_and_adds_tool_calls_on_request() {
+    let fixture = tools();
+    let detail = |args: &[&str]| json(&ok(&fixture, &[&["show"][..], args, &["--json"]].concat()));
+    let final_answer = format!(
+        "It is configured in src/config.rs.{}",
+        " Details follow.".repeat(20)
+    );
+    let long_result = "long line ".repeat(40).trim_end().to_string();
+
+    let all = detail(&[AGENT_TOOLS_ID, "--only", "user,assistant,tool"]);
+    assert_eq!(
+        messages(&all),
+        pairs(&[
+            ("user", "Where is langfuse configured?"),
+            ("assistant", "Let me search."),
+            ("tool", r#"Grep {"pattern":"langfuse"}"#),
+            ("tool", "src/config.rs:12: langfuse_host"),
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", &long_result),
+            ("assistant", &final_answer),
+        ])
+    );
+    // The summary stays the whole session's, tools left out.
+    let default = detail(&[AGENT_TOOLS_ID]);
+    assert_eq!(all["message_count"], 3);
+    assert_eq!(all["token_estimate"], default["token_estimate"]);
+    assert_eq!(messages(&default).len(), 3);
+    // Roles in any order and repeated flags select the same messages.
+    for only in [
+        &["--only", "tool,user,assistant"][..],
+        &["--only", "tool", "--only", "user,assistant"],
+    ] {
+        assert_eq!(detail(&[&[AGENT_TOOLS_ID][..], only].concat()), all);
+    }
+    // Without tool, it is what show prints by default.
+    let chat = detail(&[AGENT_TOOLS_ID, "--only", "user,assistant"]);
+    assert_eq!(chat, default);
+
+    let tools_only = detail(&[AGENT_TOOLS_ID, "--only", "tool"]);
+    assert_eq!(messages(&tools_only), messages(&all)[2..6]);
+    assert!(
+        tools_only["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["timestamp"].is_null())
+    );
+
+    let ide = detail(&[IDE_TOOLS_ID, "--only", "assistant,tool"]);
+    assert_eq!(
+        messages(&ide),
+        pairs(&[
+            ("assistant", "Listing them."),
+            ("tool", r#"list_dir {"relative_workspace_path":"."}"#),
+            ("tool", r#"{"files":["Cargo.toml","src"]}"#),
+            ("assistant", "Two entries."),
+        ])
+    );
+    assert_eq!(ide["message_count"], 3);
+    assert_eq!(
+        messages(&detail(&[IDE_TOOLS_ID, "--only", "user"])),
+        pairs(&[("user", "List the files.")])
+    );
+}
+
+#[test]
+fn show_short_cuts_messages_and_previews_tool_results() {
+    let fixture = tools();
+    let detail = |args: &[&str]| json(&ok(&fixture, &[&["show"][..], args, &["--json"]].concat()));
+    let short = detail(&[AGENT_TOOLS_ID, "--only", "assistant,tool", "--short"]);
+    let final_answer = format!(
+        "It is configured in src/config.rs.{}",
+        " Details follow.".repeat(20)
+    );
+    let cut: String = final_answer.chars().take(300).collect();
+    assert_eq!(
+        messages(&short),
+        pairs(&[
+            ("assistant", "Let me search."),
+            ("tool", r#"Grep {"pattern":"langfuse"}"#),
+            ("tool", "src/config.rs:12: langfuse_host"),
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", LONG_RESULT_PREVIEW),
+            ("assistant", &format!("{cut}…")),
+        ])
+    );
+    assert_eq!(
+        short["token_estimate"],
+        detail(&[AGENT_TOOLS_ID])["token_estimate"]
+    );
+    // --limit counts the messages printed.
+    let last = detail(&[AGENT_TOOLS_ID, "--only", "tool", "--short", "--limit", "2"]);
+    assert_eq!(
+        messages(&last),
+        pairs(&[
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", LONG_RESULT_PREVIEW),
+        ])
+    );
+    // Short messages are printed whole.
+    let ide = detail(&[IDE_TOOLS_ID, "--short"]);
+    assert_eq!(ide, detail(&[IDE_TOOLS_ID]));
+
+    // The plain layout too, with the omitted messages counted among those
+    // selected.
+    let shown = ok(
+        &fixture,
+        &[
+            "show",
+            AGENT_TOOLS_ID,
+            "--only",
+            "tool",
+            "--short",
+            "--limit",
+            "2",
+        ],
+    );
+    assert!(
+        shown.ends_with(&format!(
+            "messages:  3\ntokens:    ~{} (estimate)\n\n\
+             2 earlier message(s) omitted. Use --limit N or --all to see more.\n\n\
+             [tool]\nRead {{\"path\":\"src/config.rs\"}}\n\n[tool]\n{LONG_RESULT_PREVIEW}\n",
+            short["token_estimate"]
+        )),
+        "{shown}"
+    );
+}
+
+#[test]
+fn show_prints_by_default_what_it_always_has() {
+    for fixture in [standard(), tools()] {
+        for session in fixture.load().sessions {
+            let id = session.id.as_str();
+            let plain = ok(&fixture, &["show", id]);
+            assert_eq!(
+                plain,
+                ui::render_show(&session, &session.messages, None, false)
+            );
+            let detail = ok(&fixture, &["show", id, "--json"]);
+            assert_eq!(
+                json(&detail)["messages"].as_array().unwrap().len(),
+                session.messages.len()
+            );
+            // Messages of an unknown role show only without --only.
+            if session.messages.iter().all(|m| m.role != "unknown") {
+                let selected = ok(&fixture, &["show", id, "--only", "user,assistant"]);
+                assert_eq!(selected, plain, "{id}");
+            }
+        }
+    }
+}
+
 #[test]
 fn listed_token_estimates_are_those_show_prints() {
-    for fixture in [standard()] {
+    for fixture in [standard(), tools()] {
         let listed = json(&ok(&fixture, &["list", "--json"]));
         let listed = listed.as_array().unwrap();
         assert!(listed.iter().any(|s| s["source"] == "agent"));
@@ -1364,7 +1540,7 @@ fn listed_token_estimates_are_those_show_prints() {
         for summary in listed {
             let id = summary["id"].as_str().unwrap();
             let estimate = &summary["token_estimate"];
-            for extra in [&[][..], &["--limit", "1"]] {
+            for extra in [&[][..], &["--only", "tool", "--short", "--limit", "1"]] {
                 let args = [&["show", id, "--json"][..], extra].concat();
                 assert_eq!(
                     &json(&ok(&fixture, &args))["token_estimate"],
@@ -1386,6 +1562,32 @@ fn listed_token_estimates_are_those_show_prints() {
                 .sum();
             assert_eq!(estimate.as_u64().unwrap(), chars.div_ceil(4) as u64, "{id}");
         }
+    }
+}
+
+#[test]
+fn show_only_takes_known_roles() {
+    let fixture = standard();
+    for only in ["", "bot", "user,", "user,,assistant", "unknown"] {
+        let output = run(&fixture, &["show", AGENT_ID, "--only", only]);
+        assert_eq!(output.status.code(), Some(2), "{only:?}");
+        assert_eq!(stdout(&output), "");
+        assert!(stderr(&output).starts_with("error: "), "{only:?}");
+    }
+    let output = run(&fixture, &["show", AGENT_ID, "--only"]);
+    assert_eq!(output.status.code(), Some(2));
+    let help = ok(&fixture, &["show", "-h"]);
+    for text in [
+        "--only <ROLES>",
+        "--short",
+        "[possible values: user, assistant, tool]",
+        "show f4eea6d2 --only user,assistant --short",
+    ] {
+        assert!(help.contains(text), "{text}: {help}");
+    }
+    for command in ["list", "show"] {
+        let help = ok(&fixture, &[command, "--help"]);
+        assert!(help.contains("ceil(characters / 4)"), "{help}");
     }
 }
 
@@ -1575,5 +1777,23 @@ mod tty {
             &env,
         ));
         assert_eq!(shown["messages"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn terminal_default_counts_only_the_messages_selected() {
+        let fixture = long_session_fixture(25);
+        let session = fixture.load().sessions.remove(0);
+        let answers: Vec<Message> = session
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .cloned()
+            .collect();
+        assert_eq!(answers.len(), 25);
+        let env = [("NO_COLOR", "1")];
+        assert_eq!(
+            run_tty(&fixture, &["show", "long", "--only", "assistant"], &env),
+            ui::render_show(&session, &answers[5..], Some(5), false)
+        );
     }
 }

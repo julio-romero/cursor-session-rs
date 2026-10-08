@@ -195,12 +195,29 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
 
     let newest_agent = agent_id(AGENT_SESSIONS - 1);
     let newest_chat = chat_id(IDE_CHATS - 1);
-    let commands: [&[&str]; 6] = [
+    let commands: [&[&str]; 9] = [
         &["list"],
         &["list", "--json"],
         &["list", "--limit", "5"],
         &["show", &newest_agent, "--json"],
         &["show", &newest_chat],
+        // Tool calls are read only for these, and only for this session.
+        &[
+            "show",
+            &newest_agent,
+            "--only",
+            "user,assistant,tool",
+            "--json",
+        ],
+        &["show", &newest_agent, "--only", "tool", "--short"],
+        &[
+            "show",
+            &newest_chat,
+            "--only",
+            "assistant,tool",
+            "--short",
+            "--json",
+        ],
         &["healthcheck"],
     ];
     // A child starts out with this peak on Linux, so it must leave room.
@@ -251,6 +268,18 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
             chars.div_ceil(4) as u64
         );
     }
+    // Each assistant message of the transcript makes a tool call.
+    let tools = json(&ok(
+        &fixture,
+        &["show", &newest_agent, "--only", "tool", "--json"],
+    ));
+    let tools = tools["messages"].as_array().unwrap();
+    assert!(!tools.is_empty());
+    assert!(
+        tools
+            .iter()
+            .all(|m| m["content"] == r#"Read {"path":"src/lib.rs"}"#)
+    );
 }
 
 fn ok(fixture: &Fixture, args: &[&str]) -> String {

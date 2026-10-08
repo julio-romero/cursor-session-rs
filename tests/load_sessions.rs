@@ -733,3 +733,64 @@ fn load_options_default_to_both_stores() {
     let both = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
     assert_eq!(both.sessions.len(), STANDARD_IDS.len());
 }
+
+#[test]
+fn tool_messages_join_the_others_only_when_asked_for() {
+    use cursor_session::view::{Role, View};
+    use cursor_session::{ReadOptions, load_messages_with};
+
+    let fixture = tools();
+    let full = fixture.load();
+    assert!(full.warnings.is_empty() && full.notices.is_empty());
+    for summary in &full.summaries {
+        let plain = get(&full.sessions, &summary.id);
+        assert!(plain.messages.iter().all(|m| !m.is_tool()));
+        let with = load_messages_with(summary, ReadOptions { tools: true }).unwrap();
+        let tools: Vec<&Message> = with.messages.iter().filter(|m| m.is_tool()).collect();
+        assert!(tools.len() >= 2, "{}", summary.id);
+        // The rest, and what the session counts, is the same.
+        let others: Vec<&str> = with
+            .messages
+            .iter()
+            .filter(|m| !m.is_tool())
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(others, contents(plain));
+        assert_eq!(with.message_count, summary.message_count);
+        assert_eq!(with.content_chars, summary.content_chars);
+        assert_eq!(with.token_estimate(), summary.token_estimate());
+
+        // A view without tool selects what is read without them.
+        let chat = View {
+            only: vec![Role::User, Role::Assistant],
+            short: false,
+        };
+        let selected: Vec<String> = chat
+            .apply(with.messages.clone())
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(selected, contents(plain));
+    }
+    let agent = load_messages_with(
+        full.summaries
+            .iter()
+            .find(|s| s.id == AGENT_TOOLS_ID)
+            .unwrap(),
+        ReadOptions { tools: true },
+    )
+    .unwrap();
+    let roles: Vec<&str> = agent.messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(
+        roles,
+        [
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "tool",
+            "tool",
+            "assistant"
+        ]
+    );
+}
