@@ -140,9 +140,59 @@ pub fn search_session(
     query: &Query,
     context: usize,
 ) -> Result<Option<Hit>> {
+    search_with(summary, query, context, |visit| {
+        visit_messages(summary, visit)
+    })
+}
+
+/// The sessions of `sessions` that match `query`, as [`search_session`]
+/// finds each, in no particular order. Sessions are searched one after
+/// another, and only one session's messages are held at a time. The chats of
+/// an IDE database are all read in one read of it, which opens it, or copies
+/// it when it must be read from a copy, once.
+pub fn search_sessions(
+    sessions: &[SessionSummary],
+    query: &Query,
+    context: usize,
+) -> Result<Vec<Hit>> {
+    let mut hits = Vec::new();
+    let mut chats: Vec<(&std::path::Path, Vec<&SessionSummary>)> = Vec::new();
+    for summary in sessions {
+        match &summary.messages_at {
+            MessagesAt::IdeChat { db, .. } => {
+                match chats.iter_mut().find(|(path, _)| *path == db.as_path()) {
+                    Some((_, of_db)) => of_db.push(summary),
+                    None => chats.push((db.as_path(), vec![summary])),
+                }
+            }
+            _ => hits.extend(search_session(summary, query, context)?),
+        }
+    }
+    for (db, of_db) in chats {
+        let found = ide::map_chats(db, &of_db, |summary, messages| {
+            search_with(summary, query, context, |visit| {
+                messages.into_iter().for_each(visit);
+                Ok(())
+            })
+        })?;
+        for hit in found {
+            hits.extend(hit?);
+        }
+    }
+    Ok(hits)
+}
+
+/// Searches the messages that `read` gives the visitor it is passed, those
+/// of the session `summary` lists (see [`search_session`]).
+fn search_with(
+    summary: &SessionSummary,
+    query: &Query,
+    context: usize,
+    read: impl FnOnce(&mut dyn FnMut(Message)) -> Result<()>,
+) -> Result<Option<Hit>> {
     let mut scorer = Scorer::new(query.terms().len());
     let mut best = None;
-    visit_messages(summary, &mut |message| {
+    read(&mut |message| {
         if scorer.push(search::matches(query.set(), &message.content)) {
             best = Some(search::snippet(query, &message, context));
         }

@@ -12,7 +12,7 @@ use cursor_session::since::Since;
 use cursor_session::ui;
 use cursor_session::{
     Error, LoadOptions, Loaded, filter_workspace, load_messages, load_session, load_sessions,
-    search_session,
+    search_sessions,
 };
 use serde::Serialize;
 
@@ -212,12 +212,8 @@ fn cmd_search(
     };
     let loaded = load(paths, &load_opts, args.verbose, err)?;
     // One session's messages at a time; each match keeps only its snippet.
-    let mut hits = Vec::new();
-    for summary in &loaded.sessions {
-        let hit = search_session(summary, &query, args.context)
-            .with_context(|| format!("could not search session {}", ui::one_line(&summary.id)))?;
-        hits.extend(hit);
-    }
+    let hits = search_sessions(&loaded.sessions, &query, args.context)
+        .context("could not search the sessions")?;
     if hits.is_empty() {
         bail!("no sessions match");
     }

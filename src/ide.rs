@@ -527,12 +527,54 @@ pub(crate) fn read_messages(
 ) -> Result<Vec<Message>> {
     with_readonly(db_path, |conn| {
         let _snapshot = transaction(conn, db_path)?;
-        let Some(composer) = read_composer(conn, db_path, key, blob_key)? else {
-            return Ok(Vec::new());
-        };
-        let bubbles = chat_bubbles(conn, db_path, id, &mut Rows::default())?;
-        Ok(chat_messages(composer, bubbles, &mut 0).messages)
+        chat_of_row(conn, db_path, key, blob_key, id)
     })
+}
+
+/// Calls `map` with each of `chats`, sessions of the database at `db_path`,
+/// and its messages, the messages [`read_messages`] returns, one chat at a
+/// time, so that no more than one chat's messages are held. The chats are
+/// all read in one read of the database, so that it is opened, or copied
+/// when it must be (see [`with_readonly`]), once for all of them. That read
+/// may run again from the first chat; only the last run's results are
+/// returned, so `map` must not keep anything itself.
+pub(crate) fn map_chats<T>(
+    db_path: &Path,
+    chats: &[&SessionSummary],
+    mut map: impl FnMut(&SessionSummary, Vec<Message>) -> T,
+) -> Result<Vec<T>> {
+    with_readonly(db_path, |conn| {
+        let _snapshot = transaction(conn, db_path)?;
+        let mut mapped = Vec::with_capacity(chats.len());
+        for &chat in chats {
+            let messages = match &chat.messages_at {
+                MessagesAt::IdeChat { key, blob_key, .. } => {
+                    chat_of_row(conn, db_path, key, *blob_key, &chat.id)?
+                }
+                _ => Vec::new(),
+            };
+            mapped.push(map(chat, messages));
+            #[cfg(test)]
+            AFTER_CHAT.with_borrow_mut(|hook| hook.as_mut().map(|hook| hook()));
+        }
+        Ok(mapped)
+    })
+}
+
+/// The messages of the chat whose row has `key`, with the messages stored
+/// for chat `id`, read in the transaction open on `conn`.
+fn chat_of_row(
+    conn: &Connection,
+    db_path: &Path,
+    key: &str,
+    blob_key: bool,
+    id: &str,
+) -> Result<Vec<Message>> {
+    let Some(composer) = read_composer(conn, db_path, key, blob_key)? else {
+        return Ok(Vec::new());
+    };
+    let bubbles = chat_bubbles(conn, db_path, id, &mut Rows::default())?;
+    Ok(chat_messages(composer, bubbles, &mut 0).messages)
 }
 
 fn transaction<'a>(conn: &'a Connection, db_path: &Path) -> Result<rusqlite::Transaction<'a>> {
@@ -865,6 +907,11 @@ thread_local! {
     /// messages without a chat.
     #[allow(clippy::type_complexity)]
     static AFTER_CHATS: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// Runs on this thread after [`map_chats`] maps each chat.
+    #[allow(clippy::type_complexity)]
+    pub(crate) static AFTER_CHAT: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1320,6 +1367,57 @@ mod tests {
         let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["c1"]);
         assert_eq!(load(&path).0.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn search_reads_every_chat_in_one_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        let mut rows = well_formed(false);
+        rows.extend([
+            (
+                "composerData:c2",
+                SqlValue::Text(
+                    r#"{"composerId":"c2","fullConversationHeadersOnly":[{"bubbleId":"b1","type":1}]}"#
+                        .into(),
+                ),
+            ),
+            (
+                "bubbleId:c2:b1",
+                SqlValue::Text(r#"{"bubbleId":"b1","type":1,"text":"needle"}"#.into()),
+            ),
+        ]);
+        create_db(&path, &rows);
+        let index = index(&path, &mut Vec::new()).unwrap().unwrap();
+        let ids: Vec<&str> = index.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["c1", "c2"]);
+        let query = crate::search::parse_query("needle").unwrap();
+        let found = |sessions: &[SessionSummary]| -> Vec<String> {
+            crate::search_sessions(sessions, &query, 60)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.session.id)
+                .collect()
+        };
+
+        // Cursor has the database open and writes while the chats are read.
+        let writer = Connection::open(&path).unwrap();
+        writer.pragma_update(None, "journal_mode", "wal").unwrap();
+        AFTER_CHAT.set(Some(Box::new(move || {
+            writer
+                .execute(
+                    r#"UPDATE cursorDiskKV SET value = '{"bubbleId":"b1","type":1,"text":"gone"}'
+                       WHERE key = 'bubbleId:c2:b1'"#,
+                    [],
+                )
+                .unwrap();
+        })));
+        // Read in one read, the second chat is as it was when the first was:
+        // the database was opened, or copied, once for every chat.
+        let during = found(&index.sessions);
+        AFTER_CHAT.set(None);
+        assert_eq!(during, ["c2"]);
+        assert!(found(&index.sessions).is_empty());
     }
 
     #[test]

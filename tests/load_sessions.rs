@@ -837,3 +837,28 @@ fn search_session_scores_the_messages_show_lists() {
         );
     }
 }
+
+#[test]
+fn searching_all_sessions_finds_what_searching_each_finds() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let loaded = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    for text in ["PLAN here", "question", "the", "nowhere-to-be-found"] {
+        let query = parse_query(text).unwrap();
+        let mut each: Vec<(String, usize, String)> = loaded
+            .sessions
+            .iter()
+            .filter_map(|summary| cursor_session::search_session(summary, &query, 60).unwrap())
+            .map(|hit| (hit.session.id, hit.score.best_message, hit.snippet.text))
+            .collect();
+        let mut all: Vec<(String, usize, String)> =
+            cursor_session::search_sessions(&loaded.sessions, &query, 60)
+                .unwrap()
+                .into_iter()
+                .map(|hit| (hit.session.id, hit.score.best_message, hit.snippet.text))
+                .collect();
+        each.sort();
+        all.sort();
+        assert_eq!(all, each, "{text}");
+    }
+}
