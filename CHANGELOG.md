@@ -99,10 +99,12 @@ off to another agent when a Cursor session runs out of credits.
 
 ### Performance
 
-- Release binaries are stripped and built with one codegen unit. With that
-  change alone, the aarch64-apple-darwin binary went from 4,022,224 bytes
-  (0.3.0) to 3,271,120 bytes (-18.7%); the completion and man page generators
-  then add back about 380 KB before stripping.
+- Release binaries are stripped and built with one codegen unit, which alone
+  cut the aarch64-apple-darwin binary from 4,022,224 bytes (0.3.0) to
+  3,271,120 bytes (-18.7%). The new commands then add about 1.7 MB, mostly
+  `search`'s regex dependency (about 1.3 MB; the completion and man page
+  generators add about 235 KB), so the 0.4.0 binary is 4,987,392 bytes, +24%
+  over 0.3.0.
 - `handoff` copies through `pbcopy` on macOS rather than a clipboard crate, so
   no command links AppKit; linking it would have added about 2.5 MB of peak
   memory to every command on macOS.
