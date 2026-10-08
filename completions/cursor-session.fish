@@ -28,7 +28,7 @@ complete -c cursor-session -n "__fish_cursor_session_needs_command" -l storage -
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c cursor-session -n "__fish_cursor_session_needs_command" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_needs_command" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -s V -l version -d 'Print version'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "list" -d 'List sessions, most recently updated first'
@@ -49,7 +49,7 @@ complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -l c
 always\t''
 never\t''"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -l json -d 'Print a JSON array of session summaries'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
 ide\t'Cursor IDE composer chats (state.vscdb)'"
@@ -64,7 +64,7 @@ never\t''"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l all -d 'Print the full transcript'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l short -d 'Cut each message to its first 300 characters, and tool calls and results to a one-line preview'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l json -d 'Print the session and its messages as JSON'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
 ide\t'Cursor IDE composer chats (state.vscdb)'"
@@ -76,7 +76,7 @@ complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l
 always\t''
 never\t''"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -l json -d 'Print a JSON array of the matching sessions, best first'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand search" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l format -d 'Output file format' -r -f -a "md\t''
 json\t''
@@ -93,7 +93,7 @@ complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
 ide\t'Cursor IDE composer chats (state.vscdb)'"
@@ -105,25 +105,25 @@ always\t''
 never\t''"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l stdout -d 'Print the transcript instead of copying it'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l no-preamble -d 'Start the transcript with the first message'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand healthcheck" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand healthcheck" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand healthcheck" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand healthcheck" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand healthcheck" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand completions" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand completions" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand completions" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand completions" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand completions" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
 never\t''"
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -s v -l verbose -d 'Print the storage paths in use and the rows, lines and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff healthcheck completions man help" -f -a "list" -d 'List sessions, most recently updated first'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff healthcheck completions man help" -f -a "show" -d 'Show messages from a session'

@@ -17,8 +17,8 @@ _cursor-session() {
     _arguments "${_arguments_options[@]}" : \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 '-V[Print version]' \
@@ -41,8 +41,8 @@ ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
 '--json[Print a JSON array of session summaries]' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
@@ -60,8 +60,8 @@ tool\:"Tool calls and their results"))' \
 '--all[Print the full transcript]' \
 '--short[Cut each message to its first 300 characters, and tool calls and results to a one-line preview]' \
 '--json[Print the session and its messages as JSON]' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 ':session_id -- Session ID, or a unique prefix of one (case-insensitive):_default' \
@@ -78,8 +78,8 @@ ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
 '--json[Print a JSON array of the matching sessions, best first]' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 '*::query -- Terms that must all appear in a session'\''s messages; a quoted "phrase" is one term (put -- before a term that starts with -):_default' \
@@ -97,8 +97,8 @@ ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '(--session-id)--since=[Export only the sessions updated within this long\: a number and s, m, h, d or w (30d, 12h)]:DURATION:_default' \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
@@ -113,8 +113,8 @@ ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '--color=[When to use color]:WHEN:(auto always never)' \
 '--stdout[Print the transcript instead of copying it]' \
 '--no-preamble[Start the transcript with the first message]' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 ':session_id -- Session ID, or a unique prefix of one (case-insensitive):_default' \
@@ -124,8 +124,8 @@ ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 _arguments "${_arguments_options[@]}" : \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
@@ -134,8 +134,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 ':shell -- The shell to complete in:(bash zsh fish)' \
@@ -145,8 +145,8 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
-'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
-'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
 '::command -- Print the page of this command instead of the overview:_default' \
