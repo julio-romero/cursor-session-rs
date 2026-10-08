@@ -1,5 +1,5 @@
-//! Listing a large history holds no session's messages: peak memory stays
-//! far below the size of the history.
+//! Listing, searching or exporting a large history holds no more than one
+//! session's messages: peak memory stays far below the size of the history.
 //!
 //! On Linux a spawned child starts out with the peak memory of the process
 //! that spawned it, so this test writes the history a row at a time and checks
@@ -195,15 +195,37 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
 
     let newest_agent = agent_id(AGENT_SESSIONS - 1);
     let newest_chat = chat_id(IDE_CHATS - 1);
-    let commands: [&[&str]; 8] = [
+    let commands: [&[&str]; 15] = [
         &["list"],
         &["list", "--json"],
         &["list", "--limit", "5"],
+        &["list", "--since", "10000d"],
+        &["list", "--since", "10000d", "--json", "--limit", "5"],
         &["show", &newest_agent, "--json"],
         &["show", &newest_chat],
         &["healthcheck"],
         &["completions", "bash"],
         &["man"],
+        // Every message of every session is searched, one at a time.
+        &["search", "retry", "JITTER"],
+        &[
+            "search",
+            "\"backs off exponentially\"",
+            "question",
+            "--json",
+        ],
+        &[
+            "search",
+            "question",
+            "--since",
+            "10000d",
+            "--context",
+            "500",
+        ],
+        &["search", "reply", "-n", "3", "--source", "ide"],
+        &[
+            "export", "--since", "10000d", "--limit", "2", "--out", "exports",
+        ],
     ];
     // A child starts out with this peak on Linux, so it must leave room.
     let own = own_peak_rss();
@@ -223,6 +245,17 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
             history as usize / MB
         );
     }
+
+    // Every session matched, each with its best message.
+    let found = json(&ok(&fixture, &["search", "retry", "jitter", "--json"]));
+    assert_eq!(found.as_array().unwrap().len(), AGENT_SESSIONS + IDE_CHATS);
+    assert!(
+        found
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| hit["all_terms_in_one_message"] == true)
+    );
 
     // Counted without holding the messages, the counts are the messages.
     let listed = json(&ok(&fixture, &["list", "--json"]));

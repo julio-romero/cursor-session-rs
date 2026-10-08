@@ -5,6 +5,8 @@ pub mod export;
 pub mod ide;
 mod json;
 pub mod model;
+pub mod search;
+pub mod since;
 mod sqlite;
 pub mod ui;
 
@@ -14,7 +16,8 @@ pub use crate::sqlite::remove_stale_snapshot_copies;
 use std::collections::HashSet;
 
 use crate::detect::StoragePaths;
-use crate::model::{MessagesAt, Session, SessionSummary, Source};
+use crate::model::{Message, MessagesAt, Session, SessionSummary, Source};
+use crate::search::{Hit, Query, Scorer};
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadOptions {
@@ -23,15 +26,20 @@ pub struct LoadOptions {
     /// Count the messages of only this many sessions, the most recently
     /// updated; `None` counts them all.
     pub limit: Option<usize>,
+    /// Only the sessions updated at or after this time, in epoch
+    /// milliseconds, by the time `list` shows (see [`since::updated_since`]),
+    /// before `limit` applies. Sessions without a time are left out.
+    pub updated_since: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Loaded {
-    /// Newest first, with their message counts: every session, or the
-    /// `limit` most recently updated.
+    /// Newest first, with their message counts: every session, or those
+    /// updated since `updated_since`, of which only the `limit` most recently
+    /// updated.
     pub sessions: Vec<SessionSummary>,
-    /// The IDs of every session, newest first, also of those `limit` leaves
-    /// out.
+    /// The IDs of every session, newest first, also of those `limit` and
+    /// `updated_since` leave out.
     pub ids: Vec<String>,
     /// Rows and files that were skipped; the binary prints them with `-v`.
     pub warnings: Vec<String>,
@@ -42,21 +50,24 @@ pub struct Loaded {
 
 /// Lists the sessions of both stores, or of `opts.source`, newest first, with
 /// how many messages each has. No session's messages are kept: transcripts
-/// are read a line at a time and IDE chats one at a time. With `opts.limit`,
-/// only the messages of the sessions listed are counted.
+/// are read a line at a time and IDE chats one at a time. With `opts.limit`
+/// or `opts.updated_since`, only the messages of the sessions listed are
+/// counted.
 pub fn load_sessions(paths: &StoragePaths, opts: &LoadOptions) -> Result<Loaded> {
     let (mut warnings, mut notices) = (Vec::new(), Vec::new());
     let index = Index::new(paths, opts.source, &mut warnings, &mut notices)?;
-    let ids: Vec<String> = model::merge_sessions(index.sessions())
-        .into_iter()
-        .map(|session| session.id)
-        .collect();
-    let listed: HashSet<&str> = ids
+    let merged = model::merge_sessions(index.sessions());
+    let listed: HashSet<&str> = merged
         .iter()
+        .filter(|session| {
+            opts.updated_since
+                .is_none_or(|cutoff| since::updated_since(session, cutoff))
+        })
         .take(opts.limit.unwrap_or(usize::MAX))
-        .map(String::as_str)
+        .map(|session| session.id.as_str())
         .collect();
     let counted = index.count(&|id| listed.contains(id), &mut warnings, &mut notices)?;
+    let ids = merged.into_iter().map(|session| session.id).collect();
     Ok(Loaded {
         sessions: model::merge_sessions(counted),
         ids,
@@ -101,6 +112,121 @@ pub fn load_messages(summary: &SessionSummary) -> Result<Session> {
         }
     };
     Ok(Session::new(summary.clone(), messages))
+}
+
+/// Calls `visit` with each message of the session `summary` lists, in order:
+/// the messages [`load_messages`] returns, without holding them all. A
+/// transcript is read a line at a time; an IDE chat is read whole, as one
+/// chat at a time is.
+pub fn visit_messages(summary: &SessionSummary, visit: &mut dyn FnMut(Message)) -> Result<()> {
+    match &summary.messages_at {
+        MessagesAt::Nowhere => Ok(()),
+        MessagesAt::Transcript(path) => agent::visit_jsonl(path, visit),
+        MessagesAt::IdeChat { db, key, blob_key } => {
+            ide::read_messages(db, key, *blob_key, &summary.id)?
+                .into_iter()
+                .for_each(visit);
+            Ok(())
+        }
+    }
+}
+
+/// Searches the messages of the session `summary` lists for `query` (see
+/// [`search`]), reading them one at a time and keeping only the snippet of
+/// the best one, `context` characters on each side of its first match.
+/// `None` when some term is in none of its messages.
+pub fn search_session(
+    summary: &SessionSummary,
+    query: &Query,
+    context: usize,
+) -> Result<Option<Hit>> {
+    search_with(summary, query, context, |visit| {
+        visit_messages(summary, visit)
+    })
+}
+
+/// What [`search_sessions`] found.
+#[derive(Debug, Default)]
+pub struct Searched {
+    /// The sessions that match, in no particular order.
+    pub hits: Vec<Hit>,
+    /// Sessions that were skipped, such as one whose transcript could no
+    /// longer be read; the binary prints them with `-v`, as it prints what
+    /// [`load_sessions`] skipped.
+    pub warnings: Vec<String>,
+}
+
+/// The sessions of `sessions` that match `query`, as [`search_session`]
+/// finds each. Sessions are searched one after another, and only one
+/// session's messages are held at a time. The chats of an IDE database are
+/// all read in one read of it, which opens it, or copies it when it must be
+/// read from a copy, once.
+///
+/// A transcript that cannot be read, as when Cursor removed or rotated it
+/// since it was listed, only leaves its session out, with a warning. An IDE
+/// database that cannot be read is an error, as it is for `list`.
+pub fn search_sessions(
+    sessions: &[SessionSummary],
+    query: &Query,
+    context: usize,
+) -> Result<Searched> {
+    let mut hits = Vec::new();
+    let mut unreadable = Vec::new();
+    let mut chats: Vec<(&std::path::Path, Vec<&SessionSummary>)> = Vec::new();
+    for summary in sessions {
+        match &summary.messages_at {
+            MessagesAt::IdeChat { db, .. } => {
+                match chats.iter_mut().find(|(path, _)| *path == db.as_path()) {
+                    Some((_, of_db)) => of_db.push(summary),
+                    None => chats.push((db.as_path(), vec![summary])),
+                }
+            }
+            MessagesAt::Transcript(path) => match search_session(summary, query, context) {
+                Ok(hit) => hits.extend(hit),
+                Err(err) => unreadable.push((path.clone(), err)),
+            },
+            MessagesAt::Nowhere => hits.extend(search_session(summary, query, context)?),
+        }
+    }
+    for (db, of_db) in chats {
+        let found = ide::map_chats(db, &of_db, |summary, messages| {
+            search_with(summary, query, context, |visit| {
+                messages.into_iter().for_each(visit);
+                Ok(())
+            })
+        })?;
+        for hit in found {
+            hits.extend(hit?);
+        }
+    }
+    Ok(Searched {
+        hits,
+        warnings: agent::unreadable_transcripts(&unreadable),
+    })
+}
+
+/// Searches the messages that `read` gives the visitor it is passed, those
+/// of the session `summary` lists (see [`search_session`]).
+fn search_with(
+    summary: &SessionSummary,
+    query: &Query,
+    context: usize,
+    read: impl FnOnce(&mut dyn FnMut(Message)) -> Result<()>,
+) -> Result<Option<Hit>> {
+    let mut scorer = Scorer::new(query.terms().len());
+    let mut best = None;
+    read(&mut |message| {
+        // The text `show` displays, so that a match is always in the snippet.
+        let text = search::searched_text(&message.content);
+        if scorer.push(search::matches(query.set(), &text)) {
+            best = Some(search::snippet_of(query, &message.role, &text, context));
+        }
+    })?;
+    Ok(scorer.finish().zip(best).map(|(score, snippet)| Hit {
+        session: summary.clone(),
+        score,
+        snippet,
+    }))
 }
 
 /// The sessions of the stores to load, found without counting messages.

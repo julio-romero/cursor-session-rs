@@ -733,3 +733,172 @@ fn load_options_default_to_both_stores() {
     let both = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
     assert_eq!(both.sessions.len(), STANDARD_IDS.len());
 }
+
+#[test]
+fn updated_since_lists_only_recent_sessions_and_keeps_every_id() {
+    let fixture = standard();
+    let load = |updated_since, limit| {
+        load_sessions(
+            &fixture.paths(),
+            &LoadOptions {
+                updated_since,
+                limit,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let listed = |loaded: &cursor_session::Loaded| -> Vec<String> {
+        loaded.sessions.iter().map(|s| s.id.clone()).collect()
+    };
+    // By the time the UPDATED column shows: IDE_UNTITLED_ID was only created.
+    let recent = load(Some(1_757_250_000_000), None);
+    assert_eq!(listed(&recent), [SHARED_ID, IDE_BLOB_ID, IDE_UNTITLED_ID]);
+    assert_eq!(recent.ids, STANDARD_IDS);
+    let counts: Vec<usize> = recent.sessions.iter().map(|s| s.message_count).collect();
+    assert_eq!(counts, [2, 2, 0]);
+    // The limit applies to the sessions kept.
+    let limited = load(Some(1_757_250_000_000), Some(2));
+    assert_eq!(listed(&limited), [SHARED_ID, IDE_BLOB_ID]);
+    assert_eq!(limited.ids, STANDARD_IDS);
+    // A session without any time is never recent.
+    let all = load(Some(i64::MIN), None);
+    assert_eq!(listed(&all), &STANDARD_IDS[..6]);
+    assert!(load(Some(i64::MAX), None).sessions.is_empty());
+}
+
+#[test]
+fn visiting_messages_gives_the_messages_loaded() {
+    let fixture = standard();
+    for session in fixture.load().sessions {
+        let mut visited = Vec::new();
+        cursor_session::visit_messages(&session.summary, &mut |message| visited.push(message))
+            .unwrap();
+        let contents = |messages: &[Message]| -> Vec<(String, String)> {
+            messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect()
+        };
+        assert_eq!(
+            contents(&visited),
+            contents(&session.messages),
+            "{}",
+            session.id
+        );
+    }
+}
+
+#[test]
+fn search_session_scores_the_messages_show_lists() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let query = parse_query("PLAN here").unwrap();
+    let mut found = Vec::new();
+    for session in fixture.load().sessions {
+        let Some(hit) = cursor_session::search_session(&session.summary, &query, 60).unwrap()
+        else {
+            continue;
+        };
+        // The snippet is of the message `show --json` lists at its index.
+        let best = &session.messages[hit.score.best_message];
+        assert_eq!(hit.snippet.role, best.role);
+        found.push((
+            session.id.clone(),
+            hit.score.all_in_one,
+            hit.score.matching_messages,
+            hit.snippet.text,
+        ));
+    }
+    assert_eq!(
+        found,
+        [
+            (
+                IDE_TEXT_ID.to_string(),
+                true,
+                1,
+                "Here is a plan.".to_string()
+            ),
+            (
+                AGENT_ID.to_string(),
+                true,
+                1,
+                "Here is the plan: 1. Model traces as facts. 2. Expose metrics.".to_string()
+            ),
+        ]
+    );
+    // A term in no message: no hit, also where the other terms are.
+    let missing = parse_query("plan nowhere-to-be-found").unwrap();
+    for session in fixture.load().sessions {
+        assert!(
+            cursor_session::search_session(&session.summary, &missing, 60)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn searching_all_sessions_finds_what_searching_each_finds() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let loaded = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    for text in ["PLAN here", "question", "the", "nowhere-to-be-found"] {
+        let query = parse_query(text).unwrap();
+        let mut each: Vec<(String, usize, String)> = loaded
+            .sessions
+            .iter()
+            .filter_map(|summary| cursor_session::search_session(summary, &query, 60).unwrap())
+            .map(|hit| (hit.session.id, hit.score.best_message, hit.snippet.text))
+            .collect();
+        let mut all: Vec<(String, usize, String)> =
+            cursor_session::search_sessions(&loaded.sessions, &query, 60)
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|hit| (hit.session.id, hit.score.best_message, hit.snippet.text))
+                .collect();
+        each.sort();
+        all.sort();
+        assert_eq!(all, each, "{text}");
+    }
+}
+
+#[test]
+fn a_transcript_gone_since_it_was_listed_only_leaves_its_session_out() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let loaded = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    let query = parse_query("plan").unwrap();
+    let before = cursor_session::search_sessions(&loaded.sessions, &query, 60).unwrap();
+    assert!(before.warnings.is_empty(), "{:?}", before.warnings);
+    let found = |hits: &[cursor_session::search::Hit]| {
+        let mut ids: Vec<String> = hits.iter().map(|hit| hit.session.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    assert!(found(&before.hits).contains(&AGENT_ID.to_string()));
+    // Cursor removes the transcript between listing and searching.
+    let agent = loaded
+        .sessions
+        .iter()
+        .find(|session| session.id == AGENT_ID)
+        .unwrap();
+    let MessagesAt::Transcript(path) = &agent.messages_at else {
+        panic!("{:?}", agent.messages_at);
+    };
+    fs::remove_file(path).unwrap();
+    let after = cursor_session::search_sessions(&loaded.sessions, &query, 60).unwrap();
+    let mut expected = found(&before.hits);
+    expected.retain(|id| id != AGENT_ID);
+    assert_eq!(found(&after.hits), expected);
+    assert_eq!(after.warnings.len(), 1, "{:?}", after.warnings);
+    assert!(
+        after.warnings[0].starts_with(&format!(
+            "ignored unreadable transcript {}: ",
+            path.display()
+        )),
+        "{:?}",
+        after.warnings
+    );
+}

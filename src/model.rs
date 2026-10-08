@@ -159,7 +159,7 @@ impl SessionSummary {
 
     /// The time the UPDATED column shows, which also orders the list. A time
     /// it cannot show (see [`utc`]) is taken as missing.
-    fn updated_or_created_ms(&self) -> Option<i64> {
+    pub fn updated_or_created_ms(&self) -> Option<i64> {
         let shown = |ms: Option<i64>| ms.filter(|&ms| utc(Some(ms)).is_some());
         shown(self.updated_at_ms).or(shown(self.created_at_ms))
     }

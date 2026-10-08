@@ -1,0 +1,14 @@
+---
+source: tests/snapshots.rs
+expression: "cli_stdout(&fixture, &[\"search\", \"plan\"])"
+---
+Found 3 matching session(s)
+
+d00dfeed-0000-4000-8000-000000000002  ide    2025-09-09 02:53  データパイプラインの再設計レビュー 🚀 — überprüfe den Migrationsplan für Q4 und die Rollback-Strategie (ünïcödé ✓)
+  [assistant] Ja — the rollback plan looks fine ✓
+
+c0ffee00-0000-4000-8000-000000000001  ide    2025-09-07 00:06  Dynamic table proposal
+  [assistant] Here is a plan.
+
+f4eea6d2-d2d3-41ad-b290-824445295a15  agent  2025-09-04 16:33  Langfuse Semantic Layer
+  [assistant] Here is the plan: 1. Model traces as facts. 2. Expose metrics.

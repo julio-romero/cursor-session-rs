@@ -14,7 +14,14 @@ use cursor_session::model::{Message, Session};
 use cursor_session::ui;
 use serde_json::Value;
 
-const SUBCOMMANDS: [&str; 5] = ["list", "show", "export", "healthcheck", "completions"];
+const SUBCOMMANDS: [&str; 6] = [
+    "list",
+    "show",
+    "search",
+    "export",
+    "healthcheck",
+    "completions",
+];
 
 /// The start of a usage line. clap names the program after the file it ran
 /// from, which ends in `.exe` on Windows.
@@ -1571,5 +1578,374 @@ mod tty {
             &env,
         ));
         assert_eq!(shown["messages"].as_array().unwrap().len(), 3);
+    }
+}
+
+/// An agent session `id` in workspace `/w`, updated `updated` (epoch ms), with
+/// a user message for each of `messages`.
+fn write_agent_session(fixture: &Fixture, id: &str, updated: Option<i64>, messages: &[&str]) {
+    let mut meta = serde_json::json!({"title": format!("Title {id}"), "cwd": "/w"});
+    if let Some(updated) = updated {
+        meta["createdAtMs"] = (updated - 1000).into();
+        meta["updatedAtMs"] = updated.into();
+    }
+    fixture.write_meta_json("/w", id, &meta);
+    let lines: Vec<Value> = messages
+        .iter()
+        .enumerate()
+        .map(|(n, text)| plain_message(if n % 2 == 0 { "user" } else { "assistant" }, text))
+        .collect();
+    fixture.write_transcript("w", id, Layout::Nested, &lines);
+}
+
+/// Sessions that match `alpha beta` in every way ranking tells apart.
+fn ranking_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    let day = 86_400_000;
+    let t = 1_757_000_000_000_i64;
+    // Spread out over many messages, and the newest: still last.
+    write_agent_session(
+        &fixture,
+        "spread",
+        Some(t + 9 * day),
+        &[
+            "alpha",
+            "beta",
+            "alpha again",
+            "beta again",
+            "ALPHA",
+            "more Beta",
+        ],
+    );
+    write_agent_session(
+        &fixture,
+        "one-old",
+        Some(t),
+        &["nothing", "Alpha and BETA together"],
+    );
+    write_agent_session(&fixture, "one-new", Some(t + day), &["beta alpha"]);
+    write_agent_session(
+        &fixture,
+        "one-twice",
+        Some(t - day),
+        &["alpha beta", "x", "beta, then alpha"],
+    );
+    write_agent_session(
+        &fixture,
+        "alpha-only",
+        Some(t + 5 * day),
+        &["alpha", "alpha"],
+    );
+    // No time at all: last of its kind.
+    write_agent_session(&fixture, "untimed", None, &["alpha beta"]);
+    fixture
+}
+
+#[test]
+fn search_ranks_every_term_in_one_message_first() {
+    let fixture = ranking_fixture();
+    let out = ok(&fixture, &["search", "alpha", "beta", "--json"]);
+    let hits = json(&out);
+    assert_eq!(
+        ids(&hits),
+        ["one-twice", "one-new", "one-old", "untimed", "spread"]
+    );
+    assert_eq!(
+        keys(&hits[0]),
+        [
+            "id",
+            "title",
+            "source",
+            "workspace",
+            "created_at",
+            "updated_at",
+            "matching_messages",
+            "all_terms_in_one_message",
+            "snippet"
+        ]
+    );
+    assert_eq!(keys(&hits[0]["snippet"]), ["role", "text", "message_index"]);
+    assert_eq!(hits[0]["matching_messages"], 2);
+    assert_eq!(hits[0]["all_terms_in_one_message"], true);
+    assert_eq!(hits[0]["title"], "Title one-twice");
+    assert_eq!(hits[0]["source"], "agent");
+    assert_eq!(hits[0]["workspace"], "/w");
+    assert_eq!(hits[0]["updated_at"], "2025-09-03T15:33:20Z");
+    // The best message is the first with the most terms; its index is the
+    // one `show --json` lists it at.
+    assert_eq!(
+        hits[2]["snippet"],
+        serde_json::json!({"role": "assistant", "text": "Alpha and BETA together", "message_index": 1})
+    );
+    let shown = json(&ok(&fixture, &["show", "one-old", "--json"]));
+    assert_eq!(shown["messages"][1]["content"], "Alpha and BETA together");
+    assert_eq!(hits[3]["updated_at"], Value::Null);
+    assert_eq!(hits[4]["matching_messages"], 6);
+    assert_eq!(hits[4]["all_terms_in_one_message"], false);
+    assert_eq!(hits[4]["snippet"]["message_index"], 0);
+
+    // Any order of the terms and any case; `-n` keeps the best.
+    let best = json(&ok(
+        &fixture,
+        &["search", "BETA", "Alpha", "-n", "2", "--json"],
+    ));
+    assert_eq!(ids(&best), ["one-twice", "one-new"]);
+    // One quoted phrase is one term.
+    let phrase = json(&ok(&fixture, &["search", "\"alpha beta\"", "--json"]));
+    assert_eq!(ids(&phrase), ["one-twice", "untimed"]);
+    let source = json(&ok(
+        &fixture,
+        &["search", "alpha", "--source", "agent", "--json"],
+    ));
+    assert_eq!(ids(&source).len(), 6);
+}
+
+#[test]
+fn search_prints_one_block_per_session() {
+    let fixture = ranking_fixture();
+    let out = ok(&fixture, &["search", "together", "--context", "6"]);
+    assert_eq!(
+        out,
+        "Found 1 matching session(s)\n\
+         \n\
+         one-old  agent  2025-09-04 15:33  Title one-old\n  \
+         [assistant] …BETA together\n"
+    );
+    // Piped output is plain unless color is forced; matches are then bold red.
+    let colored = ok(&fixture, &["search", "together", "--color", "always"]);
+    assert!(
+        colored.contains("\u{1b}[1m\u{1b}[31mtogether\u{1b}[39m\u{1b}[0m"),
+        "{colored:?}"
+    );
+    let output = fixture
+        .cmd()
+        .args(["search", "together", "--color", "auto"])
+        .env("TERM", "xterm-256color")
+        .output()
+        .unwrap();
+    assert!(!stdout(&output).contains('\u{1b}'));
+}
+
+#[test]
+fn search_phrases_are_words_with_spaces_and_match_any_whitespace() {
+    let fixture = Fixture::new();
+    let t = 1_757_000_000_000_i64;
+    write_agent_session(&fixture, "spaced", Some(t), &["big   spaced\tphrase here"]);
+    write_agent_session(&fixture, "apart", Some(t + 1000), &["phrase, spaced -x"]);
+    let found = |args: &[&str]| -> Vec<String> {
+        let args: Vec<&str> = ["search"].iter().chain(args).copied().collect();
+        json(&ok(&fixture, &args))
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| hit["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // The shell passes a quoted phrase as one word with a space in it.
+    assert_eq!(found(&["spaced phrase", "--json"]), ["spaced"]);
+    assert_eq!(found(&["\"big spaced\"", "--json"]), ["spaced"]);
+    assert_eq!(found(&["spaced", "phrase", "--json"]), ["apart", "spaced"]);
+    assert_eq!(found(&["--json", "--", "-x"]), ["apart"]);
+    // The snippet shows the phrase found, on one line.
+    let out = ok(&fixture, &["search", "SPACED PHRASE", "--color", "always"]);
+    assert!(
+        out.contains("big \u{1b}[1m\u{1b}[31mspaced phrase\u{1b}[39m\u{1b}[0m here"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn search_without_matches_exits_1() {
+    let fixture = ranking_fixture();
+    for args in [
+        &["search", "nowhere"][..],
+        &["search", "alpha", "nowhere", "--json"],
+        &["search", "\"beta alpha again\""],
+        &["search", "alpha.beta"],
+    ] {
+        assert_eq!(
+            fails(&fixture, args),
+            "error: no sessions match\n",
+            "{args:?}"
+        );
+    }
+    // Titles are not searched.
+    assert_eq!(
+        fails(&fixture, &["search", "Title"]),
+        "error: no sessions match\n"
+    );
+}
+
+#[test]
+fn search_usage_errors_exit_2() {
+    let fixture = ranking_fixture();
+    let many: Vec<String> = (0..65).map(|n| format!("t{n}")).collect();
+    let many: Vec<&str> = std::iter::once("search")
+        .chain(many.iter().map(String::as_str))
+        .collect();
+    for args in [
+        &["search"][..],
+        &["search", ""],
+        &["search", "  "],
+        &["search", "\"\""],
+        &many,
+        &["search", "x", "--context", "-1"],
+        &["search", "x", "--context", "many"],
+        &["search", "x", "--context", "1001"],
+        &["search", "x", "-n", "0"],
+        &["search", "x", "--since", "0d"],
+        &["search", "x", "--since", "30"],
+        &["search", "x", "--since", "1y"],
+        &["search", "x", "--source", "web"],
+        &["list", "--since", "yesterday"],
+        &["export", "--since", "1d", "--session-id", "one-old"],
+    ] {
+        let output = run(&fixture, args);
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {err}");
+        assert_eq!(stdout(&output), "", "{args:?}");
+        assert!(err.starts_with("error: "), "{args:?}: {err}");
+        assert!(err.contains("try '--help'"), "{args:?}: {err}");
+    }
+    let output = run(&fixture, &["search", "\"\"", "\" \""]);
+    assert!(
+        stderr(&output).starts_with(&format!(
+            "error: invalid value '\"\" \" \"' for '<QUERY>...': the query has no terms\n\n{}",
+            usage("search [OPTIONS] <QUERY>...")
+        )),
+        "{}",
+        stderr(&output)
+    );
+    let output = run(&fixture, &many);
+    assert!(stderr(&output).contains(": the query has 65 terms; at most 64 are allowed\n"));
+}
+
+/// Sessions updated an hour, ten days and a hundred days ago, and one without
+/// any time.
+fn recent_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    let now = chrono::Utc::now().timestamp_millis();
+    let hour = 3_600_000;
+    write_agent_session(&fixture, "hour", Some(now - hour), &["needle one"]);
+    write_agent_session(&fixture, "days", Some(now - 240 * hour), &["needle ten"]);
+    write_agent_session(
+        &fixture,
+        "months",
+        Some(now - 2400 * hour),
+        &["needle hundred"],
+    );
+    write_agent_session(&fixture, "never", None, &["needle"]);
+    fixture
+}
+
+#[test]
+fn since_keeps_only_recently_updated_sessions() {
+    let fixture = recent_fixture();
+    let listed = |args: &[&str]| ids(&json(&ok(&fixture, args))).join(" ");
+    assert_eq!(listed(&["list", "--json"]), "hour days months never");
+    assert_eq!(listed(&["list", "--json", "--since", "2d"]), "hour");
+    assert_eq!(listed(&["list", "--json", "--since", "30d"]), "hour days");
+    assert_eq!(listed(&["list", "--json", "--since", "720h"]), "hour days");
+    assert_eq!(
+        listed(&["list", "--json", "--since", "1000w"]),
+        "hour days months"
+    );
+    // The limit applies to the sessions kept.
+    assert_eq!(
+        listed(&["list", "--json", "--since", "30d", "--limit", "1"]),
+        "hour"
+    );
+    assert_eq!(ok(&fixture, &["list", "--json", "--since", "1m"]), "[]\n");
+    assert!(ok(&fixture, &["list", "--since", "2d"]).starts_with("Found 1 session(s)\n"));
+
+    assert_eq!(
+        listed(&["search", "needle", "--json", "--since", "30d"]),
+        "hour days"
+    );
+    assert_eq!(
+        listed(&["search", "needle", "--json"]),
+        "hour days months never"
+    );
+    assert_eq!(
+        fails(&fixture, &["search", "needle", "--since", "1m"]),
+        "error: no sessions match\n"
+    );
+
+    let out = ok(&fixture, &["export", "--since", "30d", "--out", "recent"]);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert_eq!(
+        exported_files(&fixture.home().join("recent")),
+        ["days.md", "hour.md"]
+    );
+    let out = ok(
+        &fixture,
+        &["export", "--since", "30d", "--limit", "1", "--out", "one"],
+    );
+    assert_eq!(
+        exported_files(&fixture.home().join("one")),
+        ["hour.md"],
+        "{out}"
+    );
+    assert_eq!(
+        fails(&fixture, &["export", "--since", "1m", "--out", "none"]),
+        "error: no sessions updated in the last 1m to export\n"
+    );
+    assert_eq!(
+        fails(
+            &fixture,
+            &[
+                "export",
+                "--since",
+                "1m",
+                "--workspace",
+                "/w",
+                "--out",
+                "none"
+            ]
+        ),
+        "error: no sessions of workspace `/w` were updated in the last 1m\n"
+    );
+}
+
+#[test]
+fn a_closed_pipe_ends_search_output_quietly() {
+    let fixture = Fixture::new();
+    let mut rows = Vec::new();
+    for n in 0..1500_i64 {
+        let id = format!("{n:08x}-0000-4000-8000-{n:012x}");
+        let text = format!("needle {n} {}", "lorem ipsum ".repeat(40));
+        rows.push(bubble(
+            &id,
+            "b1",
+            &text_bubble("b1", 1, &text),
+            Stored::Text,
+        ));
+        rows.push(composer(
+            &id,
+            &composer_json(
+                &id,
+                "Chat",
+                1_757_000_000_000 + n,
+                1_757_000_000_000 + n,
+                &[("b1", 1)],
+            ),
+            Stored::Text,
+        ));
+    }
+    fixture.write_ide_db(Journal::Delete, &rows);
+    for args in [
+        &["search", "needle", "--context", "200"][..],
+        &["search", "needle", "--json"],
+    ] {
+        let full = run(&fixture, args);
+        assert!(full.status.success(), "{args:?}");
+        assert!(
+            full.stdout.len() > 256 * 1024,
+            "{args:?}: {}",
+            full.stdout.len()
+        );
+        let output = hang_up_early(&fixture, args);
+        assert!(output.status.success(), "{args:?}: {:?}", output.status);
+        assert_eq!(stderr(&output), "", "{args:?}");
     }
 }

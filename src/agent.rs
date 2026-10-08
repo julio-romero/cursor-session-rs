@@ -330,6 +330,19 @@ fn subdirs(dir: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
     })
 }
 
+/// The warning that `list` gives for transcripts it could not read, for the
+/// transcripts of `failed`, each with the error reading it gave; none when
+/// `failed` is empty.
+pub(crate) fn unreadable_transcripts(failed: &[(PathBuf, Error)]) -> Vec<String> {
+    let mut unreadable = Unreadable::new("transcript");
+    for (path, err) in failed {
+        unreadable.add(path, reason(err));
+    }
+    let mut warnings = Vec::new();
+    unreadable.report(&mut warnings);
+    warnings
+}
+
 /// The underlying cause of `err`, for warnings that already name the file.
 fn reason(err: &Error) -> String {
     if let Error::Snapshot { source, .. } = err {
@@ -716,8 +729,14 @@ fn transcript_path(dir: &Path, id: &str, warnings: &mut Vec<String>) -> Option<P
 /// The messages of the transcript at `path`.
 pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
     let mut messages = Vec::new();
-    scan_transcript(path, Some(&mut messages), false)?;
+    visit_jsonl(path, &mut |message| messages.push(message))?;
     Ok(messages)
+}
+
+/// Calls `visit` with each message of the transcript at `path` in order, the
+/// messages [`read_jsonl`] returns, holding no more than one line at a time.
+pub fn visit_jsonl(path: &Path, visit: &mut dyn FnMut(Message)) -> Result<()> {
+    scan_transcript(path, Some(visit), false).map(drop)
 }
 
 /// What a transcript holds, as far as it was read.
@@ -743,7 +762,7 @@ impl Scan {
 /// counted. With `until_first`, reading stops at the first message.
 fn scan_transcript(
     path: &Path,
-    mut keep: Option<&mut Vec<Message>>,
+    mut keep: Option<&mut dyn FnMut(Message)>,
     until_first: bool,
 ) -> Result<Scan> {
     let io_err = |source| Error::Io {
@@ -766,8 +785,8 @@ fn scan_transcript(
             Line::Message(message) => {
                 scan.expected += 1;
                 scan.messages += 1;
-                if let (Some(keep), Some(message)) = (keep.as_deref_mut(), message) {
-                    keep.push(message);
+                if let (Some(keep), Some(message)) = (keep.as_mut(), message) {
+                    keep(message);
                 }
                 if until_first {
                     break;

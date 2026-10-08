@@ -9,7 +9,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::model::{Message, Session, SessionSummary, Source};
 
 pub const DEFAULT_TTY_SHOW_LIMIT: usize = 20;
-const ID_FULL_WIDTH: usize = 36;
+/// The width of a full session ID, a UUID.
+pub const ID_FULL_WIDTH: usize = 36;
 /// UUID prefix lengths that do not split a hex group: 8, 8-4, 8-4-4, 8-4-4-4, full.
 const ID_PREFIX_WIDTHS: [usize; 5] = [8, 13, 18, 23, 36];
 const SOURCE_WIDTH: usize = 6;
@@ -72,6 +73,13 @@ fn distinct_id_width(ids: &[&str], width: usize) -> usize {
                 .all(|id| seen.insert(shorten_id(id, candidate).to_lowercase()))
         })
         .unwrap_or(ID_FULL_WIDTH)
+}
+
+/// How many leading ID characters the table of `list` shows in a terminal
+/// `term_width` wide: as many as fit, and more where needed to tell apart
+/// the IDs `among`.
+pub fn shown_id_width(among: &[&str], term_width: usize) -> usize {
+    distinct_id_width(among, id_prefix_width(term_width))
 }
 
 pub fn shorten_id(id: &str, width: usize) -> String {
@@ -602,7 +610,7 @@ fn render_list_table(
         header_cell("TITLE"),
     ]);
 
-    let id_width = distinct_id_width(among, id_prefix_width(term_width));
+    let id_width = shown_id_width(among, term_width);
     let max_title = title_width_beside(term_width, id_width);
     for session in sessions {
         table.add_row(vec![

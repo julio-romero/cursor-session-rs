@@ -7,14 +7,17 @@ use anyhow::{Context, Result, bail};
 use cursor_session::detect::{self, Env, StoragePaths};
 use cursor_session::export::{self, Format};
 use cursor_session::model::{self, Session, SessionSummary, Source, SummaryJson};
+use cursor_session::search::{self, Hit, HitJson};
+use cursor_session::since::Since;
 use cursor_session::ui;
 use cursor_session::{
     Error, LoadOptions, Loaded, filter_workspace, load_messages, load_session, load_sessions,
+    search_sessions,
 };
 use serde::Serialize;
 
 use crate::cli::{
-    Commands, CompletionsArgs, ExportArgs, HealthcheckArgs, ListArgs, ManArgs, ShowArgs,
+    Commands, CompletionsArgs, ExportArgs, HealthcheckArgs, ListArgs, ManArgs, SearchArgs, ShowArgs,
 };
 use crate::generate;
 use crate::output::OutputOpts;
@@ -31,6 +34,7 @@ pub fn run(
     match command {
         Commands::List(args) => cmd_list(paths, opts, out, err, &args),
         Commands::Show(args) => cmd_show(paths, opts, out, err, &args),
+        Commands::Search(args) => cmd_search(paths, opts, out, err, &args),
         Commands::Export(args) => cmd_export(paths, out, err, &args),
         Commands::Healthcheck(args) => cmd_healthcheck(paths, out, err, &args),
         Commands::Completions(args) => cmd_completions(out, &args),
@@ -113,6 +117,11 @@ fn print_warnings(warnings: &[String], verbose: bool, err: &mut dyn Write) -> Re
     Ok(())
 }
 
+/// The earliest updated time `--since` keeps, from the clock now.
+fn cutoff(since: Option<Since>) -> Option<i64> {
+    since.map(|since| since.cutoff(chrono::Utc::now().timestamp_millis()))
+}
+
 fn write_json(out: &mut dyn Write, value: &impl Serialize) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     writeln!(out, "{}", escape_controls(&json))?;
@@ -148,6 +157,7 @@ fn cmd_list(
     let load_opts = LoadOptions {
         source: args.source,
         limit: args.limit,
+        updated_since: cutoff(args.since),
     };
     let loaded = load(paths, &load_opts, args.verbose, err)?;
     if args.json {
@@ -189,6 +199,49 @@ fn cmd_show(
     Ok(())
 }
 
+fn cmd_search(
+    paths: &StoragePaths,
+    opts: &OutputOpts,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    args: &SearchArgs,
+) -> Result<()> {
+    let query = search::parse_query(&search::query_text(&args.query))?;
+    if paths.is_empty() {
+        return Err(Error::NoStorage.into());
+    }
+    let load_opts = LoadOptions {
+        source: args.source,
+        updated_since: cutoff(args.since),
+        ..Default::default()
+    };
+    let loaded = load(paths, &load_opts, args.verbose, err)?;
+    // One session's messages at a time; each match keeps only its snippet.
+    let searched = search_sessions(&loaded.sessions, &query, args.context)
+        .context("could not search the sessions")?;
+    print_warnings(&searched.warnings, args.verbose, err)?;
+    let hits = searched.hits;
+    if hits.is_empty() {
+        bail!("no sessions match");
+    }
+    let mut hits = search::rank(hits);
+    if let Some(limit) = args.limit {
+        hits.truncate(limit);
+    }
+    if args.json {
+        let entries: Vec<HitJson> = hits.iter().map(Hit::json).collect();
+        return write_json(out, &entries);
+    }
+    // The IDs shown must tell apart all the sessions `show` looks through.
+    let ids: Vec<&str> = loaded.ids.iter().map(String::as_str).collect();
+    write!(
+        out,
+        "{}",
+        search::render(&hits, &ids, opts.color, opts.width)
+    )?;
+    Ok(())
+}
+
 fn cmd_export(
     paths: &StoragePaths,
     out: &mut dyn Write,
@@ -207,6 +260,7 @@ fn cmd_export(
         None => {
             let load_opts = LoadOptions {
                 source: args.source,
+                updated_since: cutoff(args.since),
                 ..Default::default()
             };
             (None, Some(load(paths, &load_opts, args.verbose, err)?))
@@ -222,6 +276,14 @@ fn cmd_export(
         (None, None) => Vec::new(),
     };
     if selected.is_empty() {
+        if let Some(since) = args.since {
+            match &workspace {
+                Some(workspace) => {
+                    bail!("no sessions of workspace `{workspace}` were updated in the last {since}")
+                }
+                None => bail!("no sessions updated in the last {since} to export"),
+            }
+        }
         if let Some(workspace) = workspace {
             return Err(Error::NoWorkspaceMatch {
                 workspace: workspace.into_owned(),
