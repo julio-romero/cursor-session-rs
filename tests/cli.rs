@@ -1871,7 +1871,7 @@ fn handoff_prints_what_show_short_prints_of_user_and_assistant() {
                 let warning = if shown.is_empty() {
                     format!(
                         "warning: session {id} has no user or assistant messages; \
-                         nothing to hand off\n"
+                         the transcript is empty\n"
                     )
                 } else {
                     String::new()
@@ -2049,7 +2049,7 @@ fn handoff_of_no_message_warns() {
     );
     let warning = format!(
         "warning: session {AGENT_TOOLS_ID} has no user or assistant messages; \
-         nothing to hand off\n"
+         the transcript is empty\n"
     );
     // Without --stdout the binary would reach for the system clipboard if
     // this broke, so that case is a unit test with a fake clipboard.

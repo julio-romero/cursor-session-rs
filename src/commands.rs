@@ -307,12 +307,18 @@ fn cmd_handoff(
     let transcript = handoff::render_handoff(&messages, &opts);
     if transcript.messages == 0 {
         // A transcript of no message would only replace what the clipboard
-        // holds; it is printed only when asked for.
+        // holds; it is printed only when asked for. The warning says which
+        // of the two happened.
         if args.stdout {
             write!(out, "{}", transcript.text)?;
         }
+        let what = if args.stdout {
+            "the transcript is empty"
+        } else {
+            "nothing to hand off, so the clipboard was left alone"
+        };
         let warning = format!(
-            "session {} has no user or assistant messages; nothing to hand off",
+            "session {} has no user or assistant messages; {what}",
             session.id
         );
         print_warnings(&[warning], true, err)?;
@@ -1418,17 +1424,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_with_ide(dir.path());
         let empty = "c0ffee00-0000-4000-8000-000000000002";
-        let warning = format!(
-            "warning: session {empty} has no user or assistant messages; nothing to hand off\n"
-        );
+        let warning = |what: &str| {
+            format!("warning: session {empty} has no user or assistant messages; {what}\n")
+        };
         let mut clipboard = FakeClipboard::working();
         let (result, out, err) = run_with(&paths, &["handoff", empty], &mut clipboard);
         result.unwrap();
         assert!(clipboard.copied.is_empty());
         assert_eq!(out, "");
-        assert_eq!(err, warning);
+        assert_eq!(
+            err,
+            warning("nothing to hand off, so the clipboard was left alone")
+        );
 
-        // --stdout still prints what there is, with the same warning.
+        // --stdout still prints what there is, and the warning says so.
         let (result, out, err) = run_with(
             &paths,
             &["handoff", empty, "--stdout", "--preamble", "Go on."],
@@ -1440,7 +1449,7 @@ mod tests {
             out,
             "Go on.\n\n[end of transcript: 0 messages, ~16 tokens (estimate)]\n"
         );
-        assert_eq!(err, warning);
+        assert_eq!(err, warning("the transcript is empty"));
     }
 
     #[test]
