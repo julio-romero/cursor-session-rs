@@ -1987,29 +1987,37 @@ fn handoff_of_no_message_warns() {
     assert_eq!(stderr(&output), warning);
 }
 
-/// Without a display on Linux, `handoff` prints the transcript and warns,
-/// without trying the clipboard.
+/// Without an X11 display on Linux, `handoff` prints the transcript and
+/// warns, without trying the clipboard; on Wayland the warning names
+/// wl-copy.
 #[cfg(target_os = "linux")]
 #[test]
 fn handoff_without_a_display_prints_the_transcript() {
     let fixture = standard();
-    let output = fixture
-        .cmd()
-        .args(["handoff", AGENT_ID])
-        .env_remove("DISPLAY")
-        .env("WAYLAND_DISPLAY", "")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert_eq!(
-        stdout(&output),
-        ok(&fixture, &["handoff", AGENT_ID, "--stdout"])
-    );
-    assert_eq!(
-        stderr(&output),
-        "warning: could not copy to the clipboard (no display: neither DISPLAY nor \
-         WAYLAND_DISPLAY is set); printing the transcript\n"
-    );
+    let printed = ok(&fixture, &["handoff", AGENT_ID, "--stdout"]);
+    for (wayland, reason) in [
+        ("", "no display: DISPLAY is not set"),
+        (
+            "wayland-0",
+            "no X11 display: DISPLAY is not set; on Wayland, pipe --stdout into wl-copy",
+        ),
+    ] {
+        let output = fixture
+            .cmd()
+            .args(["handoff", AGENT_ID])
+            .env_remove("DISPLAY")
+            .env("WAYLAND_DISPLAY", wayland)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(stdout(&output), printed);
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "warning: could not copy to the clipboard ({reason}); printing the transcript\n"
+            )
+        );
+    }
 }
 
 /// The binary in a pseudo-terminal, through script(1). Windows has no

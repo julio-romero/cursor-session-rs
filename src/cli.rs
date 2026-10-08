@@ -47,7 +47,8 @@ Examples:
   cursor-session handoff f4eea6d2 --limit 30
   cursor-session handoff f4eea6d2 --stdout > handoff.txt
   cursor-session handoff f4eea6d2 --preamble 'Continue this refactor in the same repository.'
-  cursor-session handoff f4eea6d2 --no-preamble --stdout";
+  cursor-session handoff f4eea6d2 --no-preamble --stdout
+  cursor-session handoff f4eea6d2 --stdout | wl-copy";
 
 const SERVE_CLIPBOARD_EXAMPLES: &str = "\
 Examples:
@@ -150,11 +151,14 @@ pub enum Commands {
     /// a transcript from a Cursor session that ran out of credits. Continue
     /// from where it ended; do not summarize it back."
     ///
-    /// It is copied to the system clipboard. Where there is no clipboard (on
-    /// Linux without DISPLAY or WAYLAND_DISPLAY) or copying fails, it is
-    /// printed to stdout instead, with a warning on stderr, and the command
-    /// still succeeds. On Linux the text is served by a copy of this program
-    /// in the background until something else is copied.
+    /// It is copied to the system clipboard: on macOS with /usr/bin/pbcopy;
+    /// on Linux through X11, where a copy of this program serves it in the
+    /// background until something else is copied, for at most 12 hours.
+    /// Without an X11 display (DISPLAY not set, as in a Wayland session
+    /// without XWayland, where `--stdout | wl-copy` copies it), or when
+    /// copying fails, it is printed to stdout instead, with a warning on
+    /// stderr, and the command still succeeds. A session without user or
+    /// assistant messages is not copied; a warning says so.
     #[command(
         after_help = HANDOFF_EXAMPLES,
         after_long_help = format!("{HANDOFF_EXAMPLES}\n\n{EXIT_CODES}")
@@ -162,7 +166,7 @@ pub enum Commands {
     Handoff(HandoffArgs),
     /// Keep the text on stdin on the clipboard until something else is copied
     ///
-    /// `handoff` runs this in the background on Linux, where the program that
+    /// `handoff` runs this in the background on X11, where the program that
     /// copied text must keep serving it. It prints `ok` once the text is on
     /// the clipboard, or `error: ...`.
     #[command(
