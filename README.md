@@ -234,9 +234,10 @@ are kept in [`bench/results`](bench/results).
 ## Similar tools
 
 - [iksnae/cursor-session](https://github.com/iksnae/cursor-session) (Go) has
-  the same commands and inspired this one. Its README lists reading Agent CLI
-  sessions as Linux-only; this one reads both the Agent CLI and the IDE store
-  on macOS, Linux and Windows, and opens every database read-only.
+  the same core commands (list, show, export, healthcheck) and inspired this
+  one. Its README lists reading Agent CLI sessions as Linux-only; this one
+  reads both the Agent CLI and the IDE store on macOS, Linux and Windows, and
+  never opens Cursor's databases for writing.
 - [S2thend/cursor-history](https://github.com/S2thend/cursor-history) (Node.js)
   adds search, backup and restore, and migrating sessions between workspaces,
   which changes Cursor's data; this one is a single binary with no runtime to
