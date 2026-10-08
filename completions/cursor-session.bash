@@ -414,7 +414,7 @@ _cursor__session() {
             return 0
             ;;
         cursor__session__subcmd__show)
-            opts="-v -h --source --limit --all --json --storage --verbose --color --help"
+            opts="-v -h --source --limit --all --only --short --json --storage --verbose --color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -426,6 +426,10 @@ _cursor__session() {
                     ;;
                 --limit)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --only)
+                    COMPREPLY=($(compgen -W "user assistant tool" -- "${cur}"))
                     return 0
                     ;;
                 --storage)

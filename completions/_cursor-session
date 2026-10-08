@@ -52,9 +52,13 @@ _arguments "${_arguments_options[@]}" : \
 '--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
 ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '(--all)--limit=[Print only the last N messages \[default\: 20 in a terminal, all when piped or with --json\]]:N:_default' \
+'*--only=[Print only messages of these roles, comma-separated; \`tool\` adds the tool calls and results, which are left out otherwise, a call that failed or was stopped marked \`(error)\` or \`(cancelled)\`. --limit counts only the messages printed]:ROLES:((user\:"What the user wrote"
+assistant\:"The model'\''s replies"
+tool\:"Tool calls and their results"))' \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
 '--all[Print the full transcript]' \
+'--short[Cut each message to its first 300 characters, and tool calls and results to a one-line preview]' \
 '--json[Print the session and its messages as JSON]' \
 '-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
 '--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \

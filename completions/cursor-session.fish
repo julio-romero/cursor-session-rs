@@ -53,11 +53,15 @@ complete -c cursor-session -n "__fish_cursor_session_using_subcommand list" -s h
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
 ide\t'Cursor IDE composer chats (state.vscdb)'"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l limit -d 'Print only the last N messages [default: 20 in a terminal, all when piped or with --json]' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l only -d 'Print only messages of these roles, comma-separated; `tool` adds the tool calls and results, which are left out otherwise, a call that failed or was stopped marked `(error)` or `(cancelled)`. --limit counts only the messages printed' -r -f -a "user\t'What the user wrote'
+assistant\t'The model\'s replies'
+tool\t'Tool calls and their results'"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
 never\t''"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l all -d 'Print the full transcript'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l short -d 'Cut each message to its first 300 characters, and tool calls and results to a one-line preview'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -l json -d 'Print the session and its messages as JSON'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand show" -s h -l help -d 'Print help (see more with \'--help\')'

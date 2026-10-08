@@ -7,6 +7,8 @@ cursor\-session\-list \- List sessions, most recently updated first
 \fBcursor\-session list\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-since\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 List sessions, most recently updated first
+.PP
+TOKENS (`token_estimate` in \-\-json) estimates how many tokens the messages `show` prints by default take: ceil(characters / 4). It is an estimate, not any model\*(Aqs tokenizer count. A terminal\*(Aqs table has the column from 79 columns wide; piped output and \-\-json always have it.
 .SH OPTIONS
 .TP
 \fB\-\-source\fR \fI<SOURCE>\fR
