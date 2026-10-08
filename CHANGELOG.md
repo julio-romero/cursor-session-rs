@@ -124,26 +124,26 @@ off to another agent when a Cursor session runs out of credits.
   bytes (-18.7%); the new commands then more than use that up (`search` with
   its regex dependency, built with only the Unicode case-folding and Perl-class
   tables it needs, and the completion and man page generators), so the 0.4.0
-  binary is 4,756,240 bytes, +18% over 0.3.0.
+  binary is 4,772,768 bytes, +19% over 0.3.0.
 - `handoff` copies through `pbcopy` on macOS rather than a clipboard crate, so
   no command links AppKit; linking it would have added about 2.5 MB of peak
   memory to every command on macOS.
 - The whole release against 0.3.0 at 1000 sessions, release builds run in
   turns by hyperfine on the same store (Apple silicon, macOS): wall time from
-  -2.3% to +3.8%, and peak memory about 0.8 MB higher on every command, +5.5%
+  +0.1% to +3.5%, and peak memory about 0.8 MB higher on every command, +6.1%
   to +8.1%, which tracks the larger binary rather than the data read.
 
   | Command                  | 0.3.0              | 0.4.0              |
   | ------------------------ | -----------------: | -----------------: |
-  | `agent list --limit 5`   | 37.5 ms, 10.4 MB   | 37.6 ms, 11.2 MB   |
-  | `agent list --json`      | 311.0 ms, 10.9 MB  | 320.0 ms, 11.8 MB  |
-  | `agent show (1 session)` | 36.7 ms, 10.8 MB   | 37.2 ms, 11.5 MB   |
-  | `ide list --limit 5`     | 15.0 ms, 13.0 MB   | 15.2 ms, 13.7 MB   |
-  | `ide list --json`        | 200.0 ms, 14.0 MB  | 207.6 ms, 14.8 MB  |
-  | `ide show (1 session)`   | 15.3 ms, 13.0 MB   | 15.0 ms, 13.7 MB   |
+  | `agent list --limit 5`   | 37.0 ms, 10.4 MB   | 37.0 ms, 11.2 MB   |
+  | `agent list --json`      | 306.5 ms, 11.0 MB  | 317.1 ms, 11.8 MB  |
+  | `agent show (1 session)` | 36.1 ms, 10.7 MB   | 36.5 ms, 11.6 MB   |
+  | `ide list --limit 5`     | 15.0 ms, 13.0 MB   | 15.1 ms, 13.8 MB   |
+  | `ide list --json`        | 200.1 ms, 14.0 MB  | 206.3 ms, 14.9 MB  |
+  | `ide show (1 session)`   | 14.6 ms, 13.0 MB   | 14.8 ms, 13.8 MB   |
 
-  New commands on the same store: `search` over every session 807.9 ms
-  (Agent CLI) and 527.1 ms (IDE), at most 16.1 MB; `handoff --stdout` of one
+  New commands on the same store: `search` over every session 807.0 ms
+  (Agent CLI) and 535.1 ms (IDE), at most 16.3 MB; `handoff --stdout` of one
   session as fast as `show`. Full tables in `bench/results/0.4.0/`.
 - `search` reads every IDE chat of a database in one read transaction, and
   keeps one session's messages in memory at a time; `tests/memory.rs` checks
