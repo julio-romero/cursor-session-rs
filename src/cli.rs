@@ -11,6 +11,9 @@ use cursor_session::view::Role;
 const LONG_ABOUT: &str = "\
 List, show, and export Cursor IDE and Agent CLI chat sessions.
 
+`search` finds the sessions whose messages hold a set of words, and `handoff`
+copies a session's transcript for another agent to continue it.
+
 Reads two local stores and never writes to them:
   Agent CLI  ~/.cursor/chats plus transcripts in ~/.cursor/projects/*/agent-transcripts
   IDE        Cursor/User/globalStorage/state.vscdb in Cursor's config directory";
@@ -87,7 +90,7 @@ Examples:
 const EXIT_CODES: &str = "\
 Exit codes:
   0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
-  1  Error: session not found, unreadable storage, failed healthcheck
+  1  Error: session not found, no sessions match (search), unreadable storage, failed healthcheck
   2  Usage error: unknown command or flag, invalid value";
 
 const SEARCH_EXIT_CODES: &str = "\
