@@ -6,7 +6,7 @@ use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets};
 use owo_colors::OwoColorize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{Message, Session, SessionSummary, Source};
+use crate::model::{Message, Session, SessionSummary, Source, TOOL_ROLE};
 
 pub const DEFAULT_TTY_SHOW_LIMIT: usize = 20;
 const ID_FULL_WIDTH: usize = 36;
@@ -15,6 +15,9 @@ const ID_PREFIX_WIDTHS: [usize; 5] = [8, 13, 18, 23, 36];
 const SOURCE_WIDTH: usize = 6;
 const MSGS_WIDTH: usize = 5;
 const TOKENS_WIDTH: usize = 6;
+/// TOKENS in the plain layout, whose columns do not fit their contents: wide
+/// enough to keep 99,999,999 tokens aligned.
+const PLAIN_TOKENS_WIDTH: usize = 8;
 const UPDATED_WIDTH: usize = 16;
 const COL_GUTTER: usize = 2;
 const TABLE_CHROME: usize = 12;
@@ -121,6 +124,7 @@ pub fn paint_role(role: &str, use_color: bool) -> String {
     match role {
         "user" => role.blue().bold().to_string(),
         "assistant" => role.magenta().bold().to_string(),
+        TOOL_ROLE => role.cyan().to_string(),
         _ => role.to_string(),
     }
 }
@@ -581,7 +585,7 @@ fn render_list_plain(sessions: &[SessionSummary], use_color: bool) -> String {
         id_w = ID_FULL_WIDTH,
         src_w = SOURCE_WIDTH,
         msgs_w = MSGS_WIDTH,
-        tok_w = TOKENS_WIDTH,
+        tok_w = PLAIN_TOKENS_WIDTH,
         upd_w = UPDATED_WIDTH
     );
     out.push_str(&paint_bold(&header, use_color));
@@ -605,7 +609,7 @@ fn render_list_plain(sessions: &[SessionSummary], use_color: bool) -> String {
             session.title,
             id_w = ID_FULL_WIDTH,
             msgs_w = MSGS_WIDTH,
-            tok_w = TOKENS_WIDTH,
+            tok_w = PLAIN_TOKENS_WIDTH,
         ));
     }
     out
@@ -819,6 +823,8 @@ mod tests {
     fn color_helpers_emit_ansi() {
         assert!(has_ansi(&paint_source(Source::Agent, true)));
         assert!(has_ansi(&paint_role("user", true)));
+        assert!(has_ansi(&paint_role("tool", true)));
+        assert!(!has_ansi(&paint_role("tool", false)));
         assert!(has_ansi(&format_message_header("user", Some("now"), true)));
     }
 
@@ -904,6 +910,32 @@ mod tests {
         let first = render_list_among(&sessions[..1], &ids, false, Some(80));
         assert!(first.contains("│ f4eea6d2-d2d3-41ad ┆"), "{first}");
         assert!(!first.contains("9999"), "{first}");
+    }
+
+    #[test]
+    fn plain_list_keeps_large_token_counts_aligned() {
+        let sized = |id: &str, chars: usize| SessionSummary {
+            message_count: 12_345,
+            content_chars: chars,
+            ..SessionSummary::new(id, "t", Source::Agent)
+        };
+        let sessions = [
+            sized("a", 7),
+            sized("b", 4_000_000),
+            sized("c", 399_999_996),
+        ];
+        let plain = render_list(&sessions, false, None);
+        let lines: Vec<&str> = plain
+            .lines()
+            .skip(2)
+            .filter(|l| !l.starts_with('-'))
+            .collect();
+        assert!(lines[3].contains("  99999999  "), "{plain}");
+        // Every row's UPDATED starts where its header does.
+        let updated = lines[0].find("UPDATED").unwrap();
+        for row in &lines[1..] {
+            assert_eq!(row.find('—'), Some(updated), "{plain}");
+        }
     }
 
     #[test]
@@ -1059,7 +1091,7 @@ mod tests {
         let session = control_session();
         let plain = render_list(std::slice::from_ref(&session.summary), false, None);
         let row = format!(
-            "{}  agent       2       2  {:<16}  Edge \u{1b}]0;pwned\u{7} title\twith\nnewline\n",
+            "{}  agent       2         2  {:<16}  Edge \u{1b}]0;pwned\u{7} title\twith\nnewline\n",
             session.id,
             session.updated_display()
         );

@@ -206,6 +206,8 @@ impl SessionSummary {
 /// A session with its messages: what `show` and `export` print. It derefs to
 /// its summary, whose `message_count` is the number of `messages` and
 /// `content_chars` the characters of their content, tool messages left out.
+/// Read with its tool messages, an Agent CLI session's text that tool calls
+/// separate is several messages, which count as the one they are without.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "StoredSession")]
 pub struct Session {

@@ -32,6 +32,11 @@ fn reply(n: usize) -> String {
         .repeat(24)
 }
 
+/// About 2 KB of what a command printed.
+fn command_output(n: usize) -> String {
+    format!("test retry::backoff_{n} ... ok\n").repeat(64)
+}
+
 fn agent_id(n: usize) -> String {
     format!("{n:08x}-0000-4000-8000-{n:012x}")
 }
@@ -105,7 +110,18 @@ fn write_history(fixture: &Fixture) {
                 } else {
                     reply(headers.len())
                 };
-                let json = text_bubble(&bubble_id, kind, &text);
+                // Every other reply runs a command, whose output is kept with it.
+                let json = if headers.len() % 4 == 1 {
+                    tool_bubble(
+                        &bubble_id,
+                        &text,
+                        "run_terminal_cmd",
+                        &serde_json::json!({"command": "cargo test"}),
+                        &serde_json::json!({"output": command_output(headers.len()), "exitCodeV2": 0}),
+                    )
+                } else {
+                    text_bubble(&bubble_id, kind, &text)
+                };
                 bytes += json.to_string().len();
                 put(bubble(&id, &bubble_id, &json, Stored::Text));
                 headers.push((bubble_id, kind));
@@ -195,7 +211,7 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
 
     let newest_agent = agent_id(AGENT_SESSIONS - 1);
     let newest_chat = chat_id(IDE_CHATS - 1);
-    let commands: [&[&str]; 11] = [
+    let commands: [&[&str]; 12] = [
         &["list"],
         &["list", "--json"],
         &["list", "--limit", "5"],
@@ -218,6 +234,7 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
             "--short",
             "--json",
         ],
+        &["show", &newest_chat, "--only", "tool"],
         // A transcript of the whole session, built in memory.
         &["handoff", &newest_agent, "--stdout"],
         &["handoff", &newest_chat, "--stdout"],
@@ -292,6 +309,27 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
             .iter()
             .all(|m| m["content"] == r#"Read {"path":"src/lib.rs"}"#)
     );
+    // Every other reply of the chat runs a command: its call, then what it
+    // printed.
+    let tools = json(&ok(
+        &fixture,
+        &["show", &newest_chat, "--only", "tool", "--all", "--json"],
+    ));
+    let tools = tools["messages"].as_array().unwrap();
+    assert!(
+        !tools.is_empty() && tools.len().is_multiple_of(2),
+        "{}",
+        tools.len()
+    );
+    for pair in tools.chunks(2) {
+        assert_eq!(
+            pair[0]["content"],
+            r#"run_terminal_cmd {"command":"cargo test"}"#
+        );
+        let output = pair[1]["content"].as_str().unwrap();
+        assert!(output.starts_with("test retry::backoff_"), "{output}");
+        assert!(output.ends_with(" ... ok"), "{output}");
+    }
 }
 
 fn ok(fixture: &Fixture, args: &[&str]) -> String {

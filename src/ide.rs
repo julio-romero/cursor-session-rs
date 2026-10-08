@@ -88,13 +88,44 @@ impl<T> Bubble<T> {
 
 /// What a message's `toolFormerData` is read as.
 trait ToolData: DeserializeOwned {
+    /// Whether it reads the tool call, which a message may then fail to be
+    /// read as when it would be read without.
+    const READS: bool;
+
     /// The tool messages it makes, in order.
     fn messages(self) -> impl Iterator<Item = Message>;
+
+    /// What a `toolFormerData` that cannot be read as one stands for: a tool
+    /// call that makes no tool message.
+    fn unread() -> Self;
 }
 
 impl ToolData for IgnoredAny {
+    const READS: bool = false;
+
     fn messages(self) -> impl Iterator<Item = Message> {
         std::iter::empty()
+    }
+
+    fn unread() -> Self {
+        IgnoredAny
+    }
+}
+
+impl<T> Bubble<T> {
+    /// The message, with its tool call, if it has one, read as a `U` that
+    /// makes no tool message.
+    fn unread_tool<U: ToolData>(self) -> Bubble<U> {
+        Bubble {
+            bubble_id: self.bubble_id,
+            text: self.text,
+            rich_text: self.rich_text,
+            timestamp: self.timestamp,
+            kind: self.kind,
+            code_blocks: self.code_blocks,
+            tool_former_data: self.tool_former_data.map(|_| U::unread()),
+            images: self.images,
+        }
     }
 }
 
@@ -133,12 +164,18 @@ impl<'de> Deserialize<'de> for ToolCall {
 }
 
 impl ToolData for ToolCall {
+    const READS: bool = true;
+
     /// The call, unless nothing names it or its arguments, then the result.
     fn messages(self) -> impl Iterator<Item = Message> {
         let call = (self.name.is_some() || self.args.is_some())
             .then(|| tools::call(self.name.as_deref(), self.args.as_ref()));
         let result = self.result.as_ref().and_then(tools::result);
         call.into_iter().chain(result).filter_map(tools::message)
+    }
+
+    fn unread() -> Self {
+        Self::default()
     }
 }
 
@@ -656,7 +693,7 @@ fn read_composer(
 /// The messages stored for chat `id`, its `bubbleId:<id>:<message>` rows, by
 /// message ID; `None` when none of them could be read. Rows are counted in
 /// `rows`.
-fn chat_bubbles<T: DeserializeOwned>(
+fn chat_bubbles<T: ToolData>(
     conn: &Connection,
     db_path: &Path,
     id: &str,
@@ -684,7 +721,7 @@ const BUBBLE_PREFIX: &[u8] = b"bubbleId:";
 /// Calls `visit` with the message ID from the key and the message of each
 /// non-NULL `bubbleId:<chat>:<message>` row of `chat`; `None` for a row that
 /// cannot be read.
-fn for_chat_rows<T: DeserializeOwned>(
+fn for_chat_rows<T: ToolData>(
     conn: &Connection,
     db_path: &Path,
     chat: &[u8],
@@ -699,7 +736,14 @@ fn for_chat_rows<T: DeserializeOwned>(
         }
         let message = row.text.and_then(|(key, value)| {
             let message_id = key.split_once(':')?.1.split_once(':')?.1;
-            Some((message_id.to_string(), parse_object::<Bubble<T>>(value)?))
+            // A tool call that cannot be read as a `T`, such as one holding a
+            // number too large for a `Value`, costs only its tool messages.
+            let bubble = parse_object::<Bubble<T>>(value).or_else(|| {
+                T::READS
+                    .then(|| parse_object::<Bubble<IgnoredAny>>(value))?
+                    .map(Bubble::unread_tool)
+            })?;
+            Some((message_id.to_string(), bubble))
         });
         match message {
             Some((message_id, bubble)) => visit(message_id, Some(bubble)),
@@ -1346,7 +1390,7 @@ mod tests {
     fn tool_calls_are_read_only_when_asked_for() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.vscdb");
-        let headers: Vec<String> = (1..=8)
+        let headers: Vec<String> = (1..=9)
             .map(|n| format!(r#"{{"bubbleId":"b{n}","type":{}}}"#, 2 - n % 2))
             .collect();
         let composer = format!(
@@ -1364,6 +1408,8 @@ mod tests {
             r#"{"type":1,"text":"","toolFormerData":{}}"#,
             r#"{"type":2,"text":"","toolFormerData":null}"#,
             r#"{"type":2,"text":"answer"}"#,
+            // Nor does one that is no `Value`, which skipping it accepts.
+            r#"{"type":1,"text":"kept","toolFormerData":{"a":1e400}}"#,
         ];
         let mut rows = vec![("composerData:c1".to_string(), SqlValue::Text(composer))];
         for (n, bubble) in bubbles.iter().enumerate() {
@@ -1385,17 +1431,19 @@ mod tests {
                 .map(|m| (m.role.clone(), m.content.clone()))
                 .collect()
         };
-        assert_eq!(session.message_count, 3);
+        assert_eq!(session.message_count, 4);
         let key = "composerData:c1";
         let with = read_messages(&path, key, false, "c1", ReadOptions { tools: true }).unwrap();
         let expected = [
             ("user", "question"),
             ("assistant", "Let me look."),
             ("tool", r#"read_file {"target_file":"a.rs"}"#),
-            ("tool", r#"{"contents":"fn main() {}"}"#),
+            // The text of a result stored as JSON in a string.
+            ("tool", "fn main() {}"),
             ("tool", r#"run_terminal_cmd {"command":"ls"}"#),
             ("tool", "a\n\nb"),
             ("assistant", "answer"),
+            ("user", "kept"),
         ];
         let expected: Vec<(String, String)> = expected
             .iter()
