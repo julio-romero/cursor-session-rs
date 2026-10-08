@@ -1352,8 +1352,6 @@ fn piped_json_escapes_controls_a_terminal_would_act_on() {
     assert!(!out.contains(['\u{1b}', '\u{7}', '\u{7f}', '\u{9b}', '\u{9c}', '\u{9d}']));
 }
 
-/// The binary in a pseudo-terminal, through script(1). Windows has no
-/// script(1), and ConPTY would need a new dependency, so these run on Unix.
 /// The roles and contents of a `show --json`'s messages.
 fn messages(detail: &Value) -> Vec<(String, String)> {
     detail["messages"]
@@ -1432,7 +1430,11 @@ fn show_only_selects_roles_and_adds_tool_calls_on_request() {
         pairs(&[
             ("assistant", "Listing them."),
             ("tool", r#"list_dir {"relative_workspace_path":"."}"#),
-            ("tool", r#"{"files":["Cargo.toml","src"]}"#),
+            // A result stored as JSON in a string, indented.
+            (
+                "tool",
+                "{\n  \"files\": [\n    \"Cargo.toml\",\n    \"src\"\n  ]\n}",
+            ),
             ("assistant", "Two entries."),
         ])
     );
@@ -1591,6 +1593,8 @@ fn show_only_takes_known_roles() {
     }
 }
 
+/// The binary in a pseudo-terminal, through script(1). Windows has no
+/// script(1), and ConPTY would need a new dependency, so these run on Unix.
 #[cfg(unix)]
 mod tty {
     use std::sync::mpsc;

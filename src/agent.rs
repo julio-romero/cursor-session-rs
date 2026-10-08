@@ -1407,7 +1407,7 @@ mod tests {
             ("tool", "ok"),
             ("user", "thanks"),
             ("tool", "note"),
-            ("tool", r#"{"odd":true}"#),
+            ("tool", "{\n  \"odd\": true\n}"),
         ];
         let read: Vec<(&str, &str)> = read
             .iter()
