@@ -9,8 +9,8 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use cursor_session::detect::{Env, Os, StoragePaths, workspace_md5};
-use cursor_session::model::Source;
-use cursor_session::{LoadOptions, Loaded, load_sessions};
+use cursor_session::model::{Session, SessionSummary, Source};
+use cursor_session::{LoadOptions, load_messages, load_sessions};
 use rusqlite::Connection;
 use rusqlite::types::Value as SqlValue;
 use serde_json::{Value, json};
@@ -163,12 +163,18 @@ impl Fixture {
         StoragePaths::from_env(&self.env()).unwrap()
     }
 
-    pub fn load(&self) -> Loaded {
+    pub fn load(&self) -> Full {
         self.load_source(None).unwrap()
     }
 
-    pub fn load_source(&self, source: Option<Source>) -> cursor_session::Result<Loaded> {
-        load_sessions(&self.paths(), &LoadOptions { source })
+    pub fn load_source(&self, source: Option<Source>) -> cursor_session::Result<Full> {
+        load_full(
+            &self.paths(),
+            &LoadOptions {
+                source,
+                ..Default::default()
+            },
+        )
     }
 
     pub fn chats_dir(&self) -> PathBuf {
@@ -270,6 +276,54 @@ impl Fixture {
             .env("TEMP", &tmp);
         cmd
     }
+}
+
+/// Every session listed, as a summary and with its messages.
+#[derive(Debug)]
+pub struct Full {
+    pub summaries: Vec<SessionSummary>,
+    pub sessions: Vec<Session>,
+    pub warnings: Vec<String>,
+    pub notices: Vec<String>,
+}
+
+/// Lists the sessions and loads each one's messages, which must number what
+/// the list counted.
+pub fn load_full(paths: &StoragePaths, opts: &LoadOptions) -> cursor_session::Result<Full> {
+    let loaded = load_sessions(paths, opts)?;
+    let sessions = with_messages(&loaded.sessions)?;
+    Ok(Full {
+        summaries: loaded.sessions,
+        sessions,
+        warnings: loaded.warnings,
+        notices: loaded.notices,
+    })
+}
+
+/// Loads the messages of each of `summaries`, checking that they number what
+/// the summary counted.
+pub fn with_messages(summaries: &[SessionSummary]) -> cursor_session::Result<Vec<Session>> {
+    summaries
+        .iter()
+        .map(|summary| {
+            let session = load_messages(summary)?;
+            assert_eq!(
+                session.messages.len(),
+                summary.message_count,
+                "messages of {} differ from the count",
+                summary.id
+            );
+            Ok(session)
+        })
+        .collect()
+}
+
+/// The summaries of `sessions`, as `list` renders them.
+pub fn summaries(sessions: &[Session]) -> Vec<SessionSummary> {
+    sessions
+        .iter()
+        .map(|session| session.summary.clone())
+        .collect()
 }
 
 pub fn write(path: &Path, contents: &str) {

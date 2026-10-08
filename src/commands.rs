@@ -6,9 +6,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use cursor_session::detect::{self, Env, StoragePaths};
 use cursor_session::export::{self, Format};
-use cursor_session::model::{self, Session, SessionSummary, Source};
+use cursor_session::model::{self, Session, SessionSummary, Source, SummaryJson};
 use cursor_session::ui;
-use cursor_session::{Error, LoadOptions, Loaded, filter_workspace, find_session, load_sessions};
+use cursor_session::{
+    Error, LoadOptions, Loaded, filter_workspace, load_messages, load_session, load_sessions,
+};
 use serde::Serialize;
 
 use crate::cli::{Commands, ExportArgs, HealthcheckArgs, ListArgs, ShowArgs};
@@ -36,8 +38,51 @@ fn load(
     opts: &LoadOptions,
     verbose: bool,
     err: &mut dyn Write,
-) -> Result<Vec<Session>> {
-    if let Some(source) = opts.source
+) -> Result<Loaded> {
+    warn_unread_source(paths, opts.source, err)?;
+    let loaded = load_sessions(paths, opts)?;
+    print_warnings(&loaded.notices, true, err)?;
+    print_warnings(&loaded.warnings, verbose, err)?;
+    Ok(loaded)
+}
+
+/// Loads the session `query` names (see [`load_session`]), printing what
+/// loading reported also when it fails. When it is not found, the error names
+/// the store that `--source` left unsearched, if it was found.
+fn load_one(
+    paths: &StoragePaths,
+    source: Option<Source>,
+    query: &str,
+    verbose: bool,
+    err: &mut dyn Write,
+) -> Result<Session> {
+    warn_unread_source(paths, source, err)?;
+    let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+    let opts = LoadOptions {
+        source,
+        ..Default::default()
+    };
+    let session = load_session(paths, &opts, query, &mut warnings, &mut notices);
+    print_warnings(&notices, true, err)?;
+    print_warnings(&warnings, verbose, err)?;
+    let session = session.map_err(|error| match error {
+        Error::SessionNotFound { query, .. } => Error::SessionNotFound {
+            query,
+            unsearched: source.map(Source::other).filter(|other| paths.has(*other)),
+        },
+        error => error,
+    })?;
+    Ok(session)
+}
+
+/// Warns that `--source` names a store that was not found while the other
+/// one was, so nothing is read.
+fn warn_unread_source(
+    paths: &StoragePaths,
+    source: Option<Source>,
+    err: &mut dyn Write,
+) -> Result<()> {
+    if let Some(source) = source
         && !paths.has(source)
         && paths.has(source.other())
     {
@@ -49,10 +94,7 @@ fn load(
         );
         print_warnings(&[warning], true, err)?;
     }
-    let loaded = load_sessions(paths, opts)?;
-    print_warnings(&loaded.notices, true, err)?;
-    print_warnings(&loaded.warnings, verbose, err)?;
-    Ok(loaded.sessions)
+    Ok(())
 }
 
 /// Prints each warning on one line, so that stored names in it cannot start
@@ -100,20 +142,20 @@ fn cmd_list(
 ) -> Result<()> {
     let load_opts = LoadOptions {
         source: args.source,
+        limit: args.limit,
     };
-    let sessions = load(paths, &load_opts, args.verbose, err)?;
-    let listed = &sessions[..args
-        .limit
-        .map_or(sessions.len(), |limit| limit.min(sessions.len()))];
+    let loaded = load(paths, &load_opts, args.verbose, err)?;
     if args.json {
-        let summaries: Vec<SessionSummary> = listed.iter().map(Session::summary).collect();
+        let summaries: Vec<SummaryJson> =
+            loaded.sessions.iter().map(SessionSummary::json).collect();
         return write_json(out, &summaries);
     }
     // The IDs shown must tell apart those left out too, as `show` sees them.
+    let ids: Vec<&str> = loaded.ids.iter().map(String::as_str).collect();
     write!(
         out,
         "{}",
-        ui::render_list_among(listed, &sessions, opts.color, opts.width)
+        ui::render_list_among(&loaded.sessions, &ids, opts.color, opts.width)
     )?;
     Ok(())
 }
@@ -128,11 +170,7 @@ fn cmd_show(
     if paths.is_empty() {
         return Err(Error::NoStorage.into());
     }
-    let load_opts = LoadOptions {
-        source: args.source,
-    };
-    let sessions = load(paths, &load_opts, args.verbose, err)?;
-    let session = find(&sessions, &args.session_id, args.source, paths)?;
+    let session = load_one(paths, args.source, &args.session_id, args.verbose, err)?;
     if args.json {
         let (messages, _) = ui::select_messages(&session.messages, false, args.limit, args.all);
         return write_json(out, &session.detail(messages));
@@ -141,7 +179,7 @@ fn cmd_show(
     write!(
         out,
         "{}",
-        ui::render_show(session, messages, hidden, opts.color)
+        ui::render_show(&session, messages, hidden, opts.color)
     )?;
     Ok(())
 }
@@ -155,17 +193,28 @@ fn cmd_export(
     if paths.is_empty() {
         return Err(Error::NoStorage.into());
     }
-    let load_opts = LoadOptions {
-        source: args.source,
+    // Each session's messages are read only to write its file.
+    let (one, loaded) = match &args.session_id {
+        Some(id) => (
+            Some(load_one(paths, args.source, id, args.verbose, err)?),
+            None,
+        ),
+        None => {
+            let load_opts = LoadOptions {
+                source: args.source,
+                ..Default::default()
+            };
+            (None, Some(load(paths, &load_opts, args.verbose, err)?))
+        }
     };
-    let sessions = load(paths, &load_opts, args.verbose, err)?;
     let workspace = args.workspace.as_deref().map(resolve_workspace);
-    let mut selected: Vec<&Session> = if let Some(id) = &args.session_id {
-        vec![find(&sessions, id, args.source, paths)?]
-    } else if let Some(workspace) = &workspace {
-        filter_workspace(&sessions, workspace)
-    } else {
-        sessions.iter().collect()
+    let mut selected: Vec<&SessionSummary> = match (&one, &loaded) {
+        (Some(session), _) => vec![&session.summary],
+        (None, Some(loaded)) => match &workspace {
+            Some(workspace) => filter_workspace(&loaded.sessions, workspace),
+            None => loaded.sessions.iter().collect(),
+        },
+        (None, None) => Vec::new(),
     };
     if selected.is_empty() {
         if let Some(workspace) = workspace {
@@ -186,9 +235,13 @@ fn cmd_export(
     // a reader that goes away (`| head`) stops the lines, not the export.
     let mut progress = true;
     let mut files = export::ExportPaths::default();
-    for session in selected {
-        let path = files.next(&out_dir, session, args.format);
-        write_export(session, args.format, &path)
+    for summary in selected {
+        let session = match &one {
+            Some(session) => Cow::Borrowed(session),
+            None => Cow::Owned(load_messages(summary)?),
+        };
+        let path = files.next(&out_dir, &session, args.format);
+        write_export(&session, args.format, &path)
             .with_context(|| format!("could not write {}", path.display()))?;
         if progress && let Err(error) = writeln!(out, "wrote {}", path.display()) {
             if error.kind() != ErrorKind::BrokenPipe {
@@ -198,23 +251,6 @@ fn cmd_export(
         }
     }
     Ok(())
-}
-
-/// The session `query` names (see [`find_session`]). When it is not found,
-/// the error names the store that `source` left unsearched, if it was found.
-fn find<'a>(
-    sessions: &'a [Session],
-    query: &str,
-    source: Option<Source>,
-    paths: &StoragePaths,
-) -> cursor_session::Result<&'a Session> {
-    find_session(sessions, query).map_err(|error| match error {
-        Error::SessionNotFound { query, .. } => Error::SessionNotFound {
-            query,
-            unsearched: source.map(Source::other).filter(|other| paths.has(*other)),
-        },
-        error => error,
-    })
 }
 
 /// `workspace` as an absolute path when it is written relative to the
@@ -284,6 +320,7 @@ fn cmd_healthcheck(
             paths,
             &LoadOptions {
                 source: Some(source),
+                ..Default::default()
             },
         )
     };

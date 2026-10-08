@@ -8,7 +8,7 @@ use std::fs;
 use common::*;
 use cursor_session::detect::{StoragePaths, workspace_md5};
 use cursor_session::export::{self, Format};
-use cursor_session::model::{Message, Session, Source, merge_sessions};
+use cursor_session::model::{Message, MessagesAt, Session, SessionSummary, Source, merge_sessions};
 use cursor_session::{Error, LoadOptions, filter_workspace, find_session, load_sessions};
 use serde_json::json;
 
@@ -239,42 +239,48 @@ fn a_session_in_both_stores_merges_into_the_agent_copy() {
 
 #[test]
 fn merge_fills_gaps_from_the_other_store() {
-    let session = |source, title: &str, messages: &[&str]| Session {
-        id: "same".into(),
-        title: title.into(),
-        source,
-        workspace: None,
-        workspace_hash: None,
-        created_at_ms: None,
+    let at = |source| match source {
+        Source::Agent => MessagesAt::Transcript("agent.jsonl".into()),
+        Source::Ide => MessagesAt::IdeChat {
+            db: "state.vscdb".into(),
+            key: "composerData:same".into(),
+            blob_key: false,
+        },
+    };
+    let session = |source, title: &str, messages: usize| SessionSummary {
         updated_at_ms: Some(1),
-        model: None,
-        messages: messages
-            .iter()
-            .map(|text| Message {
-                role: "user".into(),
-                content: (*text).into(),
-                timestamp: None,
-            })
-            .collect(),
+        message_count: messages,
+        messages_at: if messages > 0 {
+            at(source)
+        } else {
+            MessagesAt::Nowhere
+        },
+        ..SessionSummary::new("same", title, source)
     };
     // A transcript-only agent session is titled by its ID; the IDE names it.
     let merged = merge_sessions(vec![
-        session(Source::Agent, "same", &["from agent"]),
-        session(Source::Ide, "Named in the IDE", &["from ide"]),
+        session(Source::Agent, "same", 1),
+        session(Source::Ide, "Named in the IDE", 2),
     ]);
     assert_eq!(merged.len(), 1);
     assert_eq!(merged[0].title, "Named in the IDE");
     assert_eq!(merged[0].source, Source::Agent);
-    assert_eq!(contents(&merged[0]), ["from agent"]);
+    assert_eq!(
+        (merged[0].message_count, &merged[0].messages_at),
+        (1, &at(Source::Agent))
+    );
 
     // An agent session without a transcript takes the IDE's messages.
     let merged = merge_sessions(vec![
-        session(Source::Agent, "agent", &[]),
-        session(Source::Ide, "ide", &["from ide"]),
+        session(Source::Agent, "agent", 0),
+        session(Source::Ide, "ide", 2),
     ]);
     assert_eq!(merged[0].source, Source::Agent);
     assert_eq!(merged[0].title, "agent");
-    assert_eq!(contents(&merged[0]), ["from ide"]);
+    assert_eq!(
+        (merged[0].message_count, &merged[0].messages_at),
+        (2, &at(Source::Ide))
+    );
 }
 
 #[test]
@@ -331,7 +337,7 @@ fn missing_stores_load_nothing() {
 
 #[test]
 fn find_session_matches_exact_ids_and_unique_prefixes() {
-    let sessions = standard().load().sessions;
+    let sessions = standard().load().summaries;
     let found = |query: &str| find_session(&sessions, query).map(|s| s.id.as_str());
     assert_eq!(found(AGENT_ID).unwrap(), AGENT_ID);
     assert_eq!(found("f4eea6d2").unwrap(), AGENT_ID);
@@ -343,7 +349,7 @@ fn find_session_matches_exact_ids_and_unique_prefixes() {
 
 #[test]
 fn find_session_reports_unknown_empty_and_ambiguous_ids() {
-    let sessions = standard().load().sessions;
+    let sessions = standard().load().summaries;
 
     let err = find_session(&sessions, "ffff").unwrap_err();
     assert!(matches!(
@@ -394,7 +400,7 @@ fn ambiguous_fixture() -> Fixture {
 
 #[test]
 fn ambiguous_prefix_lists_every_candidate_newest_first() {
-    let sessions = ambiguous_fixture().load().sessions;
+    let sessions = ambiguous_fixture().load().summaries;
     let err = find_session(&sessions, "ABCD").unwrap_err();
     let Error::AmbiguousId { query, matches } = &err else {
         panic!("expected an ambiguous ID, got {err:?}");
@@ -430,7 +436,7 @@ fn ambiguous_prefix_lists_every_candidate_newest_first() {
 
 #[test]
 fn filter_workspace_matches_paths_and_hashes() {
-    let sessions = standard().load().sessions;
+    let sessions = standard().load().summaries;
     let found = |workspace: &str| ids_of(&filter_workspace(&sessions, workspace));
     assert_eq!(found(PROJECT_X), [AGENT_ID]);
     assert_eq!(found("project-y"), [SHARED_ID]);
@@ -438,7 +444,7 @@ fn filter_workspace_matches_paths_and_hashes() {
     assert!(found("/nowhere").is_empty());
 }
 
-fn ids_of<'a>(sessions: &[&'a Session]) -> Vec<&'a str> {
+fn ids_of<'a>(sessions: &[&'a SessionSummary]) -> Vec<&'a str> {
     sessions.iter().map(|s| s.id.as_str()).collect()
 }
 

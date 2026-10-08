@@ -145,7 +145,7 @@ fn export_markdown(session: &Session, writer: &mut impl Write) -> io::Result<()>
     }
     writeln!(writer, "- **Created:** {}", session.created_utc())?;
     writeln!(writer, "- **Updated:** {}", session.updated_utc())?;
-    writeln!(writer, "- **Messages:** {}\n", session.message_count())?;
+    writeln!(writer, "- **Messages:** {}\n", session.message_count)?;
     writeln!(writer, "---\n")?;
     for (index, message) in session.messages.iter().enumerate() {
         let ts = message
@@ -180,16 +180,9 @@ mod tests {
 
     #[test]
     fn ids_that_differ_only_in_case_get_their_own_files() {
-        let session = |id: &str| Session {
-            id: id.to_string(),
-            title: String::new(),
-            source: crate::model::Source::Ide,
-            workspace: None,
-            workspace_hash: None,
-            created_at_ms: None,
-            updated_at_ms: None,
-            model: None,
-            messages: Vec::new(),
+        let session = |id: &str| {
+            let summary = crate::model::SessionSummary::new(id, "", crate::model::Source::Ide);
+            Session::new(summary, Vec::new())
         };
         let out = Path::new("out");
         let mut paths = ExportPaths::default();

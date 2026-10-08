@@ -6,7 +6,7 @@ use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets};
 use owo_colors::OwoColorize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{Message, Session, Source};
+use crate::model::{Message, Session, SessionSummary, Source};
 
 pub const DEFAULT_TTY_SHOW_LIMIT: usize = 20;
 const ID_FULL_WIDTH: usize = 36;
@@ -62,15 +62,14 @@ pub fn id_prefix_width(term_width: usize) -> usize {
 /// The narrowest UUID prefix length, from `width` up, at which the shortened
 /// IDs of `sessions` differ, so that each is a prefix `show` accepts; the
 /// full width when none is.
-fn distinct_id_width(sessions: &[Session], width: usize) -> usize {
+fn distinct_id_width(ids: &[&str], width: usize) -> usize {
     ID_PREFIX_WIDTHS
         .into_iter()
         .filter(|&candidate| candidate >= width)
         .find(|&candidate| {
             let mut seen = HashSet::new();
-            sessions
-                .iter()
-                .all(|s| seen.insert(shorten_id(&s.id, candidate).to_lowercase()))
+            ids.iter()
+                .all(|id| seen.insert(shorten_id(id, candidate).to_lowercase()))
         })
         .unwrap_or(ID_FULL_WIDTH)
 }
@@ -513,16 +512,21 @@ pub fn format_message_header(role: &str, timestamp: Option<&str>, use_color: boo
 /// The table's colors come from crossterm, which also drops them while
 /// NO_COLOR is set, unless the program called
 /// `crossterm::style::force_color_output(true)` as the binary does.
-pub fn render_list(sessions: &[Session], use_color: bool, term_width: Option<usize>) -> String {
-    render_list_among(sessions, sessions, use_color, term_width)
+pub fn render_list(
+    sessions: &[SessionSummary],
+    use_color: bool,
+    term_width: Option<usize>,
+) -> String {
+    let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+    render_list_among(sessions, &ids, use_color, term_width)
 }
 
 /// Renders `sessions` as [`render_list`] does, with the table's IDs shortened
-/// only as far as they stay distinct among `among`: every session `show`
-/// looks through, of which `--limit` lists only the first.
+/// only as far as they stay distinct among the IDs `among`: those of every
+/// session `show` looks through, of which `--limit` lists only the first.
 pub fn render_list_among(
-    sessions: &[Session],
-    among: &[Session],
+    sessions: &[SessionSummary],
+    among: &[&str],
     use_color: bool,
     term_width: Option<usize>,
 ) -> String {
@@ -535,7 +539,7 @@ pub fn render_list_among(
     }
 }
 
-fn render_list_plain(sessions: &[Session], use_color: bool) -> String {
+fn render_list_plain(sessions: &[SessionSummary], use_color: bool) -> String {
     let mut out = format!("Found {} session(s)\n\n", sessions.len());
     let header = format!(
         "{:<id_w$}  {:<src_w$}  {:>msgs_w$}  {:<upd_w$}  TITLE",
@@ -563,7 +567,7 @@ fn render_list_plain(sessions: &[Session], use_color: bool) -> String {
             "{:<id_w$}  {}  {:>msgs_w$}  {}  {}\n",
             session.id,
             paint_source_text(&source, session.source, use_color),
-            session.message_count(),
+            session.message_count,
             paint_dim(&updated, use_color),
             session.title,
             id_w = ID_FULL_WIDTH,
@@ -574,8 +578,8 @@ fn render_list_plain(sessions: &[Session], use_color: bool) -> String {
 }
 
 fn render_list_table(
-    sessions: &[Session],
-    among: &[Session],
+    sessions: &[SessionSummary],
+    among: &[&str],
     use_color: bool,
     term_width: usize,
 ) -> String {
@@ -604,7 +608,7 @@ fn render_list_table(
         table.add_row(vec![
             Cell::new(shorten_id(&one_line(&session.id), id_width)),
             source_cell(session.source),
-            Cell::new(session.message_count()),
+            Cell::new(session.message_count),
             Cell::new(session.updated_display()).fg(Color::DarkGrey),
             Cell::new(truncate_width(&one_line(&session.title), max_title)),
         ]);
@@ -655,7 +659,7 @@ pub fn render_show_header(session: &Session, use_color: bool) -> String {
         "updated:   {}",
         paint_dim(&session.updated_utc(), use_color)
     ));
-    lines.push(format!("messages:  {}", session.message_count()));
+    lines.push(format!("messages:  {}", session.message_count));
     lines.join("\n")
 }
 
@@ -694,17 +698,24 @@ mod tests {
     use super::*;
     use crate::model::Source;
 
-    fn sample_session() -> Session {
-        Session {
-            id: "f4eea6d2-d2d3-41ad-b290-824445295a15".into(),
-            title: "Langfuse Semantic Layer".into(),
-            source: Source::Agent,
+    fn sample_summary() -> SessionSummary {
+        SessionSummary {
             workspace: Some("/Users/manuel.romero".into()),
-            workspace_hash: None,
             created_at_ms: Some(1_700_000_000_000),
             updated_at_ms: Some(1_700_000_100_000),
             model: Some("grok-4.6".into()),
-            messages: vec![
+            ..SessionSummary::new(
+                "f4eea6d2-d2d3-41ad-b290-824445295a15",
+                "Langfuse Semantic Layer",
+                Source::Agent,
+            )
+        }
+    }
+
+    fn sample_session() -> Session {
+        Session::new(
+            sample_summary(),
+            vec![
                 Message {
                     role: "user".into(),
                     content: "hello".into(),
@@ -716,7 +727,14 @@ mod tests {
                     timestamp: None,
                 },
             ],
-        }
+        )
+    }
+
+    fn summaries(sessions: &[Session]) -> Vec<SessionSummary> {
+        sessions
+            .iter()
+            .map(|session| session.summary.clone())
+            .collect()
     }
 
     fn has_ansi(s: &str) -> bool {
@@ -736,7 +754,7 @@ mod tests {
         let session = sample_session();
         for width in [Some(120), None] {
             assert!(!has_ansi(&render_list(
-                std::slice::from_ref(&session),
+                std::slice::from_ref(&session.summary),
                 false,
                 width
             )));
@@ -783,8 +801,7 @@ mod tests {
 
     #[test]
     fn plain_list_keeps_full_title() {
-        let session = sample_session();
-        let rendered = render_list(&[session], false, None);
+        let rendered = render_list(&[sample_summary()], false, None);
         assert!(rendered.contains("Langfuse Semantic Layer"));
         assert!(rendered.contains("f4eea6d2-d2d3-41ad-b290-824445295a15"));
         assert!(!has_ansi(&rendered));
@@ -807,9 +824,9 @@ mod tests {
 
     #[test]
     fn shortened_ids_stay_distinct() {
-        let with_id = |id: &str| Session {
+        let with_id = |id: &str| SessionSummary {
             id: id.into(),
-            ..sample_session()
+            ..sample_summary()
         };
         let sessions = [
             with_id("f4eea6d2-d2d3-41ad-b290-824445295a15"),
@@ -824,21 +841,21 @@ mod tests {
         );
         // `show` matches a prefix in any case: only the full IDs tell these apart.
         let cased = [
-            with_id("abcdef00-0000-4000-8000-000000000001"),
-            with_id("ABCDEF00-0000-4000-8000-000000000001"),
+            "abcdef00-0000-4000-8000-000000000001",
+            "ABCDEF00-0000-4000-8000-000000000001",
         ];
         assert_eq!(distinct_id_width(&cased, 8), ID_FULL_WIDTH);
-        assert_eq!(distinct_id_width(&sessions[..1], 8), 8);
+        assert_eq!(distinct_id_width(&[sessions[0].id.as_str()], 8), 8);
         // Listing only the first, its ID stays distinct from the second's.
-        let first = render_list_among(&sessions[..1], &sessions, false, Some(80));
+        let ids = [sessions[0].id.as_str(), sessions[1].id.as_str()];
+        let first = render_list_among(&sessions[..1], &ids, false, Some(80));
         assert!(first.contains("│ f4eea6d2-d2d3-41ad ┆"), "{first}");
         assert!(!first.contains("9999"), "{first}");
     }
 
     #[test]
     fn narrow_tty_list_shortens_id() {
-        let session = sample_session();
-        let rendered = render_list(std::slice::from_ref(&session), true, Some(80));
+        let rendered = render_list(&[sample_summary()], true, Some(80));
         assert!(rendered.contains("f4eea6d2-d2d3"));
         assert!(!rendered.contains("f4eea6d2-d2d3-41ad-b290-824445295a15"));
         assert!(rendered.contains("show` accepts a prefix"));
@@ -876,8 +893,8 @@ mod tests {
         crossterm::style::force_color_output(true);
         let sessions = sample_sessions();
         for width in [40, 60, 80, 120, 200] {
-            let colored = render_list(&sessions, true, Some(width));
-            let plain = render_list(&sessions, false, Some(width));
+            let colored = render_list(&summaries(&sessions), true, Some(width));
+            let plain = render_list(&summaries(&sessions), false, Some(width));
             // Cyan SOURCE cell.
             assert!(colored.contains("\u{1b}[38;5;14m"));
             assert!(!has_ansi(&plain));
@@ -889,8 +906,8 @@ mod tests {
     #[test]
     fn piped_color_keeps_plain_layout() {
         let sessions = sample_sessions();
-        let colored = render_list(&sessions, true, None);
-        let plain = render_list(&sessions, false, None);
+        let colored = render_list(&summaries(&sessions), true, None);
+        let plain = render_list(&summaries(&sessions), false, None);
         assert!(has_ansi(&colored));
         assert!(!plain.contains('│'));
         assert_eq!(strip_ansi(&colored), plain);
@@ -912,11 +929,11 @@ mod tests {
             "family 👨‍👩‍👧‍👦 flag 🇪🇸 ".repeat(20),
             "e\u{301}\u{301}".repeat(100),
         ];
-        let sessions: Vec<Session> = titles
+        let sessions: Vec<SessionSummary> = titles
             .iter()
-            .map(|title| Session {
+            .map(|title| SessionSummary {
                 title: title.clone(),
-                ..sample_session()
+                ..sample_summary()
             })
             .collect();
         let widths = [0, 1, 2, 10, 39, 40, 41, 65_535, 65_536, usize::MAX];
@@ -954,7 +971,7 @@ mod tests {
         let mut session = sample_session();
         session.title = "データパイプラインの再設計レビュー 🚀 — überprüfe den Ablauf".into();
         for width in [80, 100, 120] {
-            let rendered = render_list(std::slice::from_ref(&session), false, Some(width));
+            let rendered = render_list(std::slice::from_ref(&session.summary), false, Some(width));
             let id = shorten_id(&session.id, id_prefix_width(width));
             assert!(rendered.contains(&format!("│ {id} ┆")), "{rendered}");
             // Found, blank line, top border, header, separator, row, bottom border.
@@ -987,7 +1004,7 @@ mod tests {
     #[test]
     fn plain_layout_and_show_keep_stored_text_verbatim() {
         let session = control_session();
-        let plain = render_list(std::slice::from_ref(&session), false, None);
+        let plain = render_list(std::slice::from_ref(&session.summary), false, None);
         let row = format!(
             "{}  agent       2  {:<16}  Edge \u{1b}]0;pwned\u{7} title\twith\nnewline\n",
             session.id,
@@ -1013,7 +1030,7 @@ mod tests {
         assert_eq!(one_line("plain title"), "plain title");
 
         let session = control_session();
-        let rendered = render_list(std::slice::from_ref(&session), false, Some(200));
+        let rendered = render_list(std::slice::from_ref(&session.summary), false, Some(200));
         assert!(!rendered.chars().any(|c| c.is_control() && c != '\n'));
         assert!(
             rendered.contains("┆ Edge  title with newline │"),
@@ -1101,7 +1118,7 @@ mod tests {
         assert_eq!(filtered(&long, true), "");
 
         let session = sample_session();
-        let colored = render_list(std::slice::from_ref(&session), true, Some(120));
+        let colored = render_list(std::slice::from_ref(&session.summary), true, Some(120));
         assert_eq!(filtered(&colored, true), colored);
         let colored = render_show(&session, &session.messages, Some(2), true);
         assert_eq!(filtered(&colored, true), colored);

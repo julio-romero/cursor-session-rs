@@ -12,6 +12,10 @@ CI runs clippy and the tests on Linux, macOS and Windows, rustfmt and
 `cargo package` (the crate as crates.io receives it) on Linux, and `cargo check`
 with the minimum supported Rust version, 1.88.
 
+`tests/memory.rs` (Linux and macOS) builds about 100 MB of history and fails
+when any command peaks above 32 MB of resident memory: `list` counts messages
+without keeping them, and `show` and `export` read one session at a time.
+
 Output rendering is covered by [insta](https://insta.rs) snapshot tests. When
 output changes, `cargo test` fails and writes the new output next to the old
 snapshot as a `.snap.new` file. To review and accept the changes:

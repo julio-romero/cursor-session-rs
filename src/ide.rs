@@ -1,17 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension};
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::detect::StoragePaths;
 use crate::json::{self, lenient, lenient_ms};
-use crate::model::{Message, Session, Source};
+use crate::model::{Message, MessagesAt, SessionSummary, Source};
 use crate::sqlite::with_readonly;
 use crate::{Error, Result};
 
@@ -24,6 +24,17 @@ const KV_TABLE: &str = "cursorDiskKV";
 #[serde(rename_all = "camelCase")]
 struct Composer {
     #[serde(default, deserialize_with = "lenient")]
+    full_conversation_headers_only: Vec<ConversationHeader>,
+    /// Older Cursor versions keep the messages in the composer itself.
+    #[serde(default, deserialize_with = "lenient")]
+    conversation: Vec<Value>,
+}
+
+/// A composer row as listing reads it: everything but its conversation.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ComposerMeta {
+    #[serde(default, deserialize_with = "lenient")]
     composer_id: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
     name: Option<String>,
@@ -31,11 +42,6 @@ struct Composer {
     created_at: Option<i64>,
     #[serde(default, deserialize_with = "lenient_ms")]
     last_updated_at: Option<i64>,
-    #[serde(default, deserialize_with = "lenient")]
-    full_conversation_headers_only: Vec<ConversationHeader>,
-    /// Older Cursor versions keep the messages in the composer itself.
-    #[serde(default, deserialize_with = "lenient")]
-    conversation: Vec<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -64,7 +70,7 @@ struct Bubble {
     code_blocks: Vec<CodeBlock>,
     /// A tool call, which is never shown.
     #[serde(default)]
-    tool_former_data: Option<Value>,
+    tool_former_data: Option<IgnoredAny>,
     /// Images, which are never shown.
     #[serde(default, deserialize_with = "lenient")]
     images: Vec<Value>,
@@ -126,140 +132,132 @@ pub fn load_sessions(
     paths: &StoragePaths,
     warnings: &mut Vec<String>,
     notices: &mut Vec<String>,
-) -> Result<Vec<Session>> {
+) -> Result<Vec<SessionSummary>> {
     let Some(db_path) = &paths.global_storage_db else {
         return Ok(Vec::new());
     };
     load_from_db(db_path, warnings, notices)
 }
 
-/// Loads composer sessions from a `state.vscdb`. A missing file holds no
-/// sessions; rows that cannot be decoded are skipped and reported in
-/// `warnings`. Chats and messages that load in part, as when Cursor changes
-/// their format for new chats only, are reported in `notices`.
+/// Loads the composer sessions of a `state.vscdb` with their message counts;
+/// see [`index`] and [`count`].
 pub fn load_from_db(
     db_path: &Path,
     warnings: &mut Vec<String>,
     notices: &mut Vec<String>,
-) -> Result<Vec<Session>> {
+) -> Result<Vec<SessionSummary>> {
+    match index(db_path, warnings)? {
+        Some(index) => count(&index, &|_| true, warnings, notices),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// The chats of a `state.vscdb`, without their messages counted.
+pub(crate) struct Index {
+    db: PathBuf,
+    pub sessions: Vec<SessionSummary>,
+    /// Chat rows that could not be read.
+    skipped: usize,
+    /// The message rows of chats without a chat row that was read.
+    orphan_rows: Rows,
+    orphans: Orphans,
+    /// In a database without chat or message rows, the prefixes of the keys
+    /// it has instead.
+    other_prefixes: Vec<String>,
+}
+
+/// Message rows that were read and that could not be.
+#[derive(Debug, Default, Clone, Copy)]
+struct Rows {
+    read: usize,
+    skipped: usize,
+}
+
+/// Lists the chats of a `state.vscdb` from their rows, and finds the messages
+/// stored for chats without one. `None` when there is nothing to read: no
+/// file, an empty one, or one without tables, which `warnings` reports.
+/// Fails when the rows show that the format changed.
+pub(crate) fn index(db_path: &Path, warnings: &mut Vec<String>) -> Result<Option<Index>> {
     match fs::metadata(db_path) {
         Ok(meta) if meta.len() == 0 => {
             warnings.push(format!(
                 "{} is empty; no Cursor IDE sessions loaded",
                 db_path.display()
             ));
-            return Ok(Vec::new());
+            return Ok(None);
         }
         Ok(_) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(Error::access(db_path, source)),
     }
     // The read may run twice (see `with_readonly`); only the last one's
-    // warnings and notices are kept.
-    let (sessions, found, noticed) = with_readonly(db_path, |conn| {
-        let (mut found, mut noticed) = (Vec::new(), Vec::new());
-        let sessions = read_sessions(conn, db_path, &mut found, &mut noticed)?;
-        Ok((sessions, found, noticed))
+    // warnings are kept.
+    let (index, found) = with_readonly(db_path, |conn| {
+        let mut found = Vec::new();
+        let index = read_index(conn, db_path, &mut found)?;
+        Ok((index, found))
     })?;
     warnings.extend(found);
-    notices.extend(noticed);
-    Ok(sessions)
+    Ok(index)
 }
 
-fn read_sessions(
+fn read_index(
     conn: &Connection,
     db_path: &Path,
     warnings: &mut Vec<String>,
-    notices: &mut Vec<String>,
-) -> Result<Vec<Session>> {
-    // One read transaction, so that a chat and its messages come from the same
-    // commit while Cursor writes. Dropping it ends the read.
-    let _snapshot = conn
-        .unchecked_transaction()
-        .map_err(|source| Error::Database {
-            path: db_path.to_path_buf(),
-            source,
-        })?;
+) -> Result<Option<Index>> {
+    // One read transaction, so that the messages without a chat are those of
+    // the chats listed.
+    let _snapshot = transaction(conn, db_path)?;
     if !check_schema(conn, db_path)? {
         warnings.push(format!(
             "{} has no tables; no Cursor IDE sessions loaded",
             db_path.display()
         ));
-        return Ok(Vec::new());
+        return Ok(None);
     }
 
-    // `bubbleId:<chat id>:<message id>` rows, by chat and then message ID.
-    let mut bubbles: HashMap<String, HashMap<String, Bubble>> = HashMap::new();
-    let mut read = 0;
-    let skipped_bubbles = read_rows(conn, db_path, "bubbleId:", |key, value| {
-        let Some(bubble) = parse_object::<Bubble>(value) else {
-            return false;
-        };
-        let rest = key.strip_prefix("bubbleId:").unwrap_or(key);
-        let (chat, bubble_key) = rest.split_once(':').unwrap_or_default();
-        let id = bubble
-            .bubble_id
-            .clone()
-            .unwrap_or_else(|| bubble_key.to_string());
-        bubbles
-            .entry(chat.to_string())
-            .or_default()
-            .insert(id, bubble);
-        read += 1;
-        true
-    })?;
-    #[cfg(test)]
-    AFTER_BUBBLES.with_borrow_mut(|hook| hook.as_mut().map(|hook| hook()));
-
     let mut sessions = Vec::new();
-    // Chats with stored messages, and those of them that lead to none.
-    let (mut stored, mut unlinked) = (0, 0);
-    // Chats that list messages and should have one to show, and those of
-    // them that do.
-    let (mut listing, mut shown) = (0, 0);
-    // Messages shown without a known type.
-    let mut untyped = 0;
-    let skipped = read_rows(conn, db_path, "composerData:", |key, value| {
-        let Some(composer) = parse_object::<Composer>(value) else {
+    let mut ids = HashSet::new();
+    let skipped = read_rows(conn, db_path, "composerData:", |key, blob_key, value| {
+        let Some(composer) = parse_object::<ComposerMeta>(value) else {
             return false;
         };
         // A blank ID could not be looked up with `show`.
         let named = |id: &str| !id.trim().is_empty();
-        let id = composer
-            .composer_id
-            .clone()
-            .filter(|id| named(id))
-            .or_else(|| {
-                key.strip_prefix("composerData:")
-                    .filter(|id| named(id))
-                    .map(str::to_string)
-            });
+        let id = composer.composer_id.filter(|id| named(id)).or_else(|| {
+            key.strip_prefix("composerData:")
+                .filter(|id| named(id))
+                .map(str::to_string)
+        });
         let Some(id) = id else {
             return false;
         };
-        let lists = !composer.full_conversation_headers_only.is_empty()
-            || !composer.conversation.is_empty();
-        // Each chat takes its messages, so their text is not held twice.
-        let chat_bubbles = bubbles.remove(&id);
-        let has_stored = chat_bubbles.is_some();
-        let chat = composer_session(id, composer, chat_bubbles, &mut untyped);
-        if has_stored {
-            stored += 1;
-            unlinked += usize::from(!chat.linked);
-        }
-        if lists && !chat.only_hidden {
-            listing += 1;
-            shown += usize::from(!chat.session.messages.is_empty());
-        }
-        sessions.push(chat.session);
+        ids.insert(id.clone());
+        let title = composer
+            .name
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Untitled".to_string());
+        sessions.push(SessionSummary {
+            created_at_ms: composer.created_at,
+            updated_at_ms: composer.last_updated_at,
+            messages_at: MessagesAt::IdeChat {
+                db: db_path.to_path_buf(),
+                key: key.to_string(),
+                blob_key,
+            },
+            ..SessionSummary::new(id, title, Source::Ide)
+        });
         true
     })?;
-    // What is left are messages whose chat has no row that was read.
-    let orphans = find_orphans(conn, db_path, bubbles)?;
+    #[cfg(test)]
+    AFTER_CHATS.with_borrow_mut(|hook| hook.as_mut().map(|hook| hook()));
 
-    // Rows that are all unreadable, messages without a chat or a type, or
-    // chats that all lead to none of their messages, mean the format changed
-    // rather than that there is nothing.
+    let (orphan_rows, orphan_chats) = orphan_messages(conn, db_path, &ids)?;
+    let orphans = find_orphans(conn, db_path, orphan_chats)?;
+
+    // Rows that are all unreadable, or messages whose chats are all under
+    // another key, mean the format changed rather than that there is nothing.
     let mismatch = |detail| Error::SchemaMismatch {
         store: Source::Ide,
         path: db_path.to_path_buf(),
@@ -274,55 +272,191 @@ fn read_sessions(
     if sessions.is_empty()
         && let Some(prefix) = &orphans.moved_to
     {
-        return Err(mismatch(match read {
+        return Err(mismatch(match orphan_rows.read {
             1 => format!(
                 "its bubbleId row belongs to no composerData row, and a `{prefix}:` row names \
                  its chat"
             ),
-            _ => format!(
+            read => format!(
                 "none of its {read} bubbleId rows belongs to a composerData row, and \
                  `{prefix}:` rows name their chats"
             ),
         }));
     }
+    // Not one chat or message row: either there are no chats, or their rows
+    // are all under keys this version does not know.
+    let mut other_prefixes = Vec::new();
+    if sessions.is_empty() && orphan_rows.read + skipped + orphan_rows.skipped == 0 {
+        other_prefixes = key_prefixes(conn).map_err(|source| Error::Database {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+        other_prefixes.retain(|prefix| prefix != "composerData" && prefix != "bubbleId");
+    }
+    Ok(Some(Index {
+        db: db_path.to_path_buf(),
+        sessions,
+        skipped,
+        orphan_rows,
+        orphans,
+        other_prefixes,
+    }))
+}
+
+/// The chats of `index` that `selected` accepts, each with the number of
+/// messages it shows. Chats are read one at a time, so no more than one
+/// chat's messages are held. Messages that cannot be read are reported in
+/// `warnings`; chats and messages that load only in part, as when Cursor
+/// changes their format for new chats only, in `notices`. When the messages
+/// read show that the format changed, loading fails; a count of only some
+/// chats then counts them all to decide, as counting them all would.
+pub(crate) fn count(
+    index: &Index,
+    selected: &dyn Fn(&str) -> bool,
+    warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
+) -> Result<Vec<SessionSummary>> {
+    if index.sessions.is_empty() {
+        report(index, &Stats::default(), warnings, notices)?;
+        return Ok(Vec::new());
+    }
+    let (sessions, mut stats) =
+        with_readonly(&index.db, |conn| count_chats(conn, index, selected))?;
+    if sessions.len() < index.sessions.len() && stats.looks_changed(index.orphan_rows) {
+        stats = with_readonly(&index.db, |conn| count_chats(conn, index, &|_| true))?.1;
+    }
+    report(index, &stats, warnings, notices)?;
+    Ok(sessions)
+}
+
+/// What counting the messages of chats found.
+#[derive(Debug, Default, Clone, Copy)]
+struct Stats {
+    /// The message rows of the chats counted.
+    rows: Rows,
+    /// Chats with stored messages, and those of them that lead to none.
+    stored: usize,
+    unlinked: usize,
+    /// Chats that list messages and should have one to show, and those of
+    /// them that do.
+    listing: usize,
+    shown: usize,
+    /// Messages shown, and those of them without a known type.
+    messages: usize,
+    untyped: usize,
+}
+
+impl Stats {
+    /// Whether these chats, with the messages of chats without a chat row,
+    /// look like a format this version does not know (see [`report`]).
+    fn looks_changed(&self, orphan_rows: Rows) -> bool {
+        let read = self.rows.read + orphan_rows.read;
+        let skipped = self.rows.skipped + orphan_rows.skipped;
+        (read == 0 && skipped > 0)
+            || (self.unlinked > 0 && self.unlinked == self.stored)
+            || (self.listing > 0 && self.shown == 0)
+            || (self.untyped > 0 && self.untyped == self.messages)
+    }
+}
+
+fn count_chats(
+    conn: &Connection,
+    index: &Index,
+    selected: &dyn Fn(&str) -> bool,
+) -> Result<(Vec<SessionSummary>, Stats)> {
+    // One read transaction, so that a chat and its messages come from the
+    // same commit while Cursor writes.
+    let _snapshot = transaction(conn, &index.db)?;
+    let mut stats = Stats::default();
+    // Of several rows naming one chat, the first takes its stored messages.
+    let mut given = HashSet::new();
+    let mut counted = Vec::new();
+    for session in index
+        .sessions
+        .iter()
+        .filter(|session| selected(&session.id))
+    {
+        let mut session = session.clone();
+        if let MessagesAt::IdeChat { key, blob_key, .. } = &session.messages_at
+            && let Some(composer) = read_composer(conn, &index.db, key, *blob_key)?
+        {
+            let lists = !composer.full_conversation_headers_only.is_empty()
+                || !composer.conversation.is_empty();
+            let bubbles = if given.insert(session.id.clone()) {
+                chat_bubbles(conn, &index.db, &session.id, &mut stats.rows)?
+            } else {
+                None
+            };
+            let has_stored = bubbles.is_some();
+            let chat = chat_messages(composer, bubbles, &mut stats.untyped);
+            if has_stored {
+                stats.stored += 1;
+                stats.unlinked += usize::from(!chat.linked);
+            }
+            if lists && !chat.only_hidden {
+                stats.listing += 1;
+                stats.shown += usize::from(!chat.messages.is_empty());
+            }
+            stats.messages += chat.messages.len();
+            session.message_count = chat.messages.len();
+        }
+        counted.push(session);
+    }
+    Ok((counted, stats))
+}
+
+/// Fails when the rows read show that the format changed, and reports what
+/// was left out.
+fn report(
+    index: &Index,
+    stats: &Stats,
+    warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
+) -> Result<()> {
+    let db_path = &index.db;
+    let read = stats.rows.read + index.orphan_rows.read;
+    let skipped_bubbles = stats.rows.skipped + index.orphan_rows.skipped;
+    // Messages that are all unreadable, chats that all lead to none of their
+    // messages, or messages all without a type mean the format changed
+    // rather than that there is nothing.
+    let mismatch = |detail| Error::SchemaMismatch {
+        store: Source::Ide,
+        path: db_path.to_path_buf(),
+        detail,
+    };
     if read == 0 && skipped_bubbles > 0 {
         return Err(mismatch(match skipped_bubbles {
             1 => "its bubbleId row could not be read".to_string(),
             _ => format!("none of its {skipped_bubbles} bubbleId rows could be read"),
         }));
     }
-    if unlinked > 0 && unlinked == stored {
+    if stats.unlinked > 0 && stats.unlinked == stats.stored {
         return Err(mismatch(
             "no chat lists the messages stored for it".to_string(),
         ));
     }
-    if listing > 0 && shown == 0 {
-        return Err(mismatch(match listing {
+    if stats.listing > 0 && stats.shown == 0 {
+        return Err(mismatch(match stats.listing {
             1 => "its one chat that lists messages has no readable message".to_string(),
-            _ => format!("none of its {listing} chats that list messages has a readable message"),
+            listing => {
+                format!("none of its {listing} chats that list messages has a readable message")
+            }
         }));
     }
-    let messages: usize = sessions.iter().map(|session| session.messages.len()).sum();
-    if untyped > 0 && untyped == messages {
-        return Err(mismatch(match messages {
+    if stats.untyped > 0 && stats.untyped == stats.messages {
+        return Err(mismatch(match stats.messages {
             1 => "its one message has no known type".to_string(),
-            _ => format!("none of its {messages} messages has a known type"),
+            messages => format!("none of its {messages} messages has a known type"),
         }));
     }
-    // Not one chat or message row: either there are no chats, or their rows
-    // are all under keys this version does not know.
-    if sessions.is_empty() && read + skipped + skipped_bubbles == 0 {
-        let mut others = key_prefixes(conn).map_err(|source| Error::Database {
-            path: db_path.to_path_buf(),
-            source,
-        })?;
-        others.retain(|prefix| prefix != "composerData" && prefix != "bubbleId");
+    if !index.other_prefixes.is_empty() {
         // Rows named like chats or messages are most likely those, moved.
-        let (alike, unlike): (Vec<String>, Vec<String>) = others.into_iter().partition(|prefix| {
-            let prefix = prefix.to_ascii_lowercase();
-            prefix.contains("composer") || prefix.contains("bubble")
-        });
-        let named = |prefixes: &[String]| {
+        let (alike, unlike): (Vec<&String>, Vec<&String>) =
+            index.other_prefixes.iter().partition(|prefix| {
+                let prefix = prefix.to_ascii_lowercase();
+                prefix.contains("composer") || prefix.contains("bubble")
+            });
+        let named = |prefixes: &[&String]| {
             prefixes
                 .iter()
                 .map(|prefix| format!("`{prefix}:`"))
@@ -336,7 +470,7 @@ fn read_sessions(
                 db_path.display(),
                 named(&alike)
             ));
-        } else if !unlike.is_empty() {
+        } else {
             warnings.push(format!(
                 "{} has no composerData or bubbleId rows, only rows under {}",
                 db_path.display(),
@@ -345,7 +479,8 @@ fn read_sessions(
         }
     }
     warn_skipped(warnings, skipped_bubbles, "message", db_path);
-    warn_skipped(warnings, skipped, "composer", db_path);
+    warn_skipped(warnings, index.skipped, "composer", db_path);
+    let orphans = &index.orphans;
     if orphans.left.chats > 0 {
         warnings.push(format!(
             "skipped {} message row(s) of {} chat(s) in {} that have no composerData row",
@@ -354,9 +489,10 @@ fn read_sessions(
             db_path.display()
         ));
     }
-    if unlinked > 0 {
+    if stats.unlinked > 0 {
         warnings.push(format!(
-            "{unlinked} chat(s) in {} list none of their stored messages",
+            "{} chat(s) in {} list none of their stored messages",
+            stats.unlinked,
             db_path.display()
         ));
     }
@@ -370,14 +506,249 @@ fn read_sessions(
             db_path.display()
         ));
     }
-    if untyped > 0 {
+    if stats.untyped > 0 {
         notices.push(format!(
-            "{untyped} message(s) in {} have a type this version does not know and are shown \
-             as `unknown`. Cursor may have changed its storage format.",
+            "{} message(s) in {} have a type this version does not know and are shown as \
+             `unknown`. Cursor may have changed its storage format.",
+            stats.untyped,
             db_path.display()
         ));
     }
-    Ok(sessions)
+    Ok(())
+}
+
+/// The messages of the chat whose row has `key` (a BLOB when `blob_key` is
+/// set), with the messages stored for chat `id`.
+pub(crate) fn read_messages(
+    db_path: &Path,
+    key: &str,
+    blob_key: bool,
+    id: &str,
+) -> Result<Vec<Message>> {
+    with_readonly(db_path, |conn| {
+        let _snapshot = transaction(conn, db_path)?;
+        let Some(composer) = read_composer(conn, db_path, key, blob_key)? else {
+            return Ok(Vec::new());
+        };
+        let bubbles = chat_bubbles(conn, db_path, id, &mut Rows::default())?;
+        Ok(chat_messages(composer, bubbles, &mut 0).messages)
+    })
+}
+
+fn transaction<'a>(conn: &'a Connection, db_path: &Path) -> Result<rusqlite::Transaction<'a>> {
+    // Dropping it ends the read.
+    conn.unchecked_transaction()
+        .map_err(|source| Error::Database {
+            path: db_path.to_path_buf(),
+            source,
+        })
+}
+
+/// The chat row with `key`, if it is still there and readable.
+fn read_composer(
+    conn: &Connection,
+    db_path: &Path,
+    key: &str,
+    blob_key: bool,
+) -> Result<Option<Composer>> {
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT value FROM {KV_TABLE} WHERE key = ?1 AND value IS NOT NULL"
+        ))
+        .map_err(|source| Error::Database {
+            path: db_path.to_path_buf(),
+            source,
+        })?;
+    let read = |row: &rusqlite::Row<'_>| Ok(as_text(row.get_ref(0)).map(str::to_string));
+    let value = if blob_key {
+        stmt.query_row([key.as_bytes()], read)
+    } else {
+        stmt.query_row([key], read)
+    };
+    let value = value
+        .optional()
+        .map_err(|source| Error::Database {
+            path: db_path.to_path_buf(),
+            source,
+        })?
+        .flatten();
+    Ok(value.and_then(|value| parse_object(&value)))
+}
+
+/// The messages stored for chat `id`, its `bubbleId:<id>:<message>` rows, by
+/// message ID; `None` when none of them could be read. Rows are counted in
+/// `rows`.
+fn chat_bubbles(
+    conn: &Connection,
+    db_path: &Path,
+    id: &str,
+    rows: &mut Rows,
+) -> Result<Option<HashMap<String, Bubble>>> {
+    let mut bubbles = HashMap::new();
+    for_chat_rows(
+        conn,
+        db_path,
+        id.as_bytes(),
+        |bubble_id, bubble| match bubble {
+            Some(bubble) => {
+                rows.read += 1;
+                let id = bubble.bubble_id.clone().unwrap_or(bubble_id);
+                bubbles.insert(id, bubble);
+            }
+            None => rows.skipped += 1,
+        },
+    )?;
+    Ok((!bubbles.is_empty()).then_some(bubbles))
+}
+
+const BUBBLE_PREFIX: &[u8] = b"bubbleId:";
+
+/// Calls `visit` with the message ID from the key and the message of each
+/// non-NULL `bubbleId:<chat>:<message>` row of `chat`; `None` for a row that
+/// cannot be read.
+fn for_chat_rows(
+    conn: &Connection,
+    db_path: &Path,
+    chat: &[u8],
+    mut visit: impl FnMut(String, Option<Bubble>),
+) -> Result<()> {
+    let bound = |end: u8| [BUBBLE_PREFIX, chat, &[end]].concat();
+    scan_rows(conn, db_path, &bound(b':'), &bound(b';'), |row| {
+        // The chat ID ends at the first `:`, so an ID with one of its own has
+        // the keys of another chat in its range.
+        if chat_of(row.key) != Some(chat) {
+            return;
+        }
+        let message = row.text.and_then(|(key, value)| {
+            let message_id = key.split_once(':')?.1.split_once(':')?.1;
+            Some((message_id.to_string(), parse_object::<Bubble>(value)?))
+        });
+        match message {
+            Some((message_id, bubble)) => visit(message_id, Some(bubble)),
+            None => visit(String::new(), None),
+        }
+    })
+}
+
+/// The chat ID of a `bubbleId:` key, which ends at its next `:`.
+fn chat_of(key: &[u8]) -> Option<&[u8]> {
+    let rest = key.strip_prefix(BUBBLE_PREFIX)?;
+    rest.iter()
+        .position(|&byte| byte == b':')
+        .map(|colon| &rest[..colon])
+}
+
+/// The messages stored for chats that no chat row read names, by chat: how
+/// many rows were read and could not be, and for each chat with a readable
+/// one, how many messages it has. Only the rows of those chats are read.
+fn orphan_messages(
+    conn: &Connection,
+    db_path: &Path,
+    ids: &HashSet<String>,
+) -> Result<(Rows, Vec<(String, usize)>)> {
+    let db_err = |source| Error::Database {
+        path: db_path.to_path_buf(),
+        source,
+    };
+    let (chats, loose) = message_chats(conn).map_err(db_err)?;
+    let mut rows = Rows::default();
+    let mut orphans: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+    let mut add = |chat: &str, message: Option<(String, Bubble)>, rows: &mut Rows| match message {
+        Some((message_id, bubble)) => {
+            rows.read += 1;
+            let id = bubble.bubble_id.unwrap_or(message_id);
+            orphans.entry(chat.to_string()).or_default().insert(id);
+        }
+        None => rows.skipped += 1,
+    };
+    for chat in chats {
+        let id = std::str::from_utf8(&chat).ok();
+        if id.is_some_and(|id| ids.contains(id)) {
+            continue;
+        }
+        for_chat_rows(conn, db_path, &chat, |message_id, bubble| {
+            // A chat ID that is not UTF-8 has only keys that are not either.
+            let chat = id.unwrap_or_default();
+            add(chat, bubble.map(|bubble| (message_id, bubble)), &mut rows);
+        })?;
+    }
+    // Keys without a chat ID belong to the chat ``, as do `bubbleId::` keys.
+    for (key, blob_key) in loose {
+        let mut stmt = conn
+            .prepare_cached(&format!(
+                "SELECT value FROM {KV_TABLE} WHERE key = CAST(?1 AS {}) AND value IS NOT NULL",
+                if blob_key { "BLOB" } else { "TEXT" }
+            ))
+            .map_err(db_err)?;
+        let value = stmt
+            .query_row(
+                [&key],
+                |row| Ok(as_text(row.get_ref(0)).map(str::to_string)),
+            )
+            .optional()
+            .map_err(db_err)?;
+        let Some(value) = value else {
+            continue;
+        };
+        let message = std::str::from_utf8(&key)
+            .ok()
+            .zip(value)
+            .and_then(|(_, value)| parse_object::<Bubble>(&value))
+            .map(|bubble| (String::new(), bubble));
+        add("", message, &mut rows);
+    }
+    let orphans = orphans
+        .into_iter()
+        .map(|(chat, messages)| (chat, messages.len()))
+        .collect();
+    Ok((rows, orphans))
+}
+
+/// The chat IDs, as bytes, of the `bubbleId:<chat>:<message>` keys, and the
+/// `bubbleId:` keys without a second `:`, with whether each is a BLOB. It
+/// skips through the key index from one chat to the next rather than reading
+/// every key.
+#[allow(clippy::type_complexity)]
+fn message_chats(conn: &Connection) -> rusqlite::Result<(BTreeSet<Vec<u8>>, Vec<(Vec<u8>, bool)>)> {
+    let mut chats = BTreeSet::new();
+    let mut loose = Vec::new();
+    // TEXT keys sort before BLOB keys, so each is searched on its own.
+    for (cast, blob_key) in [("TEXT", false), ("BLOB", true)] {
+        let query = |op: &str| {
+            format!(
+                "SELECT key FROM {KV_TABLE} WHERE key {op} CAST(?1 AS {cast}) \
+                 AND key < CAST(?2 AS {cast}) ORDER BY key LIMIT 1"
+            )
+        };
+        let mut from = conn.prepare(&query(">="))?;
+        let mut after = conn.prepare(&query(">"))?;
+        let end = b"bubbleId;".as_slice();
+        let first = |stmt: &mut rusqlite::Statement<'_>, bound: &[u8]| {
+            stmt.query_row([bound, end], |row| match row.get_ref(0)? {
+                ValueRef::Text(key) | ValueRef::Blob(key) => Ok(Some(key.to_vec())),
+                _ => Ok(None),
+            })
+            .optional()
+            .map(Option::flatten)
+        };
+        let mut key = first(&mut from, BUBBLE_PREFIX)?;
+        while let Some(found) = key {
+            key = match chat_of(&found) {
+                // Every key of this chat sorts before `bubbleId:<chat>;`.
+                Some(chat) => {
+                    let next = [BUBBLE_PREFIX, chat, b";"].concat();
+                    chats.insert(chat.to_vec());
+                    first(&mut from, &next)?
+                }
+                None => {
+                    let next = first(&mut after, &found)?;
+                    loose.push((found, blob_key));
+                    next
+                }
+            };
+        }
+    }
+    Ok((chats, loose))
 }
 
 /// Chats with stored messages but without a chat row that was read.
@@ -404,16 +775,13 @@ impl Count {
     }
 }
 
-/// Sorts the chats of `bubbles` by whether a `<prefix>:<chat id>` row of
-/// another prefix exists. Those with a `composerData` row of their own, which
-/// could not be read and is reported as such, are left out.
-fn find_orphans(
-    conn: &Connection,
-    db_path: &Path,
-    bubbles: HashMap<String, HashMap<String, Bubble>>,
-) -> Result<Orphans> {
+/// Sorts `chats`, with how many messages each has, by whether a
+/// `<prefix>:<chat id>` row of another prefix exists. Those with a
+/// `composerData` row of their own, which could not be read and is reported
+/// as such, are left out.
+fn find_orphans(conn: &Connection, db_path: &Path, chats: Vec<(String, usize)>) -> Result<Orphans> {
     let mut orphans = Orphans::default();
-    if bubbles.is_empty() {
+    if chats.is_empty() {
         return Ok(orphans);
     }
     let db_err = |source| Error::Database {
@@ -427,11 +795,6 @@ fn find_orphans(
     let mut exists = conn
         .prepare(&format!("SELECT 1 FROM {KV_TABLE} WHERE key = ?1"))
         .map_err(db_err)?;
-    let mut chats: Vec<(String, usize)> = bubbles
-        .into_iter()
-        .map(|(chat, messages)| (chat, messages.len()))
-        .collect();
-    chats.sort();
     for (chat, rows) in chats {
         let mut named_by = None;
         if !chat.is_empty() {
@@ -498,9 +861,10 @@ fn key_prefixes(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 
 #[cfg(test)]
 thread_local! {
-    /// Runs on this thread between reading the messages and reading the chats.
+    /// Runs on this thread between reading the chat rows and looking for
+    /// messages without a chat.
     #[allow(clippy::type_complexity)]
-    static AFTER_BUBBLES: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+    static AFTER_CHATS: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -552,40 +916,81 @@ fn column_strings(conn: &Connection, sql: &str) -> rusqlite::Result<Vec<String>>
     rows.collect()
 }
 
-/// Calls `visit` with the key and value of every non-NULL row whose key starts
-/// with `prefix`. Values may be stored as TEXT or BLOB. Returns how many rows
-/// could not be decoded, either here or by `visit` returning `false`.
+/// Calls `visit` with the key, whether it is a BLOB, and the value of every
+/// non-NULL row whose key starts with `prefix`. Values may be stored as TEXT
+/// or BLOB. Returns how many rows could not be decoded, either here or by
+/// `visit` returning `false`.
 fn read_rows(
     conn: &Connection,
     db_path: &Path,
     prefix: &str,
-    mut visit: impl FnMut(&str, &str) -> bool,
+    mut visit: impl FnMut(&str, bool, &str) -> bool,
 ) -> Result<usize> {
+    let mut skipped = 0;
+    scan_rows(
+        conn,
+        db_path,
+        prefix.as_bytes(),
+        prefix_end(prefix).as_bytes(),
+        |row| {
+            let decoded = match row.text {
+                Some((key, value)) => visit(key, row.blob_key, value),
+                None => false,
+            };
+            if !decoded {
+                skipped += 1;
+            }
+        },
+    )?;
+    Ok(skipped)
+}
+
+/// A row as [`scan_rows`] finds it.
+struct Row<'a> {
+    key: &'a [u8],
+    blob_key: bool,
+    /// The key and the value, when both are UTF-8.
+    text: Option<(&'a str, &'a str)>,
+}
+
+/// Calls `visit` with every non-NULL row whose key, as TEXT or as a BLOB, is
+/// in `lower..upper`.
+fn scan_rows(
+    conn: &Connection,
+    db_path: &Path,
+    lower: &[u8],
+    upper: &[u8],
+    mut visit: impl FnMut(Row<'_>),
+) -> Result<()> {
     let db_err = |source| Error::Database {
         path: db_path.to_path_buf(),
         source,
     };
-    let mut stmt = conn.prepare(&rows_query()).map_err(db_err)?;
-    let mut rows = stmt.query([prefix, &prefix_end(prefix)]).map_err(db_err)?;
-    let mut skipped = 0;
+    let mut stmt = conn.prepare_cached(&rows_query()).map_err(db_err)?;
+    let mut rows = stmt.query([lower, upper]).map_err(db_err)?;
     while let Some(row) = rows.next().map_err(db_err)? {
-        let decoded = match (as_text(row.get_ref(0)), as_text(row.get_ref(1))) {
-            (Some(key), Some(value)) => visit(key, value),
-            _ => false,
+        let (key, blob_key) = match row.get_ref(0) {
+            Ok(ValueRef::Text(key)) => (key, false),
+            Ok(ValueRef::Blob(key)) => (key, true),
+            _ => (&[][..], false),
         };
-        if !decoded {
-            skipped += 1;
-        }
+        let text = std::str::from_utf8(key).ok().zip(as_text(row.get_ref(1)));
+        visit(Row {
+            key,
+            blob_key,
+            text,
+        });
     }
-    Ok(skipped)
+    Ok(())
 }
 
 /// The rows whose key is in `?1..?2`, a range that, unlike `LIKE`, SQLite
 /// finds through the index on `key`. A key stored as a BLOB sorts after
-/// every TEXT, so the range is searched once as TEXT and once as BLOB.
+/// every TEXT, so the range is searched once as TEXT and once as BLOB. The
+/// bounds are bound as BLOBs, so that they can be any bytes.
 fn rows_query() -> String {
     format!(
-        "SELECT key, value FROM {KV_TABLE} WHERE (key >= ?1 AND key < ?2 \
+        "SELECT key, value FROM {KV_TABLE} WHERE (key >= CAST(?1 AS TEXT) AND key < CAST(?2 AS TEXT) \
          OR key >= CAST(?1 AS BLOB) AND key < CAST(?2 AS BLOB)) AND value IS NOT NULL"
     )
 }
@@ -622,9 +1027,10 @@ fn warn_skipped(warnings: &mut Vec<String>, skipped: usize, kind: &str, db_path:
     }
 }
 
-/// A chat read from its composer row.
-struct Chat {
-    session: Session,
+/// The messages of a chat, read from its composer row and its stored
+/// messages.
+struct ChatMessages {
+    messages: Vec<Message>,
     /// Whether its conversation led to any message: one of the `bubbles`
     /// stored for it, or one kept inline.
     linked: bool,
@@ -633,16 +1039,15 @@ struct Chat {
     only_hidden: bool,
 }
 
-/// The chat for `composer`, with its messages from `bubbles`, its stored
-/// messages, or those kept inline, as older Cursor versions did for composers
-/// without conversation headers. Messages without a known type are counted in
+/// The messages of `composer`, from `bubbles`, its stored messages, or those
+/// kept inline, as older Cursor versions did for composers without
+/// conversation headers. Messages without a known type are counted in
 /// `untyped`.
-fn composer_session(
-    id: String,
+fn chat_messages(
     composer: Composer,
     mut bubbles: Option<HashMap<String, Bubble>>,
     untyped: &mut usize,
-) -> Chat {
+) -> ChatMessages {
     let mut messages = Vec::new();
     let mut linked = false;
     // Whether every message it lists is there and holds something hidden.
@@ -671,23 +1076,9 @@ fn composer_session(
             messages.extend(message(bubble.kind, bubble, untyped));
         }
     }
-    let title = composer
-        .name
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Untitled".to_string());
     let only_hidden = messages.is_empty() && linked && all_hidden;
-    Chat {
-        session: Session {
-            id,
-            title,
-            source: Source::Ide,
-            workspace: None,
-            workspace_hash: None,
-            created_at_ms: composer.created_at,
-            updated_at_ms: composer.last_updated_at,
-            model: None,
-            messages,
-        },
+    ChatMessages {
+        messages,
         linked,
         only_hidden,
     }
@@ -786,6 +1177,8 @@ fn walk_text(value: &Value, out: &mut Vec<String>) {
 mod tests {
     use rusqlite::types::Value as SqlValue;
 
+    use crate::model::Session;
+
     use super::*;
 
     const COMPOSER: &str = r#"{"composerId":"c1","name":"Plan","createdAt":1700000000000,"lastUpdatedAt":1700000500000,"fullConversationHeadersOnly":[{"bubbleId":"b1","type":1},{"bubbleId":"b2","type":2}]}"#;
@@ -823,9 +1216,24 @@ mod tests {
         ]
     }
 
+    /// The sessions with their messages, which number what listing counted.
     fn load(path: &Path) -> (Result<Vec<Session>>, Vec<String>) {
         let (mut warnings, mut notices) = (Vec::new(), Vec::new());
-        let sessions = load_from_db(path, &mut warnings, &mut notices);
+        let sessions = load_from_db(path, &mut warnings, &mut notices).and_then(|summaries| {
+            summaries
+                .iter()
+                .map(|summary| {
+                    let session = crate::load_messages(summary)?;
+                    assert_eq!(
+                        session.messages.len(),
+                        summary.message_count,
+                        "{}",
+                        summary.id
+                    );
+                    Ok(session)
+                })
+                .collect()
+        });
         assert!(notices.is_empty(), "{notices:?}");
         (sessions, warnings)
     }
@@ -839,10 +1247,11 @@ mod tests {
             create_db(&path, &well_formed(as_blob));
             let (sessions, warnings) = load(&path);
             assert_eq!(warnings, Vec::<String>::new());
-            loaded.push(serde_json::to_string(&sessions.unwrap()).unwrap());
+            let sessions = sessions.unwrap();
+            loaded.push((serde_json::to_string(&sessions).unwrap(), sessions));
         }
-        assert_eq!(loaded[0], loaded[1]);
-        let sessions: Vec<Session> = serde_json::from_str(&loaded[0]).unwrap();
+        assert_eq!(loaded[0].0, loaded[1].0);
+        let sessions = &loaded[0].1;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].title, "Plan");
         let contents: Vec<_> = sessions[0].messages.iter().map(|m| &m.content).collect();
@@ -896,7 +1305,7 @@ mod tests {
             .execute("INSERT INTO ItemTable VALUES ('open', 'yes')", [])
             .unwrap();
         // A chat and its message, committed between reading messages and chats.
-        AFTER_BUBBLES.set(Some(Box::new(move || {
+        AFTER_CHATS.set(Some(Box::new(move || {
             writer
                 .execute_batch(
                     r#"INSERT INTO cursorDiskKV VALUES ('bubbleId:late:b1', '{"type":1,"text":"late"}');
@@ -905,7 +1314,7 @@ mod tests {
                 .unwrap();
         })));
         let (sessions, warnings) = load(&path);
-        AFTER_BUBBLES.set(None);
+        AFTER_CHATS.set(None);
         let sessions = sessions.unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
@@ -965,7 +1374,7 @@ mod tests {
 
         assert_eq!(prefix_end("bubbleId:"), "bubbleId;");
         let mut keys = Vec::new();
-        read_rows(&conn, &path, "bubbleId:", |key, _| {
+        read_rows(&conn, &path, "bubbleId:", |key, _, _| {
             keys.push(key.to_string());
             true
         })

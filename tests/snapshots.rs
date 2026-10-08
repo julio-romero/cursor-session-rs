@@ -7,18 +7,23 @@ mod common;
 
 use common::*;
 use cursor_session::export::{self, Format};
-use cursor_session::model::Session;
+use cursor_session::model::{Session, SessionSummary};
 use cursor_session::ui;
 use unicode_width::UnicodeWidthStr;
 
 const WIDTHS: [usize; 7] = [40, 60, 80, 100, 120, 160, 200];
 
-fn sessions() -> Vec<Session> {
-    standard().load().sessions
+fn sessions() -> Vec<SessionSummary> {
+    standard().load().summaries
 }
 
 fn session(id: &str) -> Session {
-    sessions().into_iter().find(|s| s.id == id).unwrap()
+    standard()
+        .load()
+        .sessions
+        .into_iter()
+        .find(|s| s.id == id)
+        .unwrap()
 }
 
 #[test]

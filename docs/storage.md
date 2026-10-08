@@ -175,6 +175,11 @@ without workspace or times, and a `warning:` line says so too. A value of an
 unexpected type costs only that value. An empty `store.db` or `meta.json`, as a
 session that was never used leaves, is not a change of format.
 
+`list --limit N` and `show` read the messages of only the sessions they print.
+When what they read looks like a change of format, they check every chat
+before deciding, so they stop with the same error `list` would; warnings about
+skipped rows cover only what they read.
+
 Please [open an issue](https://github.com/julio-romero/cursor-session-rs/issues)
 with your Cursor version.
 

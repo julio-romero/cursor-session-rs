@@ -31,7 +31,8 @@ fn load_db_noticed(
     Vec<String>,
 ) {
     let (mut warnings, mut notices) = (Vec::new(), Vec::new());
-    let sessions = load_from_db(path, &mut warnings, &mut notices);
+    let sessions = load_from_db(path, &mut warnings, &mut notices)
+        .and_then(|summaries| with_messages(&summaries));
     (sessions, warnings, notices)
 }
 
@@ -621,7 +622,11 @@ fn chats_whose_rows_moved_are_a_notice_and_deleted_ones_a_warning() {
     let db = fixture.write_ide_db(Journal::Delete, &rows);
 
     let (sessions, warnings, notices) = load_db_noticed(&db);
-    let ids: Vec<String> = sessions.unwrap().into_iter().map(|s| s.id).collect();
+    let ids: Vec<String> = sessions
+        .unwrap()
+        .into_iter()
+        .map(|s| s.summary.id)
+        .collect();
     assert_eq!(ids, ["old"]);
     assert_eq!(
         warnings,

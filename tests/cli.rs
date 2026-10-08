@@ -432,7 +432,10 @@ fn piped_output_is_the_plain_layout_without_escape_sequences() {
         assert!(!out.contains('\u{1b}'), "{args:?}: {out:?}");
         out
     };
-    assert_eq!(plain(&["list"]), ui::render_list(&sessions, false, None));
+    assert_eq!(
+        plain(&["list"]),
+        ui::render_list(&summaries(&sessions), false, None)
+    );
     assert_eq!(
         plain(&["show", AGENT_ID]),
         ui::render_show(agent, &agent.messages, None, false)
@@ -469,7 +472,7 @@ fn color_always_colors_piped_output() {
         };
         assert_eq!(
             colored(&["list", "--color", "always"]),
-            ui::render_list(&sessions, true, None)
+            ui::render_list(&summaries(&sessions), true, None)
         );
         assert_eq!(
             colored(&["--color=always", "show", AGENT_ID]),
@@ -1428,8 +1431,8 @@ mod tty {
         crossterm::style::force_color_output(true);
         let fixture = standard();
         let sessions = fixture.load().sessions;
-        let colored = ui::render_list(&sessions, true, Some(WIDTH));
-        let plain = ui::render_list(&sessions, false, Some(WIDTH));
+        let colored = ui::render_list(&summaries(&sessions), true, Some(WIDTH));
+        let plain = ui::render_list(&summaries(&sessions), false, Some(WIDTH));
         assert!(colored.contains('\u{1b}') && plain.contains('│'));
 
         assert_eq!(run_tty(&fixture, &["list"], &[]), colored);

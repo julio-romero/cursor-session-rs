@@ -7,11 +7,12 @@ use std::time::SystemTime;
 use rusqlite::OptionalExtension;
 use rusqlite::types::ValueRef;
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use serde_json::Value;
 
 use crate::detect::{ChatsScope, StoragePaths};
 use crate::json::{self, lenient, lenient_ms};
-use crate::model::{Message, Session, Source};
+use crate::model::{Message, MessagesAt, SessionSummary, Source};
 use crate::sqlite::with_readonly;
 use crate::{Error, Result};
 
@@ -82,7 +83,8 @@ struct TranscriptMessage {
 enum TranscriptContent {
     Text(String),
     Parts(Vec<TranscriptPart>),
-    Other(Value),
+    /// Anything else, which holds no text.
+    Other(IgnoredAny),
 }
 
 impl Default for TranscriptContent {
@@ -98,17 +100,35 @@ struct TranscriptPart {
     text: Option<String>,
 }
 
-/// Loads the Agent CLI sessions. A location that cannot be read is reported in
-/// `notices` while the other one loads; when no location that was found can be
-/// read, loading fails, so that this is not mistaken for having no sessions.
-/// So does a transcript format this version cannot read. Files that cannot be
-/// read are reported in `warnings`.
+/// Loads the Agent CLI sessions with their message counts; see [`index`] and
+/// [`count`].
 pub fn load_sessions(
     paths: &StoragePaths,
     warnings: &mut Vec<String>,
     notices: &mut Vec<String>,
-) -> Result<Vec<Session>> {
-    let mut by_id: HashMap<String, Session> = HashMap::new();
+) -> Result<Vec<SessionSummary>> {
+    let index = index(paths, warnings, notices)?;
+    Ok(count(&index, &|_| true, warnings))
+}
+
+/// The Agent CLI sessions, without their messages counted.
+pub(crate) struct Index {
+    pub sessions: Vec<SessionSummary>,
+    /// The transcripts of each session that hold a message.
+    transcripts: HashMap<String, Vec<TranscriptFile>>,
+}
+
+/// Finds the Agent CLI sessions, reading each transcript only up to its first
+/// message. A location that cannot be read is reported in `notices` while the
+/// other one loads; when no location that was found can be read, loading
+/// fails, so that this is not mistaken for having no sessions. So does a
+/// transcript format this version cannot read. Files that cannot be read are
+/// reported in `warnings`.
+pub(crate) fn index(
+    paths: &StoragePaths,
+    warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
+) -> Result<Index> {
     // Below the chats root (one workspace or one session), transcripts only
     // fill in the sessions found there.
     let scoped = paths.chats_dir.is_some() && paths.chats_scope != ChatsScope::All;
@@ -145,33 +165,68 @@ pub fn load_sessions(
         None => HashMap::new(),
     };
 
+    let mut by_id: HashMap<String, SessionSummary> = HashMap::new();
     for session in chats.unwrap_or_default() {
         by_id.insert(session.id.clone(), session);
     }
-    for (id, messages) in transcripts {
-        if let Some(session) = by_id.get_mut(&id) {
-            if session.messages.is_empty() {
-                session.messages = messages;
-            }
-        } else if !scoped {
-            by_id.insert(
-                id.clone(),
-                Session {
-                    title: id.clone(),
-                    id,
-                    source: Source::Agent,
-                    workspace: None,
-                    workspace_hash: None,
-                    created_at_ms: None,
-                    updated_at_ms: None,
-                    model: None,
-                    messages,
-                },
-            );
+    if !scoped {
+        for id in transcripts.keys() {
+            by_id
+                .entry(id.clone())
+                .or_insert_with(|| SessionSummary::new(id.clone(), id.clone(), Source::Agent));
         }
     }
+    Ok(Index {
+        sessions: by_id.into_values().collect(),
+        transcripts,
+    })
+}
 
-    Ok(by_id.into_values().collect())
+/// The sessions of `index` that `selected` accepts, each with the number of
+/// messages in its transcript and where that is. Of several copies of a
+/// transcript, the one with the most messages is used. Transcripts that
+/// cannot be read are reported in `warnings`.
+pub(crate) fn count(
+    index: &Index,
+    selected: &dyn Fn(&str) -> bool,
+    warnings: &mut Vec<String>,
+) -> Vec<SessionSummary> {
+    let mut unreadable = Unreadable::new("transcript");
+    let counted = index
+        .sessions
+        .iter()
+        .filter(|session| selected(&session.id))
+        .map(|session| {
+            let mut session = session.clone();
+            let files = index
+                .transcripts
+                .get(&session.id)
+                .map_or(&[][..], Vec::as_slice);
+            let mut best: Option<TranscriptCandidate> = None;
+            for file in files {
+                match scan_transcript(&file.path, None, false) {
+                    // A copy that lost its messages since it was found is not one.
+                    Ok(scan) if scan.messages > 0 => select_transcript(
+                        &mut best,
+                        TranscriptCandidate {
+                            messages: scan.messages,
+                            modified: file.modified,
+                            path: file.path.clone(),
+                        },
+                    ),
+                    Ok(_) => {}
+                    Err(err) => unreadable.add(&file.path, reason(&err)),
+                }
+            }
+            if let Some(best) = best {
+                session.message_count = best.messages;
+                session.messages_at = MessagesAt::Transcript(best.path);
+            }
+            session
+        })
+        .collect();
+    unreadable.report(warnings);
+    counted
 }
 
 /// What scanning the location `dir` found, or `None` when `dir` could not be
@@ -301,7 +356,7 @@ fn scan_chats(
     scope: ChatsScope,
     warnings: &mut Vec<String>,
     notices: &mut Vec<String>,
-) -> io::Result<Vec<Session>> {
+) -> io::Result<Vec<SessionSummary>> {
     let mut session_dirs = Vec::new();
     match scope {
         ChatsScope::Session => {
@@ -325,7 +380,7 @@ fn scan_chats(
 
     let mut meta_files = Unreadable::new("meta.json");
     let mut stores = Unreadable::new("store.db");
-    let sessions: Vec<Session> = session_dirs
+    let sessions: Vec<SessionSummary> = session_dirs
         .iter()
         .filter_map(|(dir, hash)| load_chat_session(dir, hash, &mut meta_files, &mut stores))
         .collect();
@@ -352,7 +407,7 @@ fn load_chat_session(
     workspace_hash: &str,
     meta_files: &mut Unreadable,
     stores: &mut Unreadable,
-) -> Option<Session> {
+) -> Option<SessionSummary> {
     let id = session_dir.file_name()?.to_str()?.to_string();
     let meta_path = session_dir.join("meta.json");
     let store_path = session_dir.join("store.db");
@@ -382,20 +437,17 @@ fn load_chat_session(
         return None;
     };
 
-    let mut session = Session {
-        id,
-        title: meta
-            .title
-            .clone()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default(),
-        source: Source::Agent,
+    let title = meta
+        .title
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let mut session = SessionSummary {
         workspace: meta.cwd.clone(),
         workspace_hash: Some(workspace_hash.to_string()),
         created_at_ms: meta.created_at_ms,
         updated_at_ms: meta.updated_at_ms,
-        model: None,
-        messages: Vec::new(),
+        ..SessionSummary::new(id, title, Source::Agent)
     };
 
     let store = read_store_meta(&store_path);
@@ -421,8 +473,9 @@ fn load_chat_session(
         session.title = session.id.clone();
     }
 
-    if meta.has_conversation == Some(false) && !store_path.is_file() && session.messages.is_empty()
-    {
+    // Its transcript, if any, is read later, so this session is left out
+    // even then; the transcript makes a session of its own.
+    if meta.has_conversation == Some(false) && !store_path.is_file() {
         return None;
     }
 
@@ -534,50 +587,50 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 struct TranscriptCandidate {
-    messages: Vec<Message>,
+    messages: usize,
     modified: Option<SystemTime>,
     path: PathBuf,
 }
 
 impl TranscriptCandidate {
     fn rank(&self) -> (usize, Option<SystemTime>, &Path) {
-        (self.messages.len(), self.modified, &self.path)
+        (self.messages, self.modified, &self.path)
     }
 }
 
-fn select_transcript(
-    candidates: &mut HashMap<String, TranscriptCandidate>,
-    id: String,
-    candidate: TranscriptCandidate,
-) {
-    use std::collections::hash_map::Entry;
-
-    match candidates.entry(id) {
-        Entry::Occupied(mut entry) => {
-            if candidate.rank() > entry.get().rank() {
-                entry.insert(candidate);
-            }
-        }
-        Entry::Vacant(entry) => {
-            entry.insert(candidate);
-        }
+/// Keeps the better of `best` and `candidate`: more messages, then the newer
+/// file, then the greater path, so that the order files are found in does not
+/// matter.
+fn select_transcript(best: &mut Option<TranscriptCandidate>, candidate: TranscriptCandidate) {
+    if best
+        .as_ref()
+        .is_none_or(|best| candidate.rank() > best.rank())
+    {
+        *best = Some(candidate);
     }
+}
+
+/// A transcript that holds a message.
+struct TranscriptFile {
+    path: PathBuf,
+    modified: Option<SystemTime>,
 }
 
 /// What [`scan_transcripts`] found.
 struct Transcripts {
-    /// The messages of each session.
-    by_id: HashMap<String, Vec<Message>>,
+    /// The transcripts of each session that hold a message.
+    by_id: HashMap<String, Vec<TranscriptFile>>,
     /// Transcripts read that held messages or should have.
     read: usize,
     /// Those of them in which no message could be read.
     unrecognized: usize,
 }
 
-/// The messages of each transcript under `projects_dir`, by session ID. Fails
-/// only when `projects_dir` itself cannot be read.
+/// The transcripts under `projects_dir` that hold a message, by session ID,
+/// each read only up to that message. Fails only when `projects_dir` itself
+/// cannot be read.
 fn scan_transcripts(projects_dir: &Path, warnings: &mut Vec<String>) -> io::Result<Transcripts> {
-    let mut candidates = HashMap::new();
+    let mut by_id: HashMap<String, Vec<TranscriptFile>> = HashMap::new();
     let mut unreadable = Unreadable::new("transcript");
     let mut read = 0;
     for project in read_subdirs(projects_dir)? {
@@ -606,40 +659,32 @@ fn scan_transcripts(projects_dir: &Path, warnings: &mut Vec<String>) -> io::Resu
             let Some(path) = transcript_path(&dir, &id, warnings) else {
                 continue;
             };
-            let transcript = match read_transcript(&path) {
-                Ok(transcript) => transcript,
+            let scan = match scan_transcript(&path, None, true) {
+                Ok(scan) => scan,
                 Err(err) => {
                     unreadable.add(&path, reason(&err));
                     continue;
                 }
             };
-            if transcript.unrecognized {
+            if scan.unrecognized() {
                 read += 1;
                 unreadable.add_unrecognized(&path, "no user or assistant message could be read");
                 continue;
             }
-            if !transcript.messages.is_empty() {
+            if scan.messages > 0 {
                 read += 1;
                 let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
-                select_transcript(
-                    &mut candidates,
-                    id,
-                    TranscriptCandidate {
-                        messages: transcript.messages,
-                        modified,
-                        path,
-                    },
-                );
+                by_id
+                    .entry(id)
+                    .or_default()
+                    .push(TranscriptFile { path, modified });
             }
         }
     }
     let unrecognized = unreadable.unrecognized;
     unreadable.report(warnings);
     Ok(Transcripts {
-        by_id: candidates
-            .into_iter()
-            .map(|(id, candidate)| (id, candidate.messages))
-            .collect(),
+        by_id,
         read,
         unrecognized,
     })
@@ -668,31 +713,46 @@ fn transcript_path(dir: &Path, id: &str, warnings: &mut Vec<String>) -> Option<P
         .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl") && p.is_file())
 }
 
+/// The messages of the transcript at `path`.
 pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
-    Ok(read_transcript(path)?.messages)
+    let mut messages = Vec::new();
+    scan_transcript(path, Some(&mut messages), false)?;
+    Ok(messages)
 }
 
-/// The messages of one transcript.
-struct Transcript {
-    messages: Vec<Message>,
+/// What a transcript holds, as far as it was read.
+#[derive(Debug, Default)]
+struct Scan {
+    messages: usize,
+    /// Lines that should hold a message: the user's, the assistant's, and
+    /// those this version cannot read, such as lines of an unknown role.
+    expected: usize,
+}
+
+impl Scan {
     /// Whether it holds lines but no message could be read from them, which
     /// lines of the roles that are never shown (system, tool) alone do not
     /// make it.
-    unrecognized: bool,
+    fn unrecognized(&self) -> bool {
+        self.messages == 0 && self.expected > 0
+    }
 }
 
-fn read_transcript(path: &Path) -> Result<Transcript> {
+/// Reads the transcript at `path` line by line, keeping no more than one line
+/// in memory. Its messages go to `keep` when given; otherwise they are only
+/// counted. With `until_first`, reading stops at the first message.
+fn scan_transcript(
+    path: &Path,
+    mut keep: Option<&mut Vec<Message>>,
+    until_first: bool,
+) -> Result<Scan> {
     let io_err = |source| Error::Io {
         path: path.to_path_buf(),
         source,
     };
     let file = fs::File::open(path).map_err(io_err)?;
-    let reader = BufReader::new(file);
-    let mut messages = Vec::new();
-    // Lines that should hold a message: the user's, the assistant's, and
-    // those this version cannot read, such as lines of an unknown role.
-    let mut expected = 0;
-    for line in reader.split(b'\n') {
+    let mut scan = Scan::default();
+    for line in BufReader::new(file).split(b'\n') {
         let line = line.map_err(io_err)?;
         // An invalid byte costs its character, not the rest of the transcript.
         let line = String::from_utf8_lossy(&line);
@@ -700,46 +760,90 @@ fn read_transcript(path: &Path) -> Result<Transcript> {
         if line.is_empty() {
             continue;
         }
-        let entry = json::from_str::<TranscriptLine>(line).ok();
-        let Some((role, message)) = entry.and_then(|entry| Some((entry.role?, entry.message)))
-        else {
-            expected += 1;
-            continue;
-        };
-        if matches!(role.as_str(), "system" | "tool") {
-            continue;
+        match read_line(line, keep.is_some()) {
+            Line::Nothing => {}
+            Line::NoMessage => scan.expected += 1,
+            Line::Message(message) => {
+                scan.expected += 1;
+                scan.messages += 1;
+                if let (Some(keep), Some(message)) = (keep.as_deref_mut(), message) {
+                    keep.push(message);
+                }
+                if until_first {
+                    break;
+                }
+            }
         }
-        let known = role == "user" || role == "assistant";
-        let content = message.map(|m| m.content).unwrap_or_default();
-        // A line of only tool calls or images has nothing to show either.
-        if known && holds_only_hidden(&content) {
-            continue;
-        }
-        expected += 1;
-        if !known {
-            continue;
-        }
-        let raw_content = extract_content(&content);
-        let timestamp = extract_timestamp_tag(&raw_content);
-        let content = if role == "user" {
-            clean_user_text(&raw_content)
-        } else {
-            raw_content.trim().to_string()
-        };
-        if content.is_empty() {
-            continue;
-        }
-        messages.push(Message {
-            role,
-            content,
-            timestamp,
-        });
     }
-    let unrecognized = messages.is_empty() && expected > 0;
-    Ok(Transcript {
-        messages,
-        unrecognized,
-    })
+    Ok(scan)
+}
+
+/// What one transcript line holds.
+enum Line {
+    /// Nothing that should be a message: a system or tool line, or one of
+    /// only tool calls or images.
+    Nothing,
+    /// A line that should hold a message but holds none this version can
+    /// show: unreadable, of an unknown role, or without text.
+    NoMessage,
+    /// A message, built when asked for.
+    Message(Option<Message>),
+}
+
+fn read_line(line: &str, build: bool) -> Line {
+    let entry = json::from_str::<TranscriptLine>(line).ok();
+    let Some((role, message)) = entry.and_then(|entry| Some((entry.role?, entry.message))) else {
+        return Line::NoMessage;
+    };
+    if matches!(role.as_str(), "system" | "tool") {
+        return Line::Nothing;
+    }
+    let known = role == "user" || role == "assistant";
+    let content = message.map(|m| m.content).unwrap_or_default();
+    // A line of only tool calls or images has nothing to show either.
+    if known && holds_only_hidden(&content) {
+        return Line::Nothing;
+    }
+    if !known {
+        return Line::NoMessage;
+    }
+    if !build {
+        return if has_text(&role, &content) {
+            Line::Message(None)
+        } else {
+            Line::NoMessage
+        };
+    }
+    let raw_content = extract_content(&content);
+    let timestamp = extract_timestamp_tag(&raw_content);
+    let content = if role == "user" {
+        clean_user_text(&raw_content)
+    } else {
+        raw_content.trim().to_string()
+    };
+    if content.is_empty() {
+        return Line::NoMessage;
+    }
+    Line::Message(Some(Message {
+        role,
+        content,
+        timestamp,
+    }))
+}
+
+/// Whether a message of `role` with `content` has text to show, as
+/// [`read_line`] decides when it builds the message.
+fn has_text(role: &str, content: &TranscriptContent) -> bool {
+    if role == "user" {
+        return !clean_user_text(&extract_content(content)).is_empty();
+    }
+    // Joined with blank lines and trimmed, the parts have text when one does.
+    let visible = |text: &str| !text.trim().is_empty();
+    match content {
+        TranscriptContent::Text(text) => visible(text),
+        TranscriptContent::Parts(parts) => text_parts(parts).any(visible),
+        TranscriptContent::Other(_) => false,
+    }
 }
 
 /// Content parts that are never shown.
@@ -751,16 +855,19 @@ fn holds_only_hidden(content: &TranscriptContent) -> bool {
         && parts.iter().all(|part| part.kind.as_deref().is_some_and(|kind| HIDDEN_PARTS.contains(&kind))))
 }
 
+/// The text of the parts that are text, which a part without a type is.
+fn text_parts(parts: &[TranscriptPart]) -> impl Iterator<Item = &str> {
+    parts
+        .iter()
+        .filter(|part| part.kind.as_deref().unwrap_or("text") == "text")
+        .filter_map(|part| part.text.as_deref())
+}
+
 fn extract_content(content: &TranscriptContent) -> String {
     match content {
         TranscriptContent::Text(text) => text.clone(),
-        TranscriptContent::Parts(parts) => parts
-            .iter()
-            .filter(|part| part.kind.as_deref().unwrap_or("text") == "text")
-            .filter_map(|part| part.text.as_deref())
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-        TranscriptContent::Other(value) => value.as_str().map(str::to_string).unwrap_or_default(),
+        TranscriptContent::Parts(parts) => text_parts(parts).collect::<Vec<_>>().join("\n\n"),
+        TranscriptContent::Other(_) => String::new(),
     }
 }
 
@@ -843,13 +950,7 @@ mod tests {
 
     fn candidate(count: usize, modified: Option<u64>, path: &str) -> TranscriptCandidate {
         TranscriptCandidate {
-            messages: (0..count)
-                .map(|index| Message {
-                    role: "user".into(),
-                    content: format!("message {index}"),
-                    timestamp: None,
-                })
-                .collect(),
+            messages: count,
             modified: modified
                 .map(|seconds| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
             path: path.into(),
@@ -868,32 +969,55 @@ mod tests {
         ];
         for (lower, higher) in cases {
             for order in [[lower, higher], [higher, lower]] {
-                let mut candidates = HashMap::new();
+                let mut best = None;
                 for (count, modified, path) in order {
-                    select_transcript(
-                        &mut candidates,
-                        "session".into(),
-                        candidate(count, modified, path),
-                    );
+                    select_transcript(&mut best, candidate(count, modified, path));
                 }
                 let expected = candidate(higher.0, higher.1, higher.2);
-                assert_eq!(candidates["session"].rank(), expected.rank());
-                assert_eq!(candidates.len(), 1);
+                assert_eq!(best.unwrap().rank(), expected.rank());
             }
         }
     }
 
     #[test]
     fn identical_transcripts_do_not_duplicate_messages() {
-        let mut candidates = HashMap::new();
+        let mut best = None;
         for _ in 0..2 {
-            select_transcript(
-                &mut candidates,
-                "session".into(),
-                candidate(3, Some(10), "same.jsonl"),
-            );
+            select_transcript(&mut best, candidate(3, Some(10), "same.jsonl"));
         }
-        assert_eq!(candidates["session"].messages.len(), 3);
+        assert_eq!(best.unwrap().messages, 3);
+    }
+
+    /// Counting a transcript gives the number of messages reading it gives,
+    /// whatever its lines hold.
+    #[test]
+    fn counted_messages_are_the_messages_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let lines = [
+            r#"{"role":"user","message":{"content":"<timestamp>Mon</timestamp>\n<user_query>\nhi\n</user_query>"}}"#,
+            r#"{"role":"user","message":{"content":"<timestamp>Mon</timestamp>"}}"#,
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>"},{"type":"text","text":"x</timestamp>"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"  "},{"text":"\n"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":" "},{"text":"done"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":7}]}}"#,
+            r#"{"role":"assistant","message":{"content":{"text":"moved"}}}"#,
+            r#"{"role":"assistant","message":{"content":null}}"#,
+            r#"{"role":"assistant","message":{"content":"   "}}"#,
+            r#"{"role":"assistant","message":{"content":"\u00a0plain\ud83d"}}"#,
+            r#"{"role":"system","message":{"content":"setup"}}"#,
+            r#"{"role":"human","message":{"content":"hello"}}"#,
+            r#"["user",{"content":"by position"}]"#,
+            "{not json",
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let read = read_jsonl(&path).unwrap();
+        let counted = scan_transcript(&path, None, false).unwrap();
+        assert_eq!(counted.messages, read.len());
+        assert_eq!(read.len(), 4, "{read:?}");
+        let first = scan_transcript(&path, None, true).unwrap();
+        assert_eq!((first.messages, first.expected), (1, 1));
     }
 
     fn write(path: &Path, contents: &str) {
@@ -916,7 +1040,7 @@ mod tests {
         chats_dir: &Path,
         chats_scope: ChatsScope,
         projects_dir: Option<&Path>,
-    ) -> (Vec<Session>, Vec<String>) {
+    ) -> (Vec<SessionSummary>, Vec<String>) {
         let paths = StoragePaths {
             chats_dir: Some(chats_dir.to_path_buf()),
             chats_scope,
@@ -1053,7 +1177,7 @@ mod tests {
         format!("{{\"{key}\":\"{role}\",\"message\":{{\"content\":\"{text}\"}}}}\n")
     }
 
-    fn load_transcripts(projects: &Path) -> Result<(Vec<Session>, Vec<String>)> {
+    fn load_transcripts(projects: &Path) -> Result<(Vec<SessionSummary>, Vec<String>)> {
         let paths = StoragePaths {
             projects_dir: Some(projects.to_path_buf()),
             ..Default::default()
@@ -1202,7 +1326,7 @@ mod tests {
             let (sessions, warnings) = load(&chats_dir, scope, Some(&projects));
             let ids: Vec<_> = sessions.iter().map(|s| s.id.as_str()).collect();
             assert_eq!(ids, expected, "{}", chats_dir.display());
-            assert!(sessions.iter().all(|s| s.messages.len() == 1));
+            assert!(sessions.iter().all(|s| s.message_count == 1));
             assert!(
                 sessions
                     .iter()

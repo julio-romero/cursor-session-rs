@@ -83,7 +83,8 @@ a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4  2026-10-05 14:12  Add retry
 - `--source agent` or `--source ide` reads only that store. The other one is
   never opened, so a broken store cannot get in the way. When the store named
   was not found but the other one was, a `warning:` line says so.
-- `--limit N` (N ≥ 1) keeps the N most recently updated sessions.
+- `--limit N` (N ≥ 1) keeps the N most recently updated sessions. Only their
+  messages are read to count them, so it stays quick on a large history.
 
 ## Show a session
 
@@ -113,6 +114,7 @@ Done. `WEBHOOK_MAX_ATTEMPTS` (default 5) is read in `Config::from_env`, and the 
 - The ID can be the full session ID or any unique prefix of it, in any case, such
   as the 8-character prefix from the table. If several sessions share the
   prefix, the error lists them and you can type more characters.
+- `show` reads the messages of that one session only.
 - In a terminal, `show` prints the last 20 messages. Piped, it prints all of them.
   `--limit N` prints the last N and `--all` prints everything. The two flags
   cannot be combined.

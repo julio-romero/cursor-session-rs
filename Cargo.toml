@@ -1,6 +1,6 @@
 [package]
 name = "cursor-session"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "List, show, and export Cursor IDE and Agent CLI chat sessions"
@@ -43,6 +43,9 @@ assert_cmd = "2"
 insta = "1"
 predicates = "3"
 tempfile = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [lints.clippy]
 unwrap_used = "deny"

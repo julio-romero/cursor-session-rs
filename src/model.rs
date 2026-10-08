@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 
 use chrono::{DateTime, Datelike, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -78,8 +80,27 @@ impl Message {
     }
 }
 
+/// Where a session's messages are, so that they can be read after listing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum MessagesAt {
+    /// The session has no messages.
+    #[default]
+    Nowhere,
+    /// An Agent CLI transcript.
+    Transcript(PathBuf),
+    /// An IDE chat: the row with `key` in the `state.vscdb` at `db`, a key
+    /// stored as a BLOB when `blob_key` is set.
+    IdeChat {
+        db: PathBuf,
+        key: String,
+        blob_key: bool,
+    },
+}
+
+/// A session without its messages: what `list` shows. Serialized, it is the
+/// session part of an export.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Session {
+pub struct SessionSummary {
     pub id: String,
     pub title: String,
     pub source: Source,
@@ -93,12 +114,28 @@ pub struct Session {
     pub updated_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    pub messages: Vec<Message>,
+    /// How many messages `show` and `export` read from `messages_at`.
+    #[serde(skip)]
+    pub message_count: usize,
+    #[serde(skip)]
+    pub messages_at: MessagesAt,
 }
 
-impl Session {
-    pub fn message_count(&self) -> usize {
-        self.messages.len()
+impl SessionSummary {
+    /// A summary with only these fields known and no messages.
+    pub fn new(id: impl Into<String>, title: impl Into<String>, source: Source) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            source,
+            workspace: None,
+            workspace_hash: None,
+            created_at_ms: None,
+            updated_at_ms: None,
+            model: None,
+            message_count: 0,
+            messages_at: MessagesAt::Nowhere,
+        }
     }
 
     pub fn created_display(&self) -> String {
@@ -109,13 +146,13 @@ impl Session {
         format_ms(self.updated_or_created_ms())
     }
 
-    /// [`Session::created_display`] marked as UTC, for text that also shows
-    /// local times.
+    /// [`SessionSummary::created_display`] marked as UTC, for text that also
+    /// shows local times.
     pub fn created_utc(&self) -> String {
         marked_utc(self.created_display())
     }
 
-    /// [`Session::updated_display`] marked as UTC.
+    /// [`SessionSummary::updated_display`] marked as UTC.
     pub fn updated_utc(&self) -> String {
         marked_utc(self.updated_display())
     }
@@ -127,8 +164,9 @@ impl Session {
         shown(self.updated_at_ms).or(shown(self.created_at_ms))
     }
 
-    pub fn summary(&self) -> SessionSummary<'_> {
-        SessionSummary {
+    /// The `list --json` entry.
+    pub fn json(&self) -> SummaryJson<'_> {
+        SummaryJson {
             id: &self.id,
             title: &self.title,
             source: self.source,
@@ -137,17 +175,49 @@ impl Session {
             model: self.model.as_deref(),
             created_at: rfc3339(self.created_at_ms),
             updated_at: rfc3339(self.updated_at_ms),
-            message_count: self.message_count(),
+            message_count: self.message_count,
         }
     }
+}
 
-    /// The summary plus `messages`, which may be a tail of `self.messages`.
-    pub fn detail<'a>(&'a self, messages: &'a [Message]) -> SessionDetail<'a> {
-        SessionDetail {
-            summary: self.summary(),
+/// A session with its messages: what `show` and `export` print. It derefs to
+/// its summary, whose `message_count` is the number of `messages`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "StoredSession")]
+pub struct Session {
+    #[serde(flatten)]
+    pub summary: SessionSummary,
+    pub messages: Vec<Message>,
+}
+
+/// A session as an export stores it.
+#[derive(Deserialize)]
+struct StoredSession {
+    #[serde(flatten)]
+    summary: SessionSummary,
+    messages: Vec<Message>,
+}
+
+impl From<StoredSession> for Session {
+    fn from(stored: StoredSession) -> Self {
+        Session::new(stored.summary, stored.messages)
+    }
+}
+
+impl Session {
+    pub fn new(mut summary: SessionSummary, messages: Vec<Message>) -> Self {
+        summary.message_count = messages.len();
+        Self { summary, messages }
+    }
+
+    /// The `show --json` object: the summary plus `messages`, which may be a
+    /// tail of `self.messages`.
+    pub fn detail<'a>(&'a self, messages: &'a [Message]) -> DetailJson<'a> {
+        DetailJson {
+            summary: self.summary.json(),
             messages: messages
                 .iter()
-                .map(|message| MessageDetail {
+                .map(|message| MessageJson {
                     role: &message.role,
                     content: &message.content,
                     timestamp: message.timestamp.as_deref(),
@@ -157,9 +227,23 @@ impl Session {
     }
 }
 
+impl Deref for Session {
+    type Target = SessionSummary;
+
+    fn deref(&self) -> &SessionSummary {
+        &self.summary
+    }
+}
+
+impl DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut SessionSummary {
+        &mut self.summary
+    }
+}
+
 /// JSON shape of one `list --json` entry. Every key is always present.
 #[derive(Debug, Clone, Serialize)]
-pub struct SessionSummary<'a> {
+pub struct SummaryJson<'a> {
     pub id: &'a str,
     pub title: &'a str,
     pub source: Source,
@@ -174,14 +258,14 @@ pub struct SessionSummary<'a> {
 
 /// JSON shape of `show --json`.
 #[derive(Debug, Clone, Serialize)]
-pub struct SessionDetail<'a> {
+pub struct DetailJson<'a> {
     #[serde(flatten)]
-    pub summary: SessionSummary<'a>,
-    pub messages: Vec<MessageDetail<'a>>,
+    pub summary: SummaryJson<'a>,
+    pub messages: Vec<MessageJson<'a>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct MessageDetail<'a> {
+pub struct MessageJson<'a> {
     pub role: &'a str,
     pub content: &'a str,
     /// As stored by Cursor; not normalised.
@@ -214,9 +298,13 @@ fn marked_utc(shown: String) -> String {
     }
 }
 
-pub fn merge_sessions(mut sessions: Vec<Session>) -> Vec<Session> {
+/// Merges the summaries of one session from several stores, which share its
+/// ID, and sorts the result newest first. The first copy of a session keeps
+/// its fields and takes those it lacks from the others; an Agent CLI copy
+/// makes the session `agent`, and its messages win unless it has none.
+pub fn merge_sessions(mut sessions: Vec<SessionSummary>) -> Vec<SessionSummary> {
     sessions.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut merged: Vec<Session> = Vec::new();
+    let mut merged: Vec<SessionSummary> = Vec::new();
     for session in sessions {
         if let Some(existing) = merged.last_mut()
             && existing.id == session.id
@@ -234,7 +322,7 @@ pub fn merge_sessions(mut sessions: Vec<Session>) -> Vec<Session> {
     merged
 }
 
-fn merge_into(dst: &mut Session, src: Session) {
+fn merge_into(dst: &mut SessionSummary, src: SessionSummary) {
     if (dst.title.is_empty() || dst.title == dst.id) && !src.title.is_empty() {
         dst.title = src.title;
     }
@@ -253,11 +341,11 @@ fn merge_into(dst: &mut Session, src: Session) {
     if dst.model.is_none() {
         dst.model = src.model;
     }
-    if dst.messages.is_empty() && !src.messages.is_empty() {
-        dst.messages = src.messages;
-    } else if dst.source == Source::Ide && src.source == Source::Agent && !src.messages.is_empty() {
-        dst.messages = src.messages;
-        dst.source = Source::Agent;
+    let takes_messages = src.message_count > 0
+        && (dst.message_count == 0 || dst.source == Source::Ide && src.source == Source::Agent);
+    if takes_messages {
+        dst.message_count = src.message_count;
+        dst.messages_at = src.messages_at;
     }
     if dst.source == Source::Ide && src.source == Source::Agent {
         dst.source = Source::Agent;
@@ -268,17 +356,23 @@ fn merge_into(dst: &mut Session, src: Session) {
 mod tests {
     use super::*;
 
-    fn session() -> Session {
-        Session {
-            id: "f4eea6d2-d2d3-41ad-b290-824445295a15".into(),
-            title: "Langfuse Semantic Layer".into(),
-            source: Source::Ide,
+    fn summary() -> SessionSummary {
+        SessionSummary {
             workspace: Some("/Users/manuel.romero".into()),
-            workspace_hash: None,
             created_at_ms: Some(1_700_000_000_000),
             updated_at_ms: Some(1_700_000_100_123),
-            model: None,
-            messages: vec![
+            ..SessionSummary::new(
+                "f4eea6d2-d2d3-41ad-b290-824445295a15",
+                "Langfuse Semantic Layer",
+                Source::Ide,
+            )
+        }
+    }
+
+    fn session() -> Session {
+        Session::new(
+            summary(),
+            vec![
                 Message {
                     role: "user".into(),
                     content: "hello".into(),
@@ -290,13 +384,13 @@ mod tests {
                     timestamp: None,
                 },
             ],
-        }
+        )
     }
 
     #[test]
     fn summary_json_has_stable_keys_and_rfc3339_times() {
         let session = session();
-        let value = serde_json::to_value(session.summary()).unwrap();
+        let value = serde_json::to_value(session.json()).unwrap();
         let keys: Vec<&str> = value
             .as_object()
             .unwrap()
@@ -324,12 +418,12 @@ mod tests {
         assert_eq!(value["updated_at"], "2023-11-14T22:15:00Z");
         assert_eq!(value["message_count"], 2);
 
-        let bare = Session {
+        let bare = SessionSummary {
             created_at_ms: None,
             updated_at_ms: None,
-            ..session
+            ..session.summary
         };
-        let value = serde_json::to_value(bare.summary()).unwrap();
+        let value = serde_json::to_value(bare.json()).unwrap();
         assert_eq!(value["created_at"], serde_json::Value::Null);
         assert_eq!(value["updated_at"], serde_json::Value::Null);
     }
@@ -372,11 +466,11 @@ mod tests {
 
     #[test]
     fn sessions_sort_newest_first_by_the_updated_time_shown() {
-        let at = |id: &str, created_at_ms, updated_at_ms| Session {
+        let at = |id: &str, created_at_ms, updated_at_ms| SessionSummary {
             id: id.into(),
             created_at_ms,
             updated_at_ms,
-            ..session()
+            ..summary()
         };
         let sessions = vec![
             at("no-times", None, None),
@@ -391,24 +485,24 @@ mod tests {
             ids,
             ["created-3", "tie-a", "tie-b", "updated-2", "no-times"]
         );
-        let shown: Vec<String> = merged.iter().map(Session::updated_display).collect();
+        let shown: Vec<String> = merged.iter().map(SessionSummary::updated_display).collect();
         assert!(shown[..4].is_sorted_by(|a, b| a >= b), "{shown:?}");
     }
 
     #[test]
     fn a_time_that_cannot_be_shown_does_not_order_the_list() {
         // Microseconds where milliseconds belong: the year 57650.
-        let micro = Session {
+        let micro = SessionSummary {
             id: "micro".into(),
             created_at_ms: Some(1_757_000_000_000),
             updated_at_ms: Some(1_757_000_000_000_000),
-            ..session()
+            ..summary()
         };
-        let newer = Session {
+        let newer = SessionSummary {
             id: "newer".into(),
             created_at_ms: Some(1_757_500_000_000),
             updated_at_ms: None,
-            ..session()
+            ..summary()
         };
         let merged = merge_sessions(vec![micro, newer]);
         let ids: Vec<&str> = merged.iter().map(|s| s.id.as_str()).collect();
@@ -417,7 +511,7 @@ mod tests {
         assert_eq!(merged[1].updated_display(), "2025-09-04 15:33");
         assert_eq!(merged[1].updated_utc(), "2025-09-04 15:33 UTC");
         assert_eq!(
-            serde_json::to_value(merged[1].summary()).unwrap()["updated_at"],
+            serde_json::to_value(merged[1].json()).unwrap()["updated_at"],
             serde_json::Value::Null
         );
     }
@@ -444,17 +538,16 @@ mod tests {
             assert_eq!(shown(Some(stored)).as_deref(), Some(stored));
         }
         assert_eq!(shown(None), None);
-        let bare = Session {
+        let bare = SessionSummary {
             created_at_ms: None,
-            ..session()
+            ..summary()
         };
         assert_eq!(bare.created_utc(), "—");
     }
 
     #[test]
     fn export_json_shape_is_unchanged() {
-        let mut session = session();
-        session.messages.clear();
+        let session = Session::new(summary(), Vec::new());
         let value = serde_json::to_value(&session).unwrap();
         let keys: Vec<&str> = value
             .as_object()
