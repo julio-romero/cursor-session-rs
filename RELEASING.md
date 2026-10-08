@@ -17,8 +17,10 @@ when a version tag is pushed. Before the first release, once:
 secrets. Without them a tag push still creates the GitHub Release, and then
 the Homebrew and crates.io jobs fail. For each release:
 
-1. Set `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, then
-   commit and push to `master`.
+1. Set `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`,
+   regenerate the man pages, whose title carries the version, with
+   `CURSOR_SESSION_REGENERATE=1 cargo test --locked --test generated`, add a
+   section to `CHANGELOG.md`, then commit and push to `master`.
 2. Wait for CI to pass on that commit. The Release workflow does not run the
    tests itself.
 3. Check that `dist plan` prints `announcing vX.Y.Z`. Use dist 0.32.0, the

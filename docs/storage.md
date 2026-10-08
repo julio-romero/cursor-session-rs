@@ -53,9 +53,12 @@ cannot be read gives `could not access`, and any other path gives
 
 ## Read-only access
 
-cursor-session never changes Cursor's data. Every SQLite database it reads
-(`state.vscdb` and each session's `store.db`) is opened with SQLite's read-only
-flag and `PRAGMA query_only`.
+cursor-session never changes Cursor's data. Every SQLite database of Cursor's
+it reads (`state.vscdb` and each session's `store.db`) is opened with SQLite's
+read-only flag and `PRAGMA query_only`. In the cases below where it reads a
+private temporary copy instead, the copy is opened for writing, so that SQLite
+can roll back or apply its journal there; the copy is deleted afterwards, and
+Cursor's own files are never opened for writing.
 
 A database in rollback-journal mode, SQLite's default, is read in place and
 creates no files. A read can make Cursor wait briefly to commit, and if the
