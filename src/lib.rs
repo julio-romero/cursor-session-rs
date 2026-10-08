@@ -14,7 +14,7 @@ pub use crate::sqlite::remove_stale_snapshot_copies;
 use std::collections::HashSet;
 
 use crate::detect::StoragePaths;
-use crate::model::{MessagesAt, Session, SessionSummary, Source};
+use crate::model::{Message, MessagesAt, Session, SessionSummary, Source};
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadOptions {
@@ -101,6 +101,23 @@ pub fn load_messages(summary: &SessionSummary) -> Result<Session> {
         }
     };
     Ok(Session::new(summary.clone(), messages))
+}
+
+/// Calls `visit` with each message of the session `summary` lists, in order:
+/// the messages [`load_messages`] returns, without holding them all. A
+/// transcript is read a line at a time; an IDE chat is read whole, as one
+/// chat at a time is.
+pub fn visit_messages(summary: &SessionSummary, visit: &mut dyn FnMut(Message)) -> Result<()> {
+    match &summary.messages_at {
+        MessagesAt::Nowhere => Ok(()),
+        MessagesAt::Transcript(path) => agent::visit_jsonl(path, visit),
+        MessagesAt::IdeChat { db, key, blob_key } => {
+            ide::read_messages(db, key, *blob_key, &summary.id)?
+                .into_iter()
+                .for_each(visit);
+            Ok(())
+        }
+    }
 }
 
 /// The sessions of the stores to load, found without counting messages.

@@ -733,3 +733,25 @@ fn load_options_default_to_both_stores() {
     let both = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
     assert_eq!(both.sessions.len(), STANDARD_IDS.len());
 }
+
+#[test]
+fn visiting_messages_gives_the_messages_loaded() {
+    let fixture = standard();
+    for session in fixture.load().sessions {
+        let mut visited = Vec::new();
+        cursor_session::visit_messages(&session.summary, &mut |message| visited.push(message))
+            .unwrap();
+        let contents = |messages: &[Message]| -> Vec<(String, String)> {
+            messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect()
+        };
+        assert_eq!(
+            contents(&visited),
+            contents(&session.messages),
+            "{}",
+            session.id
+        );
+    }
+}
