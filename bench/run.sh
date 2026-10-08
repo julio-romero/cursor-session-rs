@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Benchmarks cursor-session with hyperfine on synthetic stores of growing size:
-# wall time per command, and peak memory (median of all runs).
+# wall time per command, and peak memory (median of all runs). The search rows
+# use words every generated message holds, so every session is read and matches.
 #
 #   bench/run.sh [BINARY] [OUT_DIR]
 #
@@ -39,7 +40,11 @@ for n in $sizes; do
     -n "agent show (1 session)" "$bin --storage $agent show ${agent_id:0:8}" \
     -n "ide list --limit 5"     "$bin --storage $ide list --limit 5" \
     -n "ide list --json"        "$bin --storage $ide list --json" \
-    -n "ide show (1 session)"   "$bin --storage $ide show ${ide_id:0:8}"
+    -n "ide show (1 session)"   "$bin --storage $ide show ${ide_id:0:8}" \
+    -n "agent search (all match)"          "$bin --storage $agent search lorem dolor" \
+    -n "agent handoff --stdout (1 session)" "$bin --storage $agent handoff ${agent_id:0:8} --stdout" \
+    -n "ide search (all match)"            "$bin --storage $ide search lorem dolor" \
+    -n "ide handoff --stdout (1 session)"   "$bin --storage $ide handoff ${ide_id:0:8} --stdout"
   python3 "$here/mem.py" "$out/time-s$n.json" "$n" "$size" >> "$memory"
 done
 
