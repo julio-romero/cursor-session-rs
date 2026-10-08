@@ -103,6 +103,33 @@ ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(handoff)
+_arguments "${_arguments_options[@]}" : \
+'--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
+ide\:"Cursor IDE composer chats (state.vscdb)"))' \
+'--limit=[Keep only the last N messages \[default\: all\]]:N:_default' \
+'(--no-preamble)--preamble=[Start the transcript with TEXT instead of the default preamble (TEXT may start with "-")]:TEXT:_default' \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'--stdout[Print the transcript instead of copying it]' \
+'--no-preamble[Start the transcript with the first message]' \
+'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session ID, or a unique prefix of one (case-insensitive):_default' \
+&& ret=0
+;;
+(serve-clipboard)
+_arguments "${_arguments_options[@]}" : \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'-v[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (healthcheck)
 _arguments "${_arguments_options[@]}" : \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
@@ -163,6 +190,14 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(handoff)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(serve-clipboard)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (healthcheck)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -195,6 +230,8 @@ _cursor-session_commands() {
 'show:Show messages from a session' \
 'search:Find the sessions whose messages hold every word of a query' \
 'export:Export sessions to files' \
+'handoff:Copy a session'\''s transcript, to continue it with another agent' \
+'serve-clipboard:Keep the text on stdin on the clipboard until something else is copied' \
 'healthcheck:Check that session stores can be found and loaded' \
 'completions:Print a shell completion script' \
 'man:Print a man page in roff format' \
@@ -212,6 +249,11 @@ _cursor-session__subcmd__export_commands() {
     local commands; commands=()
     _describe -t commands 'cursor-session export commands' commands "$@"
 }
+(( $+functions[_cursor-session__subcmd__handoff_commands] )) ||
+_cursor-session__subcmd__handoff_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session handoff commands' commands "$@"
+}
 (( $+functions[_cursor-session__subcmd__healthcheck_commands] )) ||
 _cursor-session__subcmd__healthcheck_commands() {
     local commands; commands=()
@@ -224,6 +266,8 @@ _cursor-session__subcmd__help_commands() {
 'show:Show messages from a session' \
 'search:Find the sessions whose messages hold every word of a query' \
 'export:Export sessions to files' \
+'handoff:Copy a session'\''s transcript, to continue it with another agent' \
+'serve-clipboard:Keep the text on stdin on the clipboard until something else is copied' \
 'healthcheck:Check that session stores can be found and loaded' \
 'completions:Print a shell completion script' \
 'man:Print a man page in roff format' \
@@ -240,6 +284,11 @@ _cursor-session__subcmd__help__subcmd__completions_commands() {
 _cursor-session__subcmd__help__subcmd__export_commands() {
     local commands; commands=()
     _describe -t commands 'cursor-session help export commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__handoff_commands] )) ||
+_cursor-session__subcmd__help__subcmd__handoff_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help handoff commands' commands "$@"
 }
 (( $+functions[_cursor-session__subcmd__help__subcmd__healthcheck_commands] )) ||
 _cursor-session__subcmd__help__subcmd__healthcheck_commands() {
@@ -266,6 +315,11 @@ _cursor-session__subcmd__help__subcmd__search_commands() {
     local commands; commands=()
     _describe -t commands 'cursor-session help search commands' commands "$@"
 }
+(( $+functions[_cursor-session__subcmd__help__subcmd__serve-clipboard_commands] )) ||
+_cursor-session__subcmd__help__subcmd__serve-clipboard_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help serve-clipboard commands' commands "$@"
+}
 (( $+functions[_cursor-session__subcmd__help__subcmd__show_commands] )) ||
 _cursor-session__subcmd__help__subcmd__show_commands() {
     local commands; commands=()
@@ -285,6 +339,11 @@ _cursor-session__subcmd__man_commands() {
 _cursor-session__subcmd__search_commands() {
     local commands; commands=()
     _describe -t commands 'cursor-session search commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__serve-clipboard_commands] )) ||
+_cursor-session__subcmd__serve-clipboard_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session serve-clipboard commands' commands "$@"
 }
 (( $+functions[_cursor-session__subcmd__show_commands] )) ||
 _cursor-session__subcmd__show_commands() {

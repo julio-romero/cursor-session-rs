@@ -22,6 +22,9 @@ _cursor__session() {
             cursor__session,export)
                 cmd="cursor__session__subcmd__export"
                 ;;
+            cursor__session,handoff)
+                cmd="cursor__session__subcmd__handoff"
+                ;;
             cursor__session,healthcheck)
                 cmd="cursor__session__subcmd__healthcheck"
                 ;;
@@ -37,6 +40,9 @@ _cursor__session() {
             cursor__session,search)
                 cmd="cursor__session__subcmd__search"
                 ;;
+            cursor__session,serve-clipboard)
+                cmd="cursor__session__subcmd__serve__subcmd__clipboard"
+                ;;
             cursor__session,show)
                 cmd="cursor__session__subcmd__show"
                 ;;
@@ -45,6 +51,9 @@ _cursor__session() {
                 ;;
             cursor__session__subcmd__help,export)
                 cmd="cursor__session__subcmd__help__subcmd__export"
+                ;;
+            cursor__session__subcmd__help,handoff)
+                cmd="cursor__session__subcmd__help__subcmd__handoff"
                 ;;
             cursor__session__subcmd__help,healthcheck)
                 cmd="cursor__session__subcmd__help__subcmd__healthcheck"
@@ -61,6 +70,9 @@ _cursor__session() {
             cursor__session__subcmd__help,search)
                 cmd="cursor__session__subcmd__help__subcmd__search"
                 ;;
+            cursor__session__subcmd__help,serve-clipboard)
+                cmd="cursor__session__subcmd__help__subcmd__serve__subcmd__clipboard"
+                ;;
             cursor__session__subcmd__help,show)
                 cmd="cursor__session__subcmd__help__subcmd__show"
                 ;;
@@ -71,7 +83,7 @@ _cursor__session() {
 
     case "${cmd}" in
         cursor__session)
-            opts="-v -h -V --storage --verbose --color --help --version list show search export healthcheck completions man help"
+            opts="-v -h -V --storage --verbose --color --help --version list show search export handoff serve-clipboard healthcheck completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -167,6 +179,40 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        cursor__session__subcmd__handoff)
+            opts="-v -h --source --limit --stdout --preamble --no-preamble --storage --verbose --color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --source)
+                    COMPREPLY=($(compgen -W "agent ide" -- "${cur}"))
+                    return 0
+                    ;;
+                --limit)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --preamble)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --storage)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         cursor__session__subcmd__healthcheck)
             opts="-v -h --storage --verbose --color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
@@ -190,7 +236,7 @@ _cursor__session() {
             return 0
             ;;
         cursor__session__subcmd__help)
-            opts="list show search export healthcheck completions man help"
+            opts="list show search export handoff serve-clipboard healthcheck completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -218,6 +264,20 @@ _cursor__session() {
             return 0
             ;;
         cursor__session__subcmd__help__subcmd__export)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        cursor__session__subcmd__help__subcmd__handoff)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -288,6 +348,20 @@ _cursor__session() {
             return 0
             ;;
         cursor__session__subcmd__help__subcmd__search)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        cursor__session__subcmd__help__subcmd__serve__subcmd__clipboard)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -398,6 +472,28 @@ _cursor__session() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --storage)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --color)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        cursor__session__subcmd__serve__subcmd__clipboard)
+            opts="-v -h --storage --verbose --color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
                 --storage)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

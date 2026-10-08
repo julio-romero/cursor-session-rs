@@ -1,0 +1,86 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cursor-session-handoff 1 "" "cursor-session 0.3.0" "User Commands"
+.SH NAME
+cursor\-session\-handoff \- Copy a session\*(Aqs transcript, to continue it with another agent
+.SH SYNOPSIS
+\fBcursor\-session handoff\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-stdout\fR] [\fB\-\-preamble\fR] [\fB\-\-no\-preamble\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fISESSION_ID\fR> 
+.SH DESCRIPTION
+Copy a session\*(Aqs transcript, to continue it with another agent
+.PP
+The transcript is a preamble, then the session\*(Aqs user and assistant messages as `show \-\-short \-\-only user,assistant` prints them, each under a `[user]` or `[assistant]` line, then a trailer with the number of messages and the transcript\*(Aqs token estimate: ceil(characters / 4), an estimate, not any model\*(Aqs tokenizer count. Escape sequences in stored text are removed. The default preamble reads: "The following is a transcript from a Cursor session that ran out of credits. Continue from where it ended; do not summarize it back."
+.PP
+It is copied to the system clipboard: on macOS with /usr/bin/pbcopy; on Linux through X11, where a copy of this program serves it in the background until something else is copied, for at most 12 hours. Without an X11 display (DISPLAY not set, as in a Wayland session without XWayland, where `\-\-stdout | wl\-copy` copies it), or when copying fails, it is printed to stdout instead, with a warning on stderr, and the command still succeeds. A session without user or assistant messages is not copied; a warning says so.
+.SH OPTIONS
+.TP
+\fB\-\-source\fR \fI<SOURCE>\fR
+Only read this store; the other one is never opened
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+agent: Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)
+.IP \(bu 2
+ide: Cursor IDE composer chats (state.vscdb)
+.RE
+.TP
+\fB\-\-limit\fR \fI<N>\fR
+Keep only the last N messages [default: all]
+.TP
+\fB\-\-stdout\fR
+Print the transcript instead of copying it
+.TP
+\fB\-\-preamble\fR \fI<TEXT>\fR
+Start the transcript with TEXT instead of the default preamble (TEXT may start with "\-")
+.TP
+\fB\-\-no\-preamble\fR
+Start the transcript with the first message
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fISESSION_ID\fR>
+Session ID, or a unique prefix of one (case\-insensitive)
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-\-storage\fR \fI<PATH>\fR
+Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the storage paths in use and the rows and files that were skipped to stderr
+.TP
+\fB\-\-color\fR \fI<WHEN>\fR [default: auto]
+When to use color
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.SH EXAMPLES
+.RS 4
+.nf
+cursor\-session handoff f4eea6d2
+cursor\-session handoff f4eea6d2 \-\-limit 30
+cursor\-session handoff f4eea6d2 \-\-stdout > handoff.txt
+cursor\-session handoff f4eea6d2 \-\-preamble \*(AqContinue this refactor in the same repository.\*(Aq
+cursor\-session handoff f4eea6d2 \-\-no\-preamble \-\-stdout
+cursor\-session handoff f4eea6d2 \-\-stdout | wl\-copy
+.fi
+.RE
+.SH "EXIT STATUS"
+.RS 4
+.nf
+0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+1  Error: session not found, unreadable storage, failed healthcheck
+2  Usage error: unknown command or flag, invalid value
+.fi
+.RE

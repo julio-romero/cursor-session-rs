@@ -35,6 +35,8 @@ complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "list"
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "show" -d 'Show messages from a session'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "search" -d 'Find the sessions whose messages hold every word of a query'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "export" -d 'Export sessions to files'
+complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "handoff" -d 'Copy a session\'s transcript, to continue it with another agent'
+complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "serve-clipboard" -d 'Keep the text on stdin on the clipboard until something else is copied'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "healthcheck" -d 'Check that session stores can be found and loaded'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "completions" -d 'Print a shell completion script'
 complete -c cursor-session -n "__fish_cursor_session_needs_command" -f -a "man" -d 'Print a man page in roff format'
@@ -94,6 +96,24 @@ always\t''
 never\t''"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
+ide\t'Cursor IDE composer chats (state.vscdb)'"
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l limit -d 'Keep only the last N messages [default: all]' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l preamble -d 'Start the transcript with TEXT instead of the default preamble (TEXT may start with "-")' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l color -d 'When to use color' -r -f -a "auto\t''
+always\t''
+never\t''"
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l stdout -d 'Print the transcript instead of copying it'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l no-preamble -d 'Start the transcript with the first message'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand serve-clipboard" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand serve-clipboard" -l color -d 'When to use color' -r -f -a "auto\t''
+always\t''
+never\t''"
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand serve-clipboard" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand serve-clipboard" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand healthcheck" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand healthcheck" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
@@ -112,11 +132,13 @@ always\t''
 never\t''"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -s v -l verbose -d 'Print the storage paths in use and the rows and files that were skipped to stderr'
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand man" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "list" -d 'List sessions, most recently updated first'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "show" -d 'Show messages from a session'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "search" -d 'Find the sessions whose messages hold every word of a query'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "export" -d 'Export sessions to files'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "healthcheck" -d 'Check that session stores can be found and loaded'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "completions" -d 'Print a shell completion script'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "man" -d 'Print a man page in roff format'
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export healthcheck completions man help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "list" -d 'List sessions, most recently updated first'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "show" -d 'Show messages from a session'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "search" -d 'Find the sessions whose messages hold every word of a query'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "export" -d 'Export sessions to files'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "handoff" -d 'Copy a session\'s transcript, to continue it with another agent'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "serve-clipboard" -d 'Keep the text on stdin on the clipboard until something else is copied'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "healthcheck" -d 'Check that session stores can be found and loaded'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "completions" -d 'Print a shell completion script'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "man" -d 'Print a man page in roff format'
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand help; and not __fish_seen_subcommand_from list show search export handoff serve-clipboard healthcheck completions man help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'

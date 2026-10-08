@@ -58,6 +58,9 @@ Find the sessions whose messages hold every word of a query
 cursor\-session\-export(1)
 Export sessions to files
 .TP
+cursor\-session\-handoff(1)
+Copy a session\*(Aqs transcript, to continue it with another agent
+.TP
 cursor\-session\-healthcheck(1)
 Check that session stores can be found and loaded
 .TP
@@ -71,6 +74,7 @@ cursor\-session list \-\-source agent \-\-limit 10
 cursor\-session show f4eea6d2
 cursor\-session show f4eea6d2 \-\-json | jq \-r \*(Aq.messages[].content\*(Aq
 cursor\-session search retry backoff \-\-since 30d
+cursor\-session handoff f4eea6d2
 cursor\-session export \-\-format md \-\-session\-id f4eea6d2
 .fi
 .RE
