@@ -1821,16 +1821,28 @@ fn handoff_prints_what_show_short_prints_of_user_and_assistant() {
                 &["show", id, "--json", "--short", "--only", "user,assistant"],
             ));
             let shown = messages(&shown);
-            let handoff = ok(&fixture, &["handoff", id, "--stdout"]);
+            // A session of no such message is printed with a warning.
+            let quietly = |args: &[&str]| {
+                let output = run(&fixture, args);
+                assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+                let warning = if shown.is_empty() {
+                    format!(
+                        "warning: session {id} has no user or assistant messages; \
+                         nothing to hand off\n"
+                    )
+                } else {
+                    String::new()
+                };
+                assert_eq!(stderr(&output), warning, "{args:?}");
+                stdout(&output)
+            };
+            let handoff = quietly(&["handoff", id, "--stdout"]);
             assert_eq!(handoff, transcript(Some(DEFAULT_PREAMBLE), &shown), "{id}");
             assert!(!handoff.contains("[tool]") && !handoff.contains("[unknown]"));
 
             let last = &shown[shown.len().saturating_sub(2)..];
             assert_eq!(
-                ok(
-                    &fixture,
-                    &["handoff", id, "--stdout", "--no-preamble", "--limit", "2"]
-                ),
+                quietly(&["handoff", id, "--stdout", "--no-preamble", "--limit", "2"]),
                 transcript(None, last),
                 "{id}"
             );
@@ -1940,6 +1952,39 @@ fn handoff_help_shows_its_options_but_not_the_clipboard_server() {
         assert!(help.contains(text), "{text}: {help}");
     }
     assert!(!ok(&fixture, &["--help"]).contains("serve-clipboard"));
+}
+
+#[test]
+fn handoff_of_no_message_warns() {
+    let fixture = Fixture::new();
+    fixture.write_meta_json(
+        PROJECT_X,
+        AGENT_TOOLS_ID,
+        &serde_json::json!({
+            "title": "Only tools",
+            "createdAtMs": 1_757_500_000_000_i64,
+            "cwd": PROJECT_X,
+        }),
+    );
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        AGENT_TOOLS_ID,
+        Layout::Nested,
+        &[
+            assistant(&[tool_use("Grep", &serde_json::json!({"pattern": "x"}))]),
+            tool_line(&[tool_result(&serde_json::json!("no match"))]),
+        ],
+    );
+    let warning = format!(
+        "warning: session {AGENT_TOOLS_ID} has no user or assistant messages; \
+         nothing to hand off\n"
+    );
+    // Without --stdout the binary would reach for the system clipboard if
+    // this broke, so that case is a unit test with a fake clipboard.
+    let output = run(&fixture, &["handoff", AGENT_TOOLS_ID, "--stdout"]);
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), transcript(Some(DEFAULT_PREAMBLE), &[]));
+    assert_eq!(stderr(&output), warning);
 }
 
 /// Without a display on Linux, `handoff` prints the transcript and warns,

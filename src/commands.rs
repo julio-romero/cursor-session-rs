@@ -229,7 +229,7 @@ fn cmd_handoff(
         return Err(Error::NoStorage.into());
     }
     let view = handoff::view();
-    let session = load_one(
+    let mut session = load_one(
         paths,
         args.source,
         &args.session_id,
@@ -237,7 +237,7 @@ fn cmd_handoff(
         args.verbose,
         err,
     )?;
-    let messages = view.apply(session.messages);
+    let messages = view.apply(std::mem::take(&mut session.messages));
     let opts = HandoffOptions {
         preamble: match (&args.preamble, args.no_preamble) {
             (_, true) => None,
@@ -247,6 +247,19 @@ fn cmd_handoff(
         limit: args.limit,
     };
     let transcript = handoff::render_handoff(&messages, &opts);
+    if transcript.messages == 0 {
+        // A transcript of no message would only replace what the clipboard
+        // holds; it is printed only when asked for.
+        if args.stdout {
+            write!(out, "{}", transcript.text)?;
+        }
+        let warning = format!(
+            "session {} has no user or assistant messages; nothing to hand off",
+            session.id
+        );
+        print_warnings(&[warning], true, err)?;
+        return Ok(());
+    }
     if !args.stdout {
         match clipboard.set_text(&transcript.text) {
             Ok(()) => {
@@ -1319,6 +1332,36 @@ mod tests {
             "warning: could not copy to the clipboard (no display: DISPLAY is not set \
              really); printing the transcript\n"
         );
+    }
+
+    #[test]
+    fn handoff_of_no_message_leaves_the_clipboard_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_ide(dir.path());
+        let empty = "c0ffee00-0000-4000-8000-000000000002";
+        let warning = format!(
+            "warning: session {empty} has no user or assistant messages; nothing to hand off\n"
+        );
+        let mut clipboard = FakeClipboard::working();
+        let (result, out, err) = run_with(&paths, &["handoff", empty], &mut clipboard);
+        result.unwrap();
+        assert!(clipboard.copied.is_empty());
+        assert_eq!(out, "");
+        assert_eq!(err, warning);
+
+        // --stdout still prints what there is, with the same warning.
+        let (result, out, err) = run_with(
+            &paths,
+            &["handoff", empty, "--stdout", "--preamble", "Go on."],
+            &mut clipboard,
+        );
+        result.unwrap();
+        assert!(clipboard.copied.is_empty());
+        assert_eq!(
+            out,
+            "Go on.\n\n[end of transcript: 0 messages, ~16 tokens (estimate)]\n"
+        );
+        assert_eq!(err, warning);
     }
 
     #[test]
