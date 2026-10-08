@@ -133,13 +133,11 @@ pub fn load_session_with(
         let listed = model::merge_sessions(index.sessions());
         let id = find_session(&listed, query)?.id.clone();
         let counted = index.count(&|candidate| candidate == id, &mut warnings, &mut notices)?;
+        // Counting leaves out only an IDE chat deleted since it was found.
         let mut summary = model::merge_sessions(counted)
             .into_iter()
             .next()
-            .ok_or_else(|| Error::SessionNotFound {
-                query: query.to_string(),
-                unsearched: None,
-            })?;
+            .ok_or_else(|| Error::SessionGone { id: id.clone() })?;
         if read.tools && summary.messages_at == MessagesAt::Nowhere {
             // A transcript of only tool calls and results holds no message
             // to count, but has tools to show.

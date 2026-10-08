@@ -1765,6 +1765,58 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_deleted_after_it_is_found_is_gone_not_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        create_db(&path, &well_formed(false));
+        // Cursor has the database open, so it is read in place while it writes.
+        let writer = Connection::open(&path).unwrap();
+        writer.pragma_update(None, "journal_mode", "wal").unwrap();
+        writer
+            .execute("INSERT INTO ItemTable VALUES ('open', 'yes')", [])
+            .unwrap();
+        // Cursor deletes the chat while it is being listed, so the listing
+        // finds it and counting its messages does not.
+        let mut writer = Some(writer);
+        AFTER_CHATS.set(Some(Box::new(move || {
+            if let Some(writer) = writer.take() {
+                writer
+                    .execute_batch("DELETE FROM cursorDiskKV WHERE key LIKE '%c1%'")
+                    .unwrap();
+            }
+        })));
+        let paths = StoragePaths {
+            global_storage_db: Some(path.clone()),
+            ..Default::default()
+        };
+        let opts = crate::LoadOptions {
+            source: Some(Source::Ide),
+            ..Default::default()
+        };
+        let loaded = crate::load_session_with(&paths, &opts, "c", ReadOptions::default());
+        AFTER_CHATS.set(None);
+        // `show`, `handoff` and `export --session-id` say it was deleted, not
+        // that there is no such session.
+        let error = loaded.session.unwrap_err();
+        assert!(
+            matches!(&error, Error::SessionGone { id } if id == "c1"),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "session c1 was deleted while it was being read"
+        );
+
+        // Gone before it is looked up, it is not found.
+        let loaded = crate::load_session_with(&paths, &opts, "c1", ReadOptions::default());
+        assert!(
+            matches!(loaded.session, Err(Error::SessionNotFound { .. })),
+            "{:?}",
+            loaded.session
+        );
+    }
+
+    #[test]
     fn a_chat_row_unreadable_after_listing_lists_without_messages() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.vscdb");
