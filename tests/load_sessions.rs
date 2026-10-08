@@ -595,6 +595,12 @@ fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not
     // Cut mid-line, a line of an unknown role, then lines that read.
     text.push_str("{\"role\":\"assistant\",\"message\":{\"content\":\"sec\n");
     text.push_str(&line(plain_message("bogusrole", "x")));
+    // Lines of the roles never shown are skipped quietly, whatever their
+    // message holds; a line without a role is not.
+    text.push_str(&line(plain_message("system", "rules")));
+    text.push_str(&line(json!({"role": "tool", "message": "plain result"})));
+    text.push_str(&line(json!({"role": "system", "message": ["x"]})));
+    text.push_str(&line(json!({"message": {"content": "no role"}})));
     text.push_str(&line(plain_message("user", "third")));
     write(&mid, &text);
     // A session still being written, cut in its last line.
@@ -608,7 +614,7 @@ fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not
         ],
     );
     let mut text = fs::read_to_string(&tail).unwrap();
-    text.push_str("{\"role\":\"user\",\"mess");
+    text.push_str("{\"role\":\"user\",\"mess\n\n");
     write(&tail, &text);
 
     let loaded = fixture.load();
@@ -616,7 +622,33 @@ fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not
     assert_eq!(contents(get(&loaded.sessions, "tail")), ["first", "reply"]);
     assert_eq!(
         loaded.warnings,
-        [format!("skipped 2 unreadable lines in {}", mid.display())]
+        [format!("skipped 3 unreadable lines in {}", mid.display())]
+    );
+
+    // A last line that is JSON of another shape was written whole.
+    let shape = fixture.write_transcript(
+        "Users-demo-project-x",
+        "shape",
+        Layout::Flat,
+        &[plain_message("user", "first")],
+    );
+    let mut text = fs::read_to_string(&shape).unwrap();
+    text.push_str(&line(json!({"role": "assistant", "message": 5})));
+    write(&shape, &text);
+    let loaded = fixture.load();
+    let first = mid.clone().min(shape.clone());
+    assert_eq!(
+        loaded.warnings,
+        [format!(
+            "skipped 4 unreadable lines in 2 transcripts (first: {})",
+            first.display()
+        )]
+    );
+    fs::remove_file(&mid).unwrap();
+    let loaded = fixture.load();
+    assert_eq!(
+        loaded.warnings,
+        [format!("skipped 1 unreadable line in {}", shape.display())]
     );
 }
 

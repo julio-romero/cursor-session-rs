@@ -270,7 +270,10 @@ impl SkippedLines {
         }
         self.lines += lines;
         self.transcripts += 1;
-        self.first.get_or_insert_with(|| path.to_path_buf());
+        // The first by path, so that the same store names the same one.
+        if self.first.as_deref().is_none_or(|first| path < first) {
+            self.first = Some(path.to_path_buf());
+        }
     }
 
     /// The `-v` warning about them, if any were skipped.
@@ -942,8 +945,9 @@ enum Line {
     /// A line that should hold a message but holds none this version can
     /// show: one without text.
     NoMessage,
-    /// A line this version cannot read: not JSON, without a role, or of an
-    /// unknown role. `json` tells whether it is JSON.
+    /// A line this version cannot read: not JSON, JSON of another shape,
+    /// without a role, or of an unknown role. `json` tells whether it is
+    /// JSON.
     Unreadable { json: bool },
     /// A message, built when asked for, and the characters of the content it
     /// shows.
@@ -954,8 +958,9 @@ enum Line {
 }
 
 fn read_line(line: &str, build: bool) -> Line {
-    let Ok(entry) = json::from_str::<TranscriptLine>(line) else {
-        return Line::Unreadable { json: false };
+    let entry = match json::from_str::<TranscriptLine>(line) {
+        Ok(entry) => entry,
+        Err(err) => return misshapen_line(line, &err),
     };
     let Some(role) = entry.role else {
         return Line::Unreadable { json: true };
@@ -988,6 +993,29 @@ fn read_line(line: &str, build: bool) -> Line {
             message: Some(message),
         },
         None => Line::NoMessage,
+    }
+}
+
+/// What a line that `err` says is not a transcript line is: a line of a
+/// role never shown (system, tool) whatever its message holds, as such a
+/// line reads; otherwise unreadable, and JSON unless `err` is a syntax error
+/// or the line ends early. Only lines that fail to read come here, so
+/// reading them again costs nothing on lines that read.
+fn misshapen_line(line: &str, err: &serde_json::Error) -> Line {
+    #[derive(Deserialize)]
+    struct RoleOnly {
+        #[serde(default, deserialize_with = "lenient")]
+        role: Option<String>,
+    }
+    if !err.is_data() {
+        return Line::Unreadable { json: false };
+    }
+    let role = json::from_str::<RoleOnly>(line)
+        .ok()
+        .and_then(|line| line.role);
+    match role.as_deref() {
+        Some("system" | "tool") => Line::Nothing,
+        _ => Line::Unreadable { json: true },
     }
 }
 
