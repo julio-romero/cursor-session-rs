@@ -98,7 +98,8 @@ pub enum Commands {
     ///
     /// TOKENS (`token_estimate` in --json) estimates how many tokens the
     /// messages `show` prints by default take: ceil(characters / 4). It is an
-    /// estimate, not any model's tokenizer count.
+    /// estimate, not any model's tokenizer count. A terminal's table has the
+    /// column from 79 columns wide; piped output and --json always have it.
     #[command(
         after_help = LIST_EXAMPLES,
         after_long_help = format!("{LIST_EXAMPLES}\n\n{EXIT_CODES}")

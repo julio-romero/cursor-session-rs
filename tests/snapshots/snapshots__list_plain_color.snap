@@ -4,12 +4,12 @@ expression: "ui::render_list(&sessions, true, None)"
 ---
 Found 7 session(s)
 
-[1mID                                    SOURCE   MSGS  TOKENS  UPDATED           TITLE[0m
+[1mID                                    SOURCE   MSGS    TOKENS  UPDATED           TITLE[0m
 ----------------------------------------------------------------------------------------------------
-5ba7ed00-1111-4222-8333-444455556666  [36magent [39m      2      11  [2m2025-09-09 06:42[0m  Shared session from the agent
-d00dfeed-0000-4000-8000-000000000002  [35mide   [39m      2      20  [2m2025-09-09 02:53[0m  データパイプラインの再設計レビュー 🚀 — überprüfe den Migrationsplan für Q4 und die Rollback-Strategie (ünïcödé ✓)
-e1e10000-5555-4666-8777-888899990000  [35mide   [39m      0       0  [2m2025-09-07 13:00[0m  Untitled
-c0ffee00-0000-4000-8000-000000000001  [35mide   [39m      3      32  [2m2025-09-07 00:06[0m  Dynamic table proposal
-7b1e0c55-9d2a-4c4e-8f61-2a3b4c5d6e7f  [36magent [39m      2      20  [2m2025-09-05 19:20[0m  Fix flaky CI on Windows
-f4eea6d2-d2d3-41ad-b290-824445295a15  [36magent [39m      4      41  [2m2025-09-04 16:33[0m  Langfuse Semantic Layer
-0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e  [36magent [39m      2      14  [2m—               [0m  0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e
+5ba7ed00-1111-4222-8333-444455556666  [36magent [39m      2        11  [2m2025-09-09 06:42[0m  Shared session from the agent
+d00dfeed-0000-4000-8000-000000000002  [35mide   [39m      2        20  [2m2025-09-09 02:53[0m  データパイプラインの再設計レビュー 🚀 — überprüfe den Migrationsplan für Q4 und die Rollback-Strategie (ünïcödé ✓)
+e1e10000-5555-4666-8777-888899990000  [35mide   [39m      0         0  [2m2025-09-07 13:00[0m  Untitled
+c0ffee00-0000-4000-8000-000000000001  [35mide   [39m      3        32  [2m2025-09-07 00:06[0m  Dynamic table proposal
+7b1e0c55-9d2a-4c4e-8f61-2a3b4c5d6e7f  [36magent [39m      2        20  [2m2025-09-05 19:20[0m  Fix flaky CI on Windows
+f4eea6d2-d2d3-41ad-b290-824445295a15  [36magent [39m      4        41  [2m2025-09-04 16:33[0m  Langfuse Semantic Layer
+0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e  [36magent [39m      2        14  [2m—               [0m  0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e
