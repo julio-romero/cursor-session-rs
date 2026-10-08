@@ -211,7 +211,7 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
 
     let newest_agent = agent_id(AGENT_SESSIONS - 1);
     let newest_chat = chat_id(IDE_CHATS - 1);
-    let commands: [&[&str]; 19] = [
+    let commands: [&[&str]; 21] = [
         &["list"],
         &["list", "--json"],
         &["list", "--limit", "5"],
@@ -237,6 +237,9 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
             "--json",
         ],
         &["show", &newest_chat, "--only", "tool"],
+        // A transcript of the whole session, built in memory.
+        &["handoff", &newest_agent, "--stdout"],
+        &["handoff", &newest_chat, "--stdout"],
         &["healthcheck"],
         &["completions", "bash"],
         &["man"],
@@ -320,6 +323,15 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
             chars.div_ceil(4) as u64
         );
     }
+    // The transcript holds every user and assistant message, and no tool
+    // call.
+    let handoff = ok(&fixture, &["handoff", &newest_agent, "--stdout"]);
+    let shown = json(&ok(&fixture, &["show", &newest_agent, "--json"]));
+    let roles =
+        handoff.matches("\n\n[user]\n").count() + handoff.matches("\n\n[assistant]\n").count();
+    assert_eq!(roles as u64, shown["message_count"].as_u64().unwrap());
+    assert!(!handoff.contains("src/lib.rs"));
+
     // Each assistant message of the transcript makes a tool call.
     let tools = json(&ok(
         &fixture,

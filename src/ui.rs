@@ -199,6 +199,22 @@ pub fn one_line(text: &str) -> Cow<'_, str> {
     )
 }
 
+/// Removes escape sequences and control characters as [`TerminalFilter`]
+/// does without styling, keeping the lines: text that holds nothing a
+/// terminal or another program would act on, wherever it is pasted.
+pub fn plain_text(text: &str) -> Cow<'_, str> {
+    if !text
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\t')
+    {
+        return Cow::Borrowed(text);
+    }
+    let mut filter = TerminalFilter::new(false);
+    let mut safe = Vec::with_capacity(text.len());
+    filter.push(text.as_bytes(), &mut safe);
+    Cow::Owned(String::from_utf8_lossy(&safe).into_owned())
+}
+
 /// Longest SGR parameter list passed through; longer ones are dropped.
 const MAX_SGR_LEN: usize = 64;
 
@@ -1124,6 +1140,22 @@ mod tests {
             "{rendered}"
         );
         assert_eq!(rendered.lines().count(), 7);
+    }
+
+    #[test]
+    fn plain_text_drops_escape_sequences_and_keeps_lines() {
+        assert_eq!(
+            plain_text("copy \u{1b}]52;c;aGk=\u{7} \u{1b}[31mred\u{1b}[0m\r\nnext\tline\n"),
+            "copy  red\r\nnext\tline\n"
+        );
+        assert_eq!(
+            plain_text("csi \u{9b}2J here, DEL \u{7f}, lone \r return"),
+            "csi  here, DEL , lone  return"
+        );
+        assert!(matches!(
+            plain_text("two\nlines\tand ünïcödé"),
+            Cow::Borrowed(_)
+        ));
     }
 
     fn filtered(text: &str, keep_sgr: bool) -> String {

@@ -21,6 +21,7 @@ Examples:
   cursor-session show f4eea6d2
   cursor-session show f4eea6d2 --json | jq -r '.messages[].content'
   cursor-session search retry backoff --since 30d
+  cursor-session handoff f4eea6d2
   cursor-session export --format md --session-id f4eea6d2";
 
 const LIST_EXAMPLES: &str = "\
@@ -52,6 +53,19 @@ Examples:
   cursor-session export --format json --session-id f4eea6d2 --out sessions
   cursor-session export --workspace ~/src/billing-api --limit 5
   cursor-session export --since 2w --format json";
+
+const HANDOFF_EXAMPLES: &str = "\
+Examples:
+  cursor-session handoff f4eea6d2
+  cursor-session handoff f4eea6d2 --limit 30
+  cursor-session handoff f4eea6d2 --stdout > handoff.txt
+  cursor-session handoff f4eea6d2 --preamble 'Continue this refactor in the same repository.'
+  cursor-session handoff f4eea6d2 --no-preamble --stdout
+  cursor-session handoff f4eea6d2 --stdout | wl-copy";
+
+const SERVE_CLIPBOARD_EXAMPLES: &str = "\
+Examples:
+  cursor-session serve-clipboard < transcript.txt";
 
 const HEALTHCHECK_EXAMPLES: &str = "\
 Examples:
@@ -178,6 +192,41 @@ pub enum Commands {
         after_long_help = format!("{EXPORT_EXAMPLES}\n\n{EXIT_CODES}")
     )]
     Export(ExportArgs),
+    /// Copy a session's transcript, to continue it with another agent
+    ///
+    /// The transcript is a preamble, then the session's user and assistant
+    /// messages as `show --short --only user,assistant` prints them, each
+    /// under a `[user]` or `[assistant]` line, then a trailer with the number
+    /// of messages and the transcript's token estimate: ceil(characters / 4),
+    /// an estimate, not any model's tokenizer count. Escape sequences in
+    /// stored text are removed. The default preamble reads: "The following is
+    /// a transcript from a Cursor session that ran out of credits. Continue
+    /// from where it ended; do not summarize it back."
+    ///
+    /// It is copied to the system clipboard: on macOS with /usr/bin/pbcopy;
+    /// on Linux through X11, where a copy of this program serves it in the
+    /// background until something else is copied, for at most 12 hours.
+    /// Without an X11 display (DISPLAY not set, as in a Wayland session
+    /// without XWayland, where `--stdout | wl-copy` copies it), or when
+    /// copying fails, it is printed to stdout instead, with a warning on
+    /// stderr, and the command still succeeds. A session without user or
+    /// assistant messages is not copied; a warning says so.
+    #[command(
+        after_help = HANDOFF_EXAMPLES,
+        after_long_help = format!("{HANDOFF_EXAMPLES}\n\n{EXIT_CODES}")
+    )]
+    Handoff(HandoffArgs),
+    /// Keep the text on stdin on the clipboard until something else is copied
+    ///
+    /// `handoff` runs this in the background on X11, where the program that
+    /// copied text must keep serving it. It prints `ok` once the text is on
+    /// the clipboard, or `error: ...`.
+    #[command(
+        hide = true,
+        after_help = SERVE_CLIPBOARD_EXAMPLES,
+        after_long_help = format!("{SERVE_CLIPBOARD_EXAMPLES}\n\n{EXIT_CODES}")
+    )]
+    ServeClipboard,
     /// Check that session stores can be found and loaded
     #[command(
         after_help = HEALTHCHECK_EXAMPLES,
@@ -201,10 +250,13 @@ pub enum Commands {
 
 impl Commands {
     /// Whether the command reads session stores. The others only print what
-    /// the binary knows about itself, so `--storage` and a missing home do
-    /// not concern them.
+    /// the binary knows about itself, or hold the clipboard, so `--storage`
+    /// and a missing home do not concern them.
     pub fn reads_storage(&self) -> bool {
-        !matches!(self, Self::Completions(_) | Self::Man(_))
+        !matches!(
+            self,
+            Self::Completions(_) | Self::Man(_) | Self::ServeClipboard
+        )
     }
 }
 
@@ -349,6 +401,42 @@ pub struct ExportArgs {
 }
 
 #[derive(Args)]
+pub struct HandoffArgs {
+    /// Session ID, or a unique prefix of one (case-insensitive)
+    #[arg(value_parser = not_blank)]
+    pub session_id: String,
+    /// Only read this store; the other one is never opened
+    #[arg(long, value_enum)]
+    pub source: Option<Source>,
+    /// Keep only the last N messages [default: all]
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = at_least_one,
+        allow_negative_numbers = true
+    )]
+    pub limit: Option<usize>,
+    /// Print the transcript instead of copying it
+    #[arg(long)]
+    pub stdout: bool,
+    /// Start the transcript with TEXT instead of the default preamble (TEXT
+    /// may start with "-")
+    #[arg(
+        long,
+        value_name = "TEXT",
+        value_parser = not_blank,
+        allow_hyphen_values = true,
+        conflicts_with = "no_preamble"
+    )]
+    pub preamble: Option<String>,
+    /// Start the transcript with the first message
+    #[arg(long)]
+    pub no_preamble: bool,
+    #[arg(from_global)]
+    pub verbose: bool,
+}
+
+#[derive(Args)]
 pub struct HealthcheckArgs {
     #[arg(from_global)]
     pub verbose: bool,
@@ -470,9 +558,9 @@ mod tests {
 
     #[test]
     fn limit_must_be_positive() {
-        for command in ["list", "show", "export"] {
+        for command in ["list", "show", "export", "handoff"] {
             let args = |limit| {
-                let id = (command == "show").then_some("abc");
+                let id = ["show", "handoff"].contains(&command).then_some("abc");
                 ["cursor-session", command]
                     .into_iter()
                     .chain(id)
@@ -505,6 +593,8 @@ mod tests {
             &["cursor-session", "show", " \t"],
             &["cursor-session", "export", "--session-id", ""],
             &["cursor-session", "export", "--workspace", " "],
+            &["cursor-session", "handoff", ""],
+            &["cursor-session", "handoff", "abc", "--preamble", " "],
         ] {
             let err = Cli::try_parse_from(argv).err().unwrap();
             assert_eq!(

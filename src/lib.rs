@@ -2,6 +2,7 @@ pub mod agent;
 pub mod detect;
 mod error;
 pub mod export;
+pub mod handoff;
 pub mod ide;
 mod json;
 pub mod model;

@@ -38,6 +38,10 @@ serde_norway = "0.9"
 thiserror = "2"
 unicode-width = "0.2"
 
+# macOS copies with /usr/bin/pbcopy, so that no command links AppKit.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+arboard = { version = "3.6", default-features = false }
+
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 

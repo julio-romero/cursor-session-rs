@@ -1,11 +1,12 @@
 use std::borrow::Cow;
 use std::fs;
-use std::io::{BufWriter, ErrorKind, Write};
+use std::io::{self, BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use cursor_session::detect::{self, Env, StoragePaths};
 use cursor_session::export::{self, Format};
+use cursor_session::handoff::{self, HandoffOptions};
 use cursor_session::model::{self, Session, SessionSummary, Source, SummaryJson};
 use cursor_session::search::{self, Hit, HitJson};
 use cursor_session::since::Since;
@@ -18,25 +19,30 @@ use cursor_session::{
 use serde::Serialize;
 
 use crate::cli::{
-    Commands, CompletionsArgs, ExportArgs, HealthcheckArgs, ListArgs, ManArgs, SearchArgs, ShowArgs,
+    Commands, CompletionsArgs, ExportArgs, HandoffArgs, HealthcheckArgs, ListArgs, ManArgs,
+    SearchArgs, ShowArgs,
 };
+use crate::clipboard::{self, Clipboard};
 use crate::generate;
 use crate::output::OutputOpts;
 
 /// Runs one subcommand. Normal output goes to `out`, diagnostics such as load
-/// warnings go to `err`.
+/// warnings go to `err`, and `handoff` copies to `clipboard`.
 pub fn run(
     command: Commands,
     paths: &StoragePaths,
     opts: &OutputOpts,
     out: &mut dyn Write,
     err: &mut dyn Write,
+    clipboard: &mut dyn Clipboard,
 ) -> Result<()> {
     match command {
         Commands::List(args) => cmd_list(paths, opts, out, err, &args),
         Commands::Show(args) => cmd_show(paths, opts, out, err, &args),
         Commands::Search(args) => cmd_search(paths, opts, out, err, &args),
         Commands::Export(args) => cmd_export(paths, out, err, &args),
+        Commands::Handoff(args) => cmd_handoff(paths, out, err, clipboard, &args),
+        Commands::ServeClipboard => clipboard::serve(&mut io::stdin().lock(), out),
         Commands::Healthcheck(args) => cmd_healthcheck(paths, out, err, &args),
         Commands::Completions(args) => cmd_completions(out, &args),
         Commands::Man(args) => cmd_man(out, &args),
@@ -264,6 +270,73 @@ fn cmd_search(
         "{}",
         search::render(&hits, &ids, opts.color, opts.width)
     )?;
+    Ok(())
+}
+
+/// Copies the transcript of one session to `clipboard`, or prints it with
+/// `--stdout`. Where it cannot be copied it is printed instead, with a
+/// warning: the transcript is never lost to a clipboard that is not there.
+fn cmd_handoff(
+    paths: &StoragePaths,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    clipboard: &mut dyn Clipboard,
+    args: &HandoffArgs,
+) -> Result<()> {
+    if paths.is_empty() {
+        return Err(Error::NoStorage.into());
+    }
+    let view = handoff::view();
+    let mut session = load_one(
+        paths,
+        args.source,
+        &args.session_id,
+        view.read_options(),
+        args.verbose,
+        err,
+    )?;
+    let messages = handoff::select(std::mem::take(&mut session.messages));
+    let opts = HandoffOptions {
+        preamble: match (&args.preamble, args.no_preamble) {
+            (_, true) => None,
+            (Some(preamble), false) => Some(preamble.clone()),
+            (None, false) => Some(handoff::DEFAULT_PREAMBLE.to_string()),
+        },
+        limit: args.limit,
+    };
+    let transcript = handoff::render_handoff(&messages, &opts);
+    if transcript.messages == 0 {
+        // A transcript of no message would only replace what the clipboard
+        // holds; it is printed only when asked for.
+        if args.stdout {
+            write!(out, "{}", transcript.text)?;
+        }
+        let warning = format!(
+            "session {} has no user or assistant messages; nothing to hand off",
+            session.id
+        );
+        print_warnings(&[warning], true, err)?;
+        return Ok(());
+    }
+    if !args.stdout {
+        match clipboard.set_text(&transcript.text) {
+            Ok(()) => {
+                writeln!(
+                    out,
+                    "copied {} (~{} tokens) to clipboard",
+                    handoff::count(transcript.messages, "message"),
+                    transcript.token_estimate
+                )?;
+                return Ok(());
+            }
+            Err(reason) => {
+                let warning =
+                    format!("could not copy to the clipboard ({reason}); printing the transcript");
+                print_warnings(&[warning], true, err)?;
+            }
+        }
+    }
+    write!(out, "{}", transcript.text)?;
     Ok(())
 }
 
@@ -732,14 +805,60 @@ mod tests {
         }
     }
 
+    /// A clipboard that keeps what is copied to it, or fails to copy.
+    struct FakeClipboard {
+        copied: Vec<String>,
+        fails: bool,
+    }
+
+    impl FakeClipboard {
+        fn working() -> Self {
+            Self {
+                copied: Vec::new(),
+                fails: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                copied: Vec::new(),
+                fails: true,
+            }
+        }
+    }
+
+    impl Clipboard for FakeClipboard {
+        fn set_text(&mut self, text: &str) -> Result<(), String> {
+            if self.fails {
+                return Err("no display: DISPLAY \u{1b}[2Jis not set\nreally".to_string());
+            }
+            self.copied.push(text.to_string());
+            Ok(())
+        }
+    }
+
     fn run_args(paths: &StoragePaths, argv: &[&str]) -> (Result<()>, String) {
+        let (result, out, _) = run_with(paths, argv, &mut FakeClipboard::failing());
+        (result, out)
+    }
+
+    /// Runs `argv` with `clipboard`; returns the result, stdout and stderr.
+    fn run_with(
+        paths: &StoragePaths,
+        argv: &[&str],
+        clipboard: &mut FakeClipboard,
+    ) -> (Result<()>, String, String) {
         let cli =
             Cli::try_parse_from(std::iter::once("cursor-session").chain(argv.iter().copied()))
                 .unwrap();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let result = run(cli.command, paths, &PIPED, &mut out, &mut err);
-        (result, String::from_utf8(out).unwrap())
+        let result = run(cli.command, paths, &PIPED, &mut out, &mut err, clipboard);
+        (
+            result,
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
     }
 
     fn json(text: &str) -> Value {
@@ -808,7 +927,15 @@ mod tests {
                 Cli::try_parse_from(std::iter::once("cursor-session").chain(argv.iter().copied()))
                     .unwrap();
             let mut out = Vec::new();
-            run(cli.command, &paths, &terminal, &mut out, &mut Vec::new()).unwrap();
+            run(
+                cli.command,
+                &paths,
+                &terminal,
+                &mut out,
+                &mut Vec::new(),
+                &mut FakeClipboard::failing(),
+            )
+            .unwrap();
             String::from_utf8(out).unwrap()
         };
         // The two IDE chats differ only in the last character of their IDs.
@@ -894,6 +1021,7 @@ mod tests {
                 &PIPED,
                 &mut Failing(stdout),
                 &mut Vec::new(),
+                &mut FakeClipboard::failing(),
             );
             let written = fs::read_dir(&out_dir).map_or(0, Iterator::count);
             (result, written)
@@ -1209,6 +1337,158 @@ mod tests {
         assert!(err.is_empty());
         print_warnings(&warnings, true, &mut err).unwrap();
         assert_eq!(err, b"warning: skipped composerData:x\n");
+    }
+
+    fn fixture_paths() -> StoragePaths {
+        StoragePaths {
+            projects_dir: Some(fixture_projects()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn handoff_copies_the_transcript_it_would_print() {
+        let paths = fixture_paths();
+        let mut clipboard = FakeClipboard::working();
+        let (result, out, err) = run_with(&paths, &["handoff", "f4eea6d2"], &mut clipboard);
+        result.unwrap();
+        assert_eq!(err, "");
+        let (result, printed, _) = run_with(
+            &paths,
+            &["handoff", "f4eea6d2", "--stdout"],
+            &mut FakeClipboard::working(),
+        );
+        result.unwrap();
+        assert_eq!(clipboard.copied, std::slice::from_ref(&printed));
+        // The line names the counts the trailer states.
+        let tokens = printed.chars().count().div_ceil(4);
+        assert!(
+            printed.ends_with(&format!(
+                "\n\n[end of transcript: 3 messages, ~{tokens} tokens (estimate)]\n"
+            )),
+            "{printed}"
+        );
+        assert_eq!(
+            out,
+            format!("copied 3 messages (~{tokens} tokens) to clipboard\n")
+        );
+
+        // --stdout never copies.
+        let mut untouched = FakeClipboard::working();
+        let (result, _, _) = run_with(&paths, &["handoff", "f4eea6d2", "--stdout"], &mut untouched);
+        result.unwrap();
+        assert!(untouched.copied.is_empty());
+
+        let mut clipboard = FakeClipboard::working();
+        let (_, out, _) = run_with(
+            &paths,
+            &["handoff", AGENT_ID, "--limit", "1", "--no-preamble"],
+            &mut clipboard,
+        );
+        let tokens = clipboard.copied[0].chars().count().div_ceil(4);
+        assert_eq!(
+            out,
+            format!("copied 1 message (~{tokens} tokens) to clipboard\n")
+        );
+        assert!(clipboard.copied[0].starts_with("[assistant]\nHere is the semantic layer plan."));
+    }
+
+    #[test]
+    fn handoff_prints_what_it_cannot_copy_with_a_warning() {
+        let paths = fixture_paths();
+        let mut clipboard = FakeClipboard::failing();
+        let (result, out, err) = run_with(&paths, &["handoff", "f4eea6d2"], &mut clipboard);
+        result.unwrap();
+        let (_, printed, _) = run_with(
+            &paths,
+            &["handoff", "f4eea6d2", "--stdout"],
+            &mut FakeClipboard::working(),
+        );
+        assert_eq!(out, printed);
+        // One line, whatever the reason holds.
+        assert_eq!(
+            err,
+            "warning: could not copy to the clipboard (no display: DISPLAY is not set \
+             really); printing the transcript\n"
+        );
+    }
+
+    #[test]
+    fn handoff_of_no_message_leaves_the_clipboard_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_ide(dir.path());
+        let empty = "c0ffee00-0000-4000-8000-000000000002";
+        let warning = format!(
+            "warning: session {empty} has no user or assistant messages; nothing to hand off\n"
+        );
+        let mut clipboard = FakeClipboard::working();
+        let (result, out, err) = run_with(&paths, &["handoff", empty], &mut clipboard);
+        result.unwrap();
+        assert!(clipboard.copied.is_empty());
+        assert_eq!(out, "");
+        assert_eq!(err, warning);
+
+        // --stdout still prints what there is, with the same warning.
+        let (result, out, err) = run_with(
+            &paths,
+            &["handoff", empty, "--stdout", "--preamble", "Go on."],
+            &mut clipboard,
+        );
+        result.unwrap();
+        assert!(clipboard.copied.is_empty());
+        assert_eq!(
+            out,
+            "Go on.\n\n[end of transcript: 0 messages, ~16 tokens (estimate)]\n"
+        );
+        assert_eq!(err, warning);
+    }
+
+    #[test]
+    fn handoff_finds_sessions_as_show_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_ide(dir.path());
+        let mut clipboard = FakeClipboard::working();
+        let (result, out, _) = run_with(&paths, &["handoff", "c0ffee00"], &mut clipboard);
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<Error>(),
+            Some(Error::AmbiguousId { .. })
+        ));
+        let (result, _, _) = run_with(
+            &paths,
+            &["handoff", "c0ffee00", "--source", "agent"],
+            &mut clipboard,
+        );
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<Error>(),
+            Some(Error::SessionNotFound { .. })
+        ));
+        assert!(out.is_empty() && clipboard.copied.is_empty());
+
+        let (result, out, _) = run_with(
+            &paths,
+            &[
+                "handoff",
+                "C0FFEE00-0000-4000-8000-000000000001",
+                "--stdout",
+            ],
+            &mut clipboard,
+        );
+        result.unwrap();
+        assert!(
+            out.contains("\n\n[user]\nhello ide\n\n[end of transcript: 1 message, "),
+            "{out}"
+        );
+
+        let (result, _, _) = run_with(
+            &StoragePaths::default(),
+            &["handoff", "abc"],
+            &mut clipboard,
+        );
+        assert!(matches!(
+            result.unwrap_err().downcast_ref::<Error>(),
+            Some(Error::NoStorage)
+        ));
+        assert!(clipboard.copied.is_empty());
     }
 
     #[test]

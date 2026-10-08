@@ -209,7 +209,14 @@ fn bash_completes_after_a_subcommand() {
     let fixture = Fixture::new();
     let bash_completes = |line| bash_completes(&fixture, line);
     let offered = bash_completes("cursor-session ");
-    for word in ["list", "show", "search", "completions", "--storage"] {
+    for word in [
+        "list",
+        "show",
+        "search",
+        "handoff",
+        "completions",
+        "--storage",
+    ] {
         assert!(offered.iter().any(|offered| offered == word), "{offered:?}");
     }
     let offered = bash_completes("cursor-session completions ");

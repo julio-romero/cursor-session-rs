@@ -197,3 +197,30 @@ fn cli_search_output() {
         )
     );
 }
+
+#[test]
+fn cli_handoff_stdout() {
+    let fixture = standard();
+    for (name, id) in [
+        ("cli_handoff_agent", "f4eea6d2"),
+        ("cli_handoff_ide", "c0ffee00"),
+    ] {
+        let out = cli_stdout(&fixture, &["handoff", id, "--stdout"]);
+        assert!(!out.contains('\u{1b}'));
+        insta::assert_snapshot!(name, out);
+    }
+    insta::assert_snapshot!(
+        "cli_handoff_agent_last_no_preamble",
+        cli_stdout(
+            &fixture,
+            &[
+                "handoff",
+                "f4eea6d2",
+                "--stdout",
+                "--no-preamble",
+                "--limit",
+                "2"
+            ]
+        )
+    );
+}

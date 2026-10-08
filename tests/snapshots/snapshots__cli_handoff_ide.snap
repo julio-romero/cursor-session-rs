@@ -1,0 +1,22 @@
+---
+source: tests/snapshots.rs
+expression: out
+---
+The following is a transcript from a Cursor session that ran out of credits. Continue from where it ended; do not summarize it back.
+
+[user]
+Replace this view with a dynamic table.
+
+[assistant]
+Here is a plan.
+
+[assistant]
+Use this component:
+
+```tsx
+export function Table() {
+  return null;
+}
+```
+
+[end of transcript: 3 messages, ~89 tokens (estimate)]
