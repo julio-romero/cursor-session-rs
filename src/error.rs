@@ -72,9 +72,15 @@ pub enum Error {
     #[error("could not copy {} to a temporary directory for reading", path.display())]
     Snapshot { path: PathBuf, source: io::Error },
 
-    /// A database read without locks changed during two reads in a row.
+    /// A database read without taking its locks changed between the two
+    /// reads that check it did not (see `sqlite.rs`).
     #[error("{} changed while it was being read", path.display())]
     Changed { path: PathBuf },
+
+    /// A session listed a moment before was deleted before its messages
+    /// were read, as when Cursor deletes an IDE chat.
+    #[error("session {id} was deleted while it was being read")]
+    SessionGone { id: String },
 
     #[error("no Cursor session storage found")]
     NoStorage,
@@ -166,6 +172,9 @@ impl Error {
             ],
             Error::Database { source, .. } if is_busy(source) => vec![TRY_AGAIN.to_string()],
             Error::Changed { .. } => vec![TRY_AGAIN.to_string()],
+            Error::SessionGone { .. } => {
+                vec!["run `cursor-session list` to see the sessions there now".to_string()]
+            }
             Error::Snapshot { .. } => vec![
                 format!(
                     "make sure {} is writable and has room for a copy of the database, or point \
@@ -256,6 +265,7 @@ mod tests {
                 source: io::Error::other("disk full"),
             },
             Error::Changed { path },
+            Error::SessionGone { id: "c1".into() },
             Error::NoStorage,
             Error::NoWorkspaceMatch {
                 workspace: "api".into(),

@@ -7,6 +7,8 @@ cursor\-session\-export \- Export sessions to files
 \fBcursor\-session export\fR [\fB\-\-format\fR] [\fB\-\-storage\fR] [\fB\-\-out\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-session\-id\fR] [\fB\-\-workspace\fR] [\fB\-\-source\fR] [\fB\-\-limit\fR] [\fB\-\-since\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Export sessions to files
+.PP
+Each session\*(Aqs messages are read only to write its file. A session deleted after the sessions were listed, as when Cursor deletes an IDE chat during the export, is skipped with a warning, and the others are still written. With \-\-session\-id, such a session is an error instead.
 .SH OPTIONS
 .TP
 \fB\-\-format\fR \fI<FORMAT>\fR [default: md]

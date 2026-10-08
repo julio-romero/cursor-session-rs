@@ -409,17 +409,39 @@ fn cmd_export(
     let out_dir = detect::expand_home(&args.out)?;
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("could not create {}", out_dir.display()))?;
+    write_exports(&selected, one.as_ref(), &out_dir, args.format, out, err)
+}
+
+/// Writes a file of each of `selected` into `out_dir`, the session `one` when
+/// it is given, reading each one's messages only to write its file. A session
+/// deleted since it was listed is skipped with a warning.
+fn write_exports(
+    selected: &[&SessionSummary],
+    one: Option<&Session>,
+    out_dir: &Path,
+    format: Format,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Result<()> {
     // The files are the result and the `wrote` lines only report progress, so
     // a reader that goes away (`| head`) stops the lines, not the export.
     let mut progress = true;
     let mut files = export::ExportPaths::default();
-    for summary in selected {
-        let session = match &one {
+    for &summary in selected {
+        let session = match one {
             Some(session) => Cow::Borrowed(session),
-            None => Cow::Owned(load_messages(summary)?),
+            None => match load_messages(summary) {
+                Ok(session) => Cow::Owned(session),
+                Err(gone @ Error::SessionGone { .. }) => {
+                    let warning = format!("{gone}; it is not exported");
+                    print_warnings(&[warning], true, err)?;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            },
         };
-        let path = files.next(&out_dir, &session, args.format);
-        write_export(&session, args.format, &path)
+        let path = files.next(out_dir, &session, format);
+        write_export(&session, format, &path)
             .with_context(|| format!("could not write {}", path.display()))?;
         if progress && let Err(error) = writeln!(out, "wrote {}", path.display()) {
             if error.kind() != ErrorKind::BrokenPipe {
@@ -1040,6 +1062,62 @@ mod tests {
         let (result, written) = export(ErrorKind::PermissionDenied);
         assert!(result.is_err());
         assert_eq!(written, 1);
+    }
+
+    #[test]
+    fn export_skips_a_chat_deleted_after_listing_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_with_ide(dir.path());
+        let loaded = load_sessions(&paths, &LoadOptions::default()).unwrap();
+        let selected: Vec<&SessionSummary> = loaded.sessions.iter().collect();
+        assert_eq!(selected.len(), 3);
+        // Cursor deletes a chat after the sessions are listed and before its
+        // messages are read.
+        let gone = "c0ffee00-0000-4000-8000-000000000001";
+        rusqlite::Connection::open(paths.global_storage_db.as_ref().unwrap())
+            .unwrap()
+            .execute(
+                "DELETE FROM cursorDiskKV WHERE key LIKE ?1 OR key LIKE ?2",
+                [format!("composerData:{gone}"), format!("bubbleId:{gone}:%")],
+            )
+            .unwrap();
+        let out_dir = dir.path().join("exports");
+        fs::create_dir_all(&out_dir).unwrap();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        write_exports(&selected, None, &out_dir, Format::Md, &mut out, &mut err).unwrap();
+
+        // Always shown, not only with -v, and the others are written.
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            format!(
+                "warning: session {gone} was deleted while it was being read; it is not exported\n"
+            )
+        );
+        let mut written: Vec<String> = fs::read_dir(&out_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        written.sort();
+        assert_eq!(
+            written,
+            [
+                "c0ffee00-0000-4000-8000-000000000002.md".to_string(),
+                format!("{AGENT_ID}.md"),
+            ]
+        );
+        assert_eq!(String::from_utf8(out).unwrap().lines().count(), 2);
+
+        // Gone before it is looked up, the session is not found.
+        let (result, _) = run_args(&paths, &["export", "--session-id", gone]);
+        let error = result.unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<Error>(),
+                Some(Error::SessionNotFound { .. })
+            ),
+            "{error}"
+        );
     }
 
     #[test]

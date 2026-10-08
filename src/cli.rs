@@ -191,6 +191,11 @@ pub enum Commands {
     )]
     Search(SearchArgs),
     /// Export sessions to files
+    ///
+    /// Each session's messages are read only to write its file. A session
+    /// deleted after the sessions were listed, as when Cursor deletes an IDE
+    /// chat during the export, is skipped with a warning, and the others are
+    /// still written. With --session-id, such a session is an error instead.
     #[command(
         after_help = EXPORT_EXAMPLES,
         after_long_help = format!("{EXPORT_EXAMPLES}\n\n{EXIT_CODES}")

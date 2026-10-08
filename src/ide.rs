@@ -691,9 +691,7 @@ fn read_chat<T: ToolData>(
     })?
     // Deleted since it was listed: it has no messages to show now, and it
     // was not empty when listed.
-    .ok_or_else(|| Error::Changed {
-        path: db_path.to_path_buf(),
-    })
+    .ok_or_else(|| Error::SessionGone { id: id.to_string() })
 }
 
 /// Calls `map` with each of `chats`, sessions of the database at `db_path`,
@@ -1748,7 +1746,14 @@ mod tests {
             panic!("{:?}", c2.messages_at);
         };
         let read = read_messages(&path, key, *blob_key, "c2", ReadOptions::default());
-        assert!(matches!(read, Err(Error::Changed { .. })), "{read:?}");
+        assert!(
+            matches!(&read, Err(Error::SessionGone { id }) if id == "c2"),
+            "{read:?}"
+        );
+        assert_eq!(
+            read.unwrap_err().to_string(),
+            "session c2 was deleted while it was being read"
+        );
 
         // `search` maps only the chats still there.
         let chats: Vec<&SessionSummary> = index.sessions.iter().collect();
@@ -1757,6 +1762,66 @@ mod tests {
         })
         .unwrap();
         assert_eq!(mapped, [("c1".to_string(), 2)]);
+    }
+
+    #[test]
+    fn a_chat_row_unreadable_after_listing_lists_without_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        let mut rows = well_formed(false);
+        rows.extend([
+            (
+                "composerData:c2",
+                SqlValue::Text(
+                    r#"{"composerId":"c2","name":"Second","fullConversationHeadersOnly":[{"bubbleId":"b1","type":1}]}"#
+                        .into(),
+                ),
+            ),
+            (
+                "bubbleId:c2:b1",
+                SqlValue::Text(r#"{"bubbleId":"b1","type":1,"text":"needle"}"#.into()),
+            ),
+        ]);
+        create_db(&path, &rows);
+        let index = index(&path, &mut Vec::new()).unwrap().unwrap();
+        // Cursor rewrites the chat row, as something that is not a chat, after
+        // the chats are listed and before their messages are read.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "UPDATE cursorDiskKV SET value = 'not json' WHERE key = 'composerData:c2'",
+            )
+            .unwrap();
+
+        // It still lists, as listed, without messages, and is no error.
+        let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+        let counted = count(&index, &|_| true, &mut warnings, &mut notices).unwrap();
+        let listed: Vec<(&str, &str, usize)> = counted
+            .iter()
+            .map(|s| (s.id.as_str(), s.title.as_str(), s.message_count))
+            .collect();
+        assert_eq!(listed, [("c1", "Plan", 2), ("c2", "Second", 0)]);
+        assert!(
+            warnings.is_empty() && notices.is_empty(),
+            "{warnings:?} {notices:?}"
+        );
+
+        // `show` and `handoff` show it without messages.
+        let c2 = counted.iter().find(|s| s.id == "c2").unwrap();
+        let MessagesAt::IdeChat { key, blob_key, .. } = &c2.messages_at else {
+            panic!("{:?}", c2.messages_at);
+        };
+        let read = read_messages(&path, key, *blob_key, "c2", ReadOptions::default()).unwrap();
+        assert!(read.is_empty());
+
+        // `search` maps it without messages.
+        let chats: Vec<&SessionSummary> = index.sessions.iter().collect();
+        let mut mapped = map_chats(&path, &chats, |chat, messages| {
+            (chat.id.clone(), messages.len())
+        })
+        .unwrap();
+        mapped.sort();
+        assert_eq!(mapped, [("c1".to_string(), 2), ("c2".to_string(), 0)]);
     }
 
     #[test]
