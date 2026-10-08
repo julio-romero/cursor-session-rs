@@ -729,6 +729,15 @@ pub fn render_show(
     out
 }
 
+/// The note `show` prints after the header when `--only` (here `only`, such
+/// as `tool` or `user,tool`) leaves none of the session's messages.
+pub fn render_no_match(only: &str, use_color: bool) -> String {
+    format!(
+        "\n{}\n",
+        paint_dim(&format!("No messages match --only {only}."), use_color)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

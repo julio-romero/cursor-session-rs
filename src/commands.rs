@@ -199,6 +199,14 @@ fn cmd_show(
         "{}",
         ui::render_show(&session, messages, hidden, opts.color)
     )?;
+    // Say why --only printed nothing, rather than leave a bare header.
+    if printed.is_empty() && !view.only.is_empty() {
+        write!(
+            out,
+            "{}",
+            ui::render_no_match(&view.only_list(), opts.color)
+        )?;
+    }
     Ok(())
 }
 
