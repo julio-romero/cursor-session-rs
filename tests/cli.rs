@@ -14,7 +14,10 @@ use cursor_session::model::{Message, Session};
 use cursor_session::ui;
 use serde_json::Value;
 
-const SUBCOMMANDS: [&str; 4] = ["list", "show", "export", "healthcheck"];
+const SUBCOMMANDS: [&str; 5] = ["list", "show", "export", "handoff", "healthcheck"];
+
+const DEFAULT_PREAMBLE: &str = "The following is a transcript from a Cursor session that ran out \
+     of credits. Continue from where it ended; do not summarize it back.";
 
 /// The start of a usage line. clap names the program after the file it ran
 /// from, which ends in `.exe` on Windows.
@@ -142,6 +145,19 @@ fn usage_errors_exit_2() {
         &["export", "--workspace", ""],
         &["list", "--limit", ""],
         &["--color", "sometimes", "list"],
+        &["handoff"],
+        &["handoff", AGENT_ID, "--limit", "0"],
+        &[
+            "handoff",
+            AGENT_ID,
+            "--stdout",
+            "--preamble",
+            "Go on.",
+            "--no-preamble",
+        ],
+        &["handoff", AGENT_ID, "--stdout", "--preamble", ""],
+        &["handoff", AGENT_ID, "--stdout", "--preamble"],
+        &["handoff", AGENT_ID, "--stdout", "--only", "tool"],
     ] {
         let output = run(&fixture, args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -571,6 +587,7 @@ fn a_closed_pipe_ends_the_output_quietly() {
         &["list", "--color", "always"],
         &["show", "00000000", "--all"],
         &["show", "00000000", "--json"],
+        &["handoff", "00000000", "--stdout"],
     ] {
         // Far more than any pipe buffer, so the binary is mid-write when the
         // reader goes away.
@@ -1589,6 +1606,184 @@ fn show_only_takes_known_roles() {
         let help = ok(&fixture, &[command, "--help"]);
         assert!(help.contains("ceil(characters / 4)"), "{help}");
     }
+}
+
+/// The transcript `handoff` builds from `messages`, as `show --json` gives
+/// them, after `preamble`.
+fn transcript(preamble: Option<&str>, messages: &[(String, String)]) -> String {
+    let mut text = preamble.map_or_else(String::new, |preamble| format!("{preamble}\n\n"));
+    for (role, content) in messages {
+        text.push_str(&format!("[{role}]\n{content}\n\n"));
+    }
+    // The estimate counts the trailer that states it.
+    let trailer = |tokens: usize| {
+        let messages = match messages.len() {
+            1 => "1 message".to_string(),
+            n => format!("{n} messages"),
+        };
+        format!("[end of transcript: {messages}, ~{tokens} tokens (estimate)]\n")
+    };
+    let chars = text.chars().count();
+    let tokens = (chars.div_ceil(4)..)
+        .find(|&tokens| (chars + trailer(tokens).chars().count()).div_ceil(4) == tokens)
+        .unwrap();
+    text + &trailer(tokens)
+}
+
+#[test]
+fn handoff_prints_what_show_short_prints_of_user_and_assistant() {
+    for fixture in [standard(), tools()] {
+        for session in fixture.load().sessions {
+            let id = session.id.as_str();
+            let shown = json(&ok(
+                &fixture,
+                &["show", id, "--json", "--short", "--only", "user,assistant"],
+            ));
+            let shown = messages(&shown);
+            let handoff = ok(&fixture, &["handoff", id, "--stdout"]);
+            assert_eq!(handoff, transcript(Some(DEFAULT_PREAMBLE), &shown), "{id}");
+            assert!(!handoff.contains("[tool]") && !handoff.contains("[unknown]"));
+
+            let last = &shown[shown.len().saturating_sub(2)..];
+            assert_eq!(
+                ok(
+                    &fixture,
+                    &["handoff", id, "--stdout", "--no-preamble", "--limit", "2"]
+                ),
+                transcript(None, last),
+                "{id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn handoff_cuts_messages_short_and_leaves_tools_out() {
+    let fixture = tools();
+    let out = ok(
+        &fixture,
+        &[
+            "handoff",
+            AGENT_TOOLS_ID,
+            "--stdout",
+            "--preamble",
+            "Go on.",
+        ],
+    );
+    let answer: String = format!(
+        "It is configured in src/config.rs.{}",
+        " Details follow.".repeat(20)
+    )
+    .chars()
+    .take(300)
+    .collect();
+    assert!(
+        out.starts_with(&format!(
+            "Go on.\n\n[user]\nWhere is langfuse configured?\n\n\
+             [assistant]\nLet me search.\n\n[assistant]\n{answer}…\n\n\
+             [end of transcript: 3 messages, ~"
+        )),
+        "{out}"
+    );
+    assert!(!out.contains("Grep") && !out.contains("long line"), "{out}");
+    let tokens = out.chars().count().div_ceil(4);
+    assert!(
+        out.ends_with(&format!(", ~{tokens} tokens (estimate)]\n")),
+        "{out}"
+    );
+}
+
+#[test]
+fn handoff_finds_sessions_as_show_does() {
+    let fixture = standard();
+    assert_eq!(
+        ok(&fixture, &["handoff", "F4EEA6D2", "--stdout"]),
+        ok(&fixture, &["handoff", AGENT_ID, "--stdout"])
+    );
+    assert_eq!(
+        fails(&fixture, &["handoff", "ffff", "--stdout"]),
+        "error: session not found: ffff\nrun `cursor-session list` to see session IDs\n"
+    );
+    let err = fails(
+        &fixture,
+        &["handoff", AGENT_ID, "--stdout", "--source", "ide"],
+    );
+    assert!(
+        err.starts_with(&format!("error: session not found: {AGENT_ID}\n")),
+        "{err}"
+    );
+    let ambiguous = ambiguous_fixture();
+    let err = fails(&ambiguous, &["handoff", "ABCD", "--stdout"]);
+    assert!(
+        err.starts_with("error: session ID prefix \"ABCD\" is ambiguous (2 matches)\n"),
+        "{err}"
+    );
+}
+
+#[test]
+fn handoff_transcripts_hold_no_escape_sequences() {
+    let fixture = escape_fixture();
+    for id in [ESCAPE_A, ESCAPE_B] {
+        let out = ok(
+            &fixture,
+            &["handoff", id, "--stdout", "--preamble", "Go \u{1b}[2Jon."],
+        );
+        assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+        assert!(out.starts_with("Go on.\n\n[user]\n"), "{out:?}");
+    }
+    let out = ok(
+        &fixture,
+        &["handoff", ESCAPE_A, "--stdout", "--no-preamble"],
+    );
+    assert!(
+        out.starts_with("[user]\ncopy  bell  clear  done\n\n"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn handoff_help_shows_its_options_but_not_the_clipboard_server() {
+    let fixture = Fixture::new();
+    let help = ok(&fixture, &["handoff", "--help"]);
+    for text in [
+        "--stdout",
+        "--limit <N>",
+        "--preamble <TEXT>",
+        "--no-preamble",
+        "--source <SOURCE>",
+        "ceil(characters / 4)",
+        "DISPLAY",
+        "cursor-session handoff f4eea6d2 --stdout",
+        "Exit codes:",
+    ] {
+        assert!(help.contains(text), "{text}: {help}");
+    }
+    assert!(!ok(&fixture, &["--help"]).contains("serve-clipboard"));
+}
+
+/// Without a display on Linux, `handoff` prints the transcript and warns,
+/// without trying the clipboard.
+#[cfg(target_os = "linux")]
+#[test]
+fn handoff_without_a_display_prints_the_transcript() {
+    let fixture = standard();
+    let output = fixture
+        .cmd()
+        .args(["handoff", AGENT_ID])
+        .env_remove("DISPLAY")
+        .env("WAYLAND_DISPLAY", "")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        stdout(&output),
+        ok(&fixture, &["handoff", AGENT_ID, "--stdout"])
+    );
+    assert_eq!(
+        stderr(&output),
+        "warning: could not copy to the clipboard (no display: neither DISPLAY nor \
+         WAYLAND_DISPLAY is set); printing the transcript\n"
+    );
 }
 
 #[cfg(unix)]

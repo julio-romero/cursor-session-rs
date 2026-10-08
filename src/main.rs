@@ -1,4 +1,5 @@
 mod cli;
+mod clipboard;
 mod commands;
 mod output;
 
@@ -14,7 +15,7 @@ use clap::{CommandFactory, FromArgMatches};
 use cursor_session::detect::StoragePaths;
 use cursor_session::ui;
 
-use crate::cli::{Cli, ColorChoice};
+use crate::cli::{Cli, ColorChoice, Commands};
 use crate::output::{IgnoreErrors, OutputOpts, PipeWriter, TerminalWriter, stream_color};
 
 fn main() -> ExitCode {
@@ -44,10 +45,22 @@ fn main() -> ExitCode {
     }
     let mut out = PipeWriter::new(stdout_sink(&opts));
     let mut err = diagnostics(io::stderr().lock());
-    let (paths, result) = match resolve_paths(cli.storage.as_deref()) {
+    // Holding the clipboard reads no storage, so none is looked for.
+    let paths = match cli.command {
+        Commands::ServeClipboard => Ok(StoragePaths::default()),
+        _ => resolve_paths(cli.storage.as_deref()),
+    };
+    let (paths, result) = match paths {
         Ok(paths) => {
-            let result =
-                run(cli, &paths, &opts, &mut out, &mut err).and_then(|()| Ok(out.flush()?));
+            let result = run(
+                cli,
+                &paths,
+                &opts,
+                &mut out,
+                &mut err,
+                &mut clipboard::System,
+            )
+            .and_then(|()| Ok(out.flush()?));
             (paths, result)
         }
         Err(error) => (StoragePaths::default(), Err(error)),
@@ -145,6 +158,7 @@ fn run(
     opts: &OutputOpts,
     out: &mut dyn Write,
     err: &mut dyn Write,
+    clipboard: &mut dyn clipboard::Clipboard,
 ) -> Result<()> {
     cursor_session::remove_stale_snapshot_copies();
     if cli.verbose {
@@ -153,7 +167,7 @@ fn run(
         writeln!(err, "ide db: {}", shown(paths.global_storage_db.as_deref()))?;
     }
 
-    commands::run(cli.command, paths, opts, out, err)
+    commands::run(cli.command, paths, opts, out, err, clipboard)
 }
 
 /// A storage path for the verbose lines.
@@ -219,6 +233,15 @@ mod tests {
         let mut buf = Vec::new();
         report(error, paths, &mut buf);
         String::from_utf8(buf).unwrap()
+    }
+
+    /// No test touches the system clipboard.
+    struct NoClipboard;
+
+    impl clipboard::Clipboard for NoClipboard {
+        fn set_text(&mut self, _: &str) -> Result<(), String> {
+            Err("no clipboard in tests".to_string())
+        }
     }
 
     fn args(args: &[&str]) -> Vec<OsString> {
@@ -287,7 +310,7 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let cli = parse_cli(argv).unwrap();
         let paths = resolve_paths(cli.storage.as_deref()).unwrap();
-        run(cli, &paths, &opts, &mut out, &mut err).unwrap();
+        run(cli, &paths, &opts, &mut out, &mut err, &mut NoClipboard).unwrap();
         let resolved = StoragePaths::from_custom(&projects, None).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),
