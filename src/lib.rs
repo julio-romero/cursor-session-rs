@@ -8,7 +8,9 @@ pub mod model;
 pub mod search;
 pub mod since;
 mod sqlite;
+mod tools;
 pub mod ui;
+pub mod view;
 
 pub use crate::error::{Error, Result};
 pub use crate::sqlite::remove_stale_snapshot_copies;
@@ -30,6 +32,19 @@ pub struct LoadOptions {
     /// milliseconds, by the time `list` shows (see [`since::updated_since`]),
     /// before `limit` applies. Sessions without a time are left out.
     pub updated_since: Option<i64>,
+}
+
+/// What reading a session's messages builds besides the messages `show`
+/// prints by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadOptions {
+    /// Also build the tool calls and results, as messages of the role
+    /// [`model::TOOL_ROLE`] among the others. They are no part of the
+    /// session's `message_count` or `content_chars`, which are the same with
+    /// or without them. So are the other messages, except that the text of an
+    /// Agent CLI transcript line that tool calls separate is read as one
+    /// message per run of text between them, to keep the order.
+    pub tools: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -87,28 +102,86 @@ pub fn load_session(
     warnings: &mut Vec<String>,
     notices: &mut Vec<String>,
 ) -> Result<Session> {
-    let index = Index::new(paths, opts.source, warnings, notices)?;
-    let listed = model::merge_sessions(index.sessions());
-    let id = find_session(&listed, query)?.id.clone();
-    let counted = index.count(&|candidate| candidate == id, warnings, notices)?;
-    let summary = model::merge_sessions(counted)
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::SessionNotFound {
-            query: query.to_string(),
-            unsearched: None,
-        })?;
-    load_messages(&summary)
+    let loaded = load_session_with(paths, opts, query, ReadOptions::default());
+    warnings.extend(loaded.warnings);
+    notices.extend(loaded.notices);
+    loaded.session
+}
+
+/// What [`load_session_with`] loaded.
+#[derive(Debug)]
+pub struct LoadedSession {
+    /// The session with its messages, or why it could not be loaded.
+    pub session: Result<Session>,
+    /// As in [`Loaded`], also when loading failed.
+    pub warnings: Vec<String>,
+    pub notices: Vec<String>,
+}
+
+/// [`load_session`], with its messages read as `read` says, and what loading
+/// skipped or left out returned with it.
+pub fn load_session_with(
+    paths: &StoragePaths,
+    opts: &LoadOptions,
+    query: &str,
+    read: ReadOptions,
+) -> LoadedSession {
+    let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+    let mut load = || -> Result<Session> {
+        let index = Index::new(paths, opts.source, &mut warnings, &mut notices)?;
+        let listed = model::merge_sessions(index.sessions());
+        let id = find_session(&listed, query)?.id.clone();
+        let counted = index.count(&|candidate| candidate == id, &mut warnings, &mut notices)?;
+        let mut summary = model::merge_sessions(counted)
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::SessionNotFound {
+                query: query.to_string(),
+                unsearched: None,
+            })?;
+        if read.tools && summary.messages_at == MessagesAt::Nowhere {
+            // A transcript of only tool calls and results holds no message
+            // to count, but has tools to show.
+            let quiet = index
+                .agent
+                .as_ref()
+                .and_then(|agent| agent::tool_transcript(agent, &id));
+            if let Some(path) = quiet {
+                summary.messages_at = MessagesAt::Transcript(path);
+            }
+        }
+        load_messages_with(&summary, read)
+    };
+    let session = load();
+    LoadedSession {
+        session,
+        warnings,
+        notices,
+    }
 }
 
 /// The session `summary` lists, with its messages read from where the
 /// summary says they are.
 pub fn load_messages(summary: &SessionSummary) -> Result<Session> {
+    load_messages_with(summary, ReadOptions::default())
+}
+
+/// [`load_messages`], with the messages read as `read` says.
+pub fn load_messages_with(summary: &SessionSummary, read: ReadOptions) -> Result<Session> {
     let messages = match &summary.messages_at {
         MessagesAt::Nowhere => Vec::new(),
-        MessagesAt::Transcript(path) => agent::read_jsonl(path)?,
+        MessagesAt::Transcript(path) => {
+            let read = agent::read_transcript(path, read)?;
+            let mut summary = summary.clone();
+            summary.message_count = read.message_count;
+            summary.content_chars = read.content_chars;
+            return Ok(Session {
+                summary,
+                messages: read.messages,
+            });
+        }
         MessagesAt::IdeChat { db, key, blob_key } => {
-            ide::read_messages(db, key, *blob_key, &summary.id)?
+            ide::read_messages(db, key, *blob_key, &summary.id, read)?
         }
     };
     Ok(Session::new(summary.clone(), messages))
@@ -123,7 +196,7 @@ pub fn visit_messages(summary: &SessionSummary, visit: &mut dyn FnMut(Message)) 
         MessagesAt::Nowhere => Ok(()),
         MessagesAt::Transcript(path) => agent::visit_jsonl(path, visit),
         MessagesAt::IdeChat { db, key, blob_key } => {
-            ide::read_messages(db, key, *blob_key, &summary.id)?
+            ide::read_messages(db, key, *blob_key, &summary.id, ReadOptions::default())?
                 .into_iter()
                 .for_each(visit);
             Ok(())

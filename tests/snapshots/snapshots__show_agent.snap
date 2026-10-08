@@ -10,6 +10,7 @@ model:     claude-4.5-sonnet
 created:   2025-09-04 15:33 UTC
 updated:   2025-09-04 16:33 UTC
 messages:  4
+tokens:    ~41 (estimate)
 
 [user (Thursday, Sep 4, 2025, 9:33 AM (UTC-6))]
 Design a semantic layer for Langfuse traces.

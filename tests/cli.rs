@@ -76,7 +76,7 @@ fn keys(value: &Value) -> Vec<&str> {
         .collect()
 }
 
-const SUMMARY_KEYS: [&str; 9] = [
+const SUMMARY_KEYS: [&str; 10] = [
     "id",
     "title",
     "source",
@@ -86,6 +86,7 @@ const SUMMARY_KEYS: [&str; 9] = [
     "created_at",
     "updated_at",
     "message_count",
+    "token_estimate",
 ];
 
 #[test]
@@ -289,6 +290,7 @@ fn list_json_has_the_documented_keys() {
         assert_eq!(keys(summary), SUMMARY_KEYS);
         assert!(["agent", "ide"].contains(&summary["source"].as_str().unwrap()));
         assert!(summary["message_count"].is_u64());
+        assert!(summary["token_estimate"].is_u64());
         for time in ["created_at", "updated_at"] {
             let value = &summary[time];
             assert!(
@@ -309,6 +311,8 @@ fn list_json_has_the_documented_keys() {
             "created_at": "2025-09-04T15:33:20Z",
             "updated_at": "2025-09-04T16:33:20Z",
             "message_count": 4,
+            // 162 characters in its four messages, the tool calls left out.
+            "token_estimate": 41,
         })
     );
     // No update time is shown as null, not as the creation time.
@@ -1390,6 +1394,426 @@ fn piped_json_escapes_controls_a_terminal_would_act_on() {
     assert!(!out.contains(['\u{1b}', '\u{7}', '\u{7f}', '\u{9b}', '\u{9c}', '\u{9d}']));
 }
 
+/// The roles and contents of a `show --json`'s messages.
+fn messages(detail: &Value) -> Vec<(String, String)> {
+    detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let text = |key: &str| m[key].as_str().unwrap().to_string();
+            (text("role"), text("content"))
+        })
+        .collect()
+}
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(role, content)| (role.to_string(), content.to_string()))
+        .collect()
+}
+
+const LONG_RESULT_PREVIEW: &str = "long line long line long line long line long line long line \
+     long line long line long line long line long line long line…";
+
+#[test]
+fn show_only_selects_roles_and_adds_tool_calls_on_request() {
+    let fixture = tools();
+    let detail = |args: &[&str]| json(&ok(&fixture, &[&["show"][..], args, &["--json"]].concat()));
+    let final_answer = format!(
+        "It is configured in src/config.rs.{}",
+        " Details follow.".repeat(20)
+    );
+    let long_result = "long line ".repeat(40).trim_end().to_string();
+
+    let all = detail(&[AGENT_TOOLS_ID, "--only", "user,assistant,tool"]);
+    assert_eq!(
+        messages(&all),
+        pairs(&[
+            ("user", "Where is langfuse configured?"),
+            ("assistant", "Let me search."),
+            ("tool", r#"Grep {"pattern":"langfuse"}"#),
+            ("tool", "src/config.rs:12: langfuse_host"),
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", &long_result),
+            ("assistant", &final_answer),
+        ])
+    );
+    // The summary stays the whole session's, tools left out.
+    let default = detail(&[AGENT_TOOLS_ID]);
+    assert_eq!(all["message_count"], 3);
+    assert_eq!(all["token_estimate"], default["token_estimate"]);
+    assert_eq!(messages(&default).len(), 3);
+    // Roles in any order and repeated flags select the same messages.
+    for only in [
+        &["--only", "tool,user,assistant"][..],
+        &["--only", "tool", "--only", "user,assistant"],
+    ] {
+        assert_eq!(detail(&[&[AGENT_TOOLS_ID][..], only].concat()), all);
+    }
+    // Without tool, it is what show prints by default.
+    let chat = detail(&[AGENT_TOOLS_ID, "--only", "user,assistant"]);
+    assert_eq!(chat, default);
+
+    let tools_only = detail(&[AGENT_TOOLS_ID, "--only", "tool"]);
+    assert_eq!(messages(&tools_only), messages(&all)[2..6]);
+    assert!(
+        tools_only["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["timestamp"].is_null())
+    );
+
+    let ide = detail(&[IDE_TOOLS_ID, "--only", "assistant,tool"]);
+    assert_eq!(
+        messages(&ide),
+        pairs(&[
+            ("assistant", "Listing them."),
+            ("tool", r#"list_dir {"relative_workspace_path":"."}"#),
+            // A result stored as JSON in a string, indented.
+            (
+                "tool",
+                "{\n  \"files\": [\n    \"Cargo.toml\",\n    \"src\"\n  ]\n}",
+            ),
+            ("assistant", "Two entries."),
+        ])
+    );
+    assert_eq!(ide["message_count"], 3);
+    assert_eq!(
+        messages(&detail(&[IDE_TOOLS_ID, "--only", "user"])),
+        pairs(&[("user", "List the files.")])
+    );
+}
+
+#[test]
+fn show_short_cuts_messages_and_previews_tool_results() {
+    let fixture = tools();
+    let detail = |args: &[&str]| json(&ok(&fixture, &[&["show"][..], args, &["--json"]].concat()));
+    let short = detail(&[AGENT_TOOLS_ID, "--only", "assistant,tool", "--short"]);
+    let final_answer = format!(
+        "It is configured in src/config.rs.{}",
+        " Details follow.".repeat(20)
+    );
+    let cut: String = final_answer.chars().take(300).collect();
+    assert_eq!(
+        messages(&short),
+        pairs(&[
+            ("assistant", "Let me search."),
+            ("tool", r#"Grep {"pattern":"langfuse"}"#),
+            ("tool", "src/config.rs:12: langfuse_host"),
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", LONG_RESULT_PREVIEW),
+            ("assistant", &format!("{cut}…")),
+        ])
+    );
+    assert_eq!(
+        short["token_estimate"],
+        detail(&[AGENT_TOOLS_ID])["token_estimate"]
+    );
+    // --limit counts the messages printed.
+    let last = detail(&[AGENT_TOOLS_ID, "--only", "tool", "--short", "--limit", "2"]);
+    assert_eq!(
+        messages(&last),
+        pairs(&[
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", LONG_RESULT_PREVIEW),
+        ])
+    );
+    // Short messages are printed whole.
+    let ide = detail(&[IDE_TOOLS_ID, "--short"]);
+    assert_eq!(ide, detail(&[IDE_TOOLS_ID]));
+
+    // The plain layout too, with the omitted messages counted among those
+    // selected.
+    let shown = ok(
+        &fixture,
+        &[
+            "show",
+            AGENT_TOOLS_ID,
+            "--only",
+            "tool",
+            "--short",
+            "--limit",
+            "2",
+        ],
+    );
+    assert!(
+        shown.ends_with(&format!(
+            "messages:  3\ntokens:    ~{} (estimate)\n\n\
+             2 earlier message(s) omitted. Use --limit N or --all to see more.\n\n\
+             [tool]\nRead {{\"path\":\"src/config.rs\"}}\n\n[tool]\n{LONG_RESULT_PREVIEW}\n",
+            short["token_estimate"]
+        )),
+        "{shown}"
+    );
+}
+
+/// Agent CLI session whose tool calls failed, from [`failed_tools`].
+const AGENT_FAILED_ID: &str = "70015000-aaaa-4bbb-8ccc-000000000003";
+/// IDE chat whose tool calls failed, from [`failed_tools`].
+const IDE_FAILED_ID: &str = "70015000-aaaa-4bbb-8ccc-000000000004";
+
+/// One session in each store whose tool calls failed or were stopped, with
+/// results of the shapes that are easy to show wrong.
+fn failed_tools() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write_meta_json(
+        PROJECT_X,
+        AGENT_FAILED_ID,
+        &serde_json::json!({
+            "title": "Agent with failed tools",
+            "createdAtMs": 1_757_500_000_000_i64,
+            "updatedAtMs": 1_757_500_060_000_i64,
+            "cwd": PROJECT_X,
+        }),
+    );
+    let mut failed = tool_result(&serde_json::json!(format!(
+        "No such file: {}",
+        "x".repeat(200)
+    )));
+    failed["is_error"] = Value::Bool(true);
+    let image = serde_json::json!({
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="},
+    });
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        AGENT_FAILED_ID,
+        Layout::Nested,
+        &[
+            user_query("Mon", "Read it."),
+            assistant(&[tool_use("Read", &serde_json::json!({"path": "gone.rs"}))]),
+            tool_line(&[failed]),
+            assistant(&[tool_use("Screenshot", &serde_json::json!({}))]),
+            tool_line(&[image]),
+            assistant(&[text_part("It is gone.")]),
+        ],
+    );
+    let with = |mut bubble: Value, status: &str, result: Option<&str>| {
+        let data = &mut bubble["toolFormerData"];
+        data["status"] = Value::String(status.into());
+        match result {
+            Some(result) => data["result"] = Value::String(result.into()),
+            None => drop(data.as_object_mut().unwrap().remove("result")),
+        }
+        bubble
+    };
+    let args = serde_json::json!({"command": "rm -rf build"});
+    let call = |id: &str| tool_bubble(id, "", "run_terminal_cmd", &args, &Value::Null);
+    fixture.write_ide_db(
+        Journal::Delete,
+        &[
+            composer(
+                IDE_FAILED_ID,
+                &composer_json(
+                    IDE_FAILED_ID,
+                    "IDE with failed tools",
+                    1_757_400_000_000,
+                    1_757_400_060_000,
+                    &[("f1", 1), ("f2", 2), ("f3", 2), ("f4", 2)],
+                ),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_FAILED_ID,
+                "f1",
+                &text_bubble("f1", 1, "Clean up."),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_FAILED_ID,
+                "f2",
+                &with(call("f2"), "error", Some(r#""permission denied""#)),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_FAILED_ID,
+                "f3",
+                &with(call("f3"), "cancelled", None),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_FAILED_ID,
+                "f4",
+                &with(call("f4"), "completed", Some(r#""done""#)),
+                Stored::Text,
+            ),
+        ],
+    );
+    fixture
+}
+
+#[test]
+fn show_marks_failed_tool_calls_and_shows_results_as_text() {
+    let fixture = failed_tools();
+    let detail = |args: &[&str]| json(&ok(&fixture, &[&["show"][..], args, &["--json"]].concat()));
+    let missing = format!("No such file: {}", "x".repeat(200));
+    assert_eq!(
+        messages(&detail(&[AGENT_FAILED_ID, "--only", "tool"])),
+        pairs(&[
+            ("tool", r#"Read {"path":"gone.rs"}"#),
+            ("tool", &format!("{missing} (error)")),
+            ("tool", "Screenshot {}"),
+            // An image placed in a tool line by itself.
+            ("tool", "[image]"),
+        ])
+    );
+    // The marker outlives --short's cut.
+    let preview: String = missing.chars().take(120).collect();
+    assert_eq!(
+        messages(&detail(&[AGENT_FAILED_ID, "--only", "tool", "--short"]))[1],
+        ("tool".to_string(), format!("{preview}… (error)"))
+    );
+    let call = r#"run_terminal_cmd {"command":"rm -rf build"}"#;
+    let ide = pairs(&[
+        ("tool", call),
+        // Results stored as JSON strings, shown without their quotes.
+        ("tool", "permission denied (error)"),
+        ("tool", &format!("{call} (cancelled)")),
+        ("tool", call),
+        ("tool", "done"),
+    ]);
+    assert_eq!(messages(&detail(&[IDE_FAILED_ID, "--only", "tool"])), ide);
+    assert_eq!(
+        messages(&detail(&[IDE_FAILED_ID, "--only", "tool", "--short"])),
+        ide
+    );
+    // Plain text says the same.
+    let shown = ok(&fixture, &["show", IDE_FAILED_ID, "--only", "tool"]);
+    assert!(
+        shown.contains("\n[tool]\npermission denied (error)\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn show_says_when_only_matches_no_message() {
+    let fixture = standard();
+    // A chat of user and assistant messages, without tool calls.
+    let plain = ok(&fixture, &["show", IDE_TEXT_ID]);
+    let header = &plain[..plain.find("\n\n").unwrap() + 1];
+    assert!(
+        plain.contains("\n[user") && !plain.contains("[tool"),
+        "{plain}"
+    );
+    for (only, note) in [
+        ("tool", "No messages match --only tool."),
+        ("tool,tool", "No messages match --only tool,tool."),
+    ] {
+        let shown = ok(&fixture, &["show", IDE_TEXT_ID, "--only", only]);
+        assert_eq!(shown, format!("{header}\n{note}\n"), "{only}");
+        // JSON has no note: its empty list says it.
+        let args = ["show", IDE_TEXT_ID, "--only", only, "--json"];
+        assert_eq!(
+            json(&ok(&fixture, &args))["messages"],
+            serde_json::json!([])
+        );
+    }
+    // Messages that match leave no note.
+    let shown = ok(&fixture, &["show", IDE_TEXT_ID, "--only", "user"]);
+    assert!(!shown.contains("No messages match"), "{shown}");
+    // A session without messages has it only with --only.
+    let empty = ok(&fixture, &["show", IDE_UNTITLED_ID]);
+    assert!(!empty.contains("No messages match"), "{empty}");
+    assert_eq!(
+        ok(&fixture, &["show", IDE_UNTITLED_ID, "--only", "user"]),
+        format!("{empty}\nNo messages match --only user.\n")
+    );
+}
+
+#[test]
+fn show_prints_by_default_what_it_always_has() {
+    for fixture in [standard(), tools()] {
+        for session in fixture.load().sessions {
+            let id = session.id.as_str();
+            let plain = ok(&fixture, &["show", id]);
+            assert_eq!(
+                plain,
+                ui::render_show(&session, &session.messages, None, false)
+            );
+            let detail = ok(&fixture, &["show", id, "--json"]);
+            assert_eq!(
+                json(&detail)["messages"].as_array().unwrap().len(),
+                session.messages.len()
+            );
+            // Messages of an unknown role show only without --only.
+            if session.messages.iter().all(|m| m.role != "unknown") {
+                let selected = ok(&fixture, &["show", id, "--only", "user,assistant"]);
+                // Unless it says why it printed no message.
+                let plain = if session.messages.is_empty() {
+                    format!("{plain}\nNo messages match --only user,assistant.\n")
+                } else {
+                    plain
+                };
+                assert_eq!(selected, plain, "{id}");
+            }
+        }
+    }
+}
+
+#[test]
+fn listed_token_estimates_are_those_show_prints() {
+    for fixture in [standard(), tools()] {
+        let listed = json(&ok(&fixture, &["list", "--json"]));
+        let listed = listed.as_array().unwrap();
+        assert!(listed.iter().any(|s| s["source"] == "agent"));
+        assert!(listed.iter().any(|s| s["source"] == "ide"));
+        for summary in listed {
+            let id = summary["id"].as_str().unwrap();
+            let estimate = &summary["token_estimate"];
+            for extra in [&[][..], &["--only", "tool", "--short", "--limit", "1"]] {
+                let args = [&["show", id, "--json"][..], extra].concat();
+                assert_eq!(
+                    &json(&ok(&fixture, &args))["token_estimate"],
+                    estimate,
+                    "{id}"
+                );
+            }
+            let shown = ok(&fixture, &["show", id]);
+            assert!(
+                shown.contains(&format!("\ntokens:    ~{estimate} (estimate)\n")),
+                "{shown}"
+            );
+            let detail = json(&ok(&fixture, &["show", id, "--json"]));
+            let chars: usize = detail["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["content"].as_str().unwrap().chars().count())
+                .sum();
+            assert_eq!(estimate.as_u64().unwrap(), chars.div_ceil(4) as u64, "{id}");
+        }
+    }
+}
+
+#[test]
+fn show_only_takes_known_roles() {
+    let fixture = standard();
+    for only in ["", "bot", "user,", "user,,assistant", "unknown"] {
+        let output = run(&fixture, &["show", AGENT_ID, "--only", only]);
+        assert_eq!(output.status.code(), Some(2), "{only:?}");
+        assert_eq!(stdout(&output), "");
+        assert!(stderr(&output).starts_with("error: "), "{only:?}");
+    }
+    let output = run(&fixture, &["show", AGENT_ID, "--only"]);
+    assert_eq!(output.status.code(), Some(2));
+    let help = ok(&fixture, &["show", "-h"]);
+    for text in [
+        "--only <ROLES>",
+        "--short",
+        "[possible values: user, assistant, tool]",
+        "show f4eea6d2 --only user,assistant --short",
+    ] {
+        assert!(help.contains(text), "{text}: {help}");
+    }
+    for command in ["list", "show"] {
+        let help = ok(&fixture, &[command, "--help"]);
+        assert!(help.contains("ceil(characters / 4)"), "{help}");
+    }
+}
+
 /// The binary in a pseudo-terminal, through script(1). Windows has no
 /// script(1), and ConPTY would need a new dependency, so these run on Unix.
 #[cfg(unix)]
@@ -1578,6 +2002,24 @@ mod tty {
             &env,
         ));
         assert_eq!(shown["messages"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn terminal_default_counts_only_the_messages_selected() {
+        let fixture = long_session_fixture(25);
+        let session = fixture.load().sessions.remove(0);
+        let answers: Vec<Message> = session
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .cloned()
+            .collect();
+        assert_eq!(answers.len(), 25);
+        let env = [("NO_COLOR", "1")];
+        assert_eq!(
+            run_tty(&fixture, &["show", "long", "--only", "assistant"], &env),
+            ui::render_show(&session, &answers[5..], Some(5), false)
+        );
     }
 }
 

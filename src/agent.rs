@@ -12,9 +12,9 @@ use serde_json::Value;
 
 use crate::detect::{ChatsScope, StoragePaths};
 use crate::json::{self, lenient, lenient_ms};
-use crate::model::{Message, MessagesAt, SessionSummary, Source};
+use crate::model::{Message, MessagesAt, SessionSummary, Source, TOOL_ROLE, content_chars};
 use crate::sqlite::with_readonly;
-use crate::{Error, Result};
+use crate::{Error, ReadOptions, Result, tools};
 
 /// A session's `meta.json`. Each field is read leniently, so that one value of
 /// an unexpected type costs that value, not the others.
@@ -116,6 +116,9 @@ pub(crate) struct Index {
     pub sessions: Vec<SessionSummary>,
     /// The transcripts of each session that hold a message.
     transcripts: HashMap<String, Vec<TranscriptFile>>,
+    /// Transcripts that hold no message, such as those of only tool calls
+    /// and results, which make no session; see [`tool_transcript`].
+    quiet: HashMap<String, Vec<TranscriptFile>>,
 }
 
 /// Finds the Agent CLI sessions, reading each transcript only up to its first
@@ -150,7 +153,7 @@ pub(crate) fn index(
     for (dir, err) in unreadable {
         notices.push(format!("could not read {}: {err}", dir.display()));
     }
-    let transcripts = match transcripts {
+    let (transcripts, quiet) = match transcripts {
         Some((dir, found)) if found.unrecognized > 0 && found.unrecognized == found.read => {
             return Err(Error::SchemaMismatch {
                 store: Source::Agent,
@@ -161,8 +164,8 @@ pub(crate) fn index(
                 },
             });
         }
-        Some((_, found)) => found.by_id,
-        None => HashMap::new(),
+        Some((_, found)) => (found.by_id, found.quiet),
+        None => (HashMap::new(), HashMap::new()),
     };
 
     let mut by_id: HashMap<String, SessionSummary> = HashMap::new();
@@ -179,13 +182,30 @@ pub(crate) fn index(
     Ok(Index {
         sessions: by_id.into_values().collect(),
         transcripts,
+        quiet,
     })
 }
 
+/// A transcript of session `id` that holds no message, for its tool calls
+/// and results when it has no transcript that holds a message: of several,
+/// the newest. Counting never uses it, so the session's messages and what
+/// lists it stay as they are.
+pub(crate) fn tool_transcript(index: &Index, id: &str) -> Option<PathBuf> {
+    if index.transcripts.contains_key(id) {
+        return None;
+    }
+    index
+        .quiet
+        .get(id)?
+        .iter()
+        .max_by(|a, b| (a.modified, &a.path).cmp(&(b.modified, &b.path)))
+        .map(|file| file.path.clone())
+}
+
 /// The sessions of `index` that `selected` accepts, each with the number of
-/// messages in its transcript and where that is. Of several copies of a
-/// transcript, the one with the most messages is used. Transcripts that
-/// cannot be read are reported in `warnings`.
+/// messages in its transcript, the characters of their content, and where
+/// that is. Of several copies of a transcript, the one with the most messages
+/// is used. Transcripts that cannot be read are reported in `warnings`.
 pub(crate) fn count(
     index: &Index,
     selected: &dyn Fn(&str) -> bool,
@@ -210,6 +230,7 @@ pub(crate) fn count(
                         &mut best,
                         TranscriptCandidate {
                             messages: scan.messages,
+                            chars: scan.chars,
                             modified: file.modified,
                             path: file.path.clone(),
                         },
@@ -220,6 +241,7 @@ pub(crate) fn count(
             }
             if let Some(best) = best {
                 session.message_count = best.messages;
+                session.content_chars = best.chars;
                 session.messages_at = MessagesAt::Transcript(best.path);
             }
             session
@@ -601,6 +623,8 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 
 struct TranscriptCandidate {
     messages: usize,
+    /// The characters of their content.
+    chars: usize,
     modified: Option<SystemTime>,
     path: PathBuf,
 }
@@ -623,7 +647,7 @@ fn select_transcript(best: &mut Option<TranscriptCandidate>, candidate: Transcri
     }
 }
 
-/// A transcript that holds a message.
+/// A transcript file.
 struct TranscriptFile {
     path: PathBuf,
     modified: Option<SystemTime>,
@@ -633,6 +657,8 @@ struct TranscriptFile {
 struct Transcripts {
     /// The transcripts of each session that hold a message.
     by_id: HashMap<String, Vec<TranscriptFile>>,
+    /// Those that hold none, though nothing in them is unreadable.
+    quiet: HashMap<String, Vec<TranscriptFile>>,
     /// Transcripts read that held messages or should have.
     read: usize,
     /// Those of them in which no message could be read.
@@ -644,6 +670,7 @@ struct Transcripts {
 /// cannot be read.
 fn scan_transcripts(projects_dir: &Path, warnings: &mut Vec<String>) -> io::Result<Transcripts> {
     let mut by_id: HashMap<String, Vec<TranscriptFile>> = HashMap::new();
+    let mut quiet: HashMap<String, Vec<TranscriptFile>> = HashMap::new();
     let mut unreadable = Unreadable::new("transcript");
     let mut read = 0;
     for project in read_subdirs(projects_dir)? {
@@ -684,20 +711,24 @@ fn scan_transcripts(projects_dir: &Path, warnings: &mut Vec<String>) -> io::Resu
                 unreadable.add_unrecognized(&path, "no user or assistant message could be read");
                 continue;
             }
-            if scan.messages > 0 {
+            let found = if scan.messages > 0 {
                 read += 1;
-                let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
-                by_id
-                    .entry(id)
-                    .or_default()
-                    .push(TranscriptFile { path, modified });
-            }
+                &mut by_id
+            } else {
+                &mut quiet
+            };
+            let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+            found
+                .entry(id)
+                .or_default()
+                .push(TranscriptFile { path, modified });
         }
     }
     let unrecognized = unreadable.unrecognized;
     unreadable.report(warnings);
     Ok(Transcripts {
         by_id,
+        quiet,
         read,
         unrecognized,
     })
@@ -728,21 +759,64 @@ fn transcript_path(dir: &Path, id: &str, warnings: &mut Vec<String>) -> Option<P
 
 /// The messages of the transcript at `path`.
 pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
+    read_jsonl_with(path, ReadOptions::default())
+}
+
+/// The messages of the transcript at `path`, with its tool calls and results
+/// among them when `read.tools` is set (see [`with_tools`]).
+pub fn read_jsonl_with(path: &Path, read: ReadOptions) -> Result<Vec<Message>> {
+    Ok(read_transcript(path, read)?.messages)
+}
+
+/// What [`read_transcript`] read.
+pub(crate) struct Transcript {
+    pub messages: Vec<Message>,
+    /// The messages `show` prints by default, and the characters of their
+    /// content, as counting the transcript gives them. With the tools read,
+    /// text that tool calls separate makes several messages, which still
+    /// count as the one message they are without them.
+    pub message_count: usize,
+    pub content_chars: usize,
+}
+
+/// [`read_jsonl_with`], with the counts of the messages read.
+pub(crate) fn read_transcript(path: &Path, read: ReadOptions) -> Result<Transcript> {
     let mut messages = Vec::new();
-    visit_jsonl(path, &mut |message| messages.push(message))?;
-    Ok(messages)
+    let keep = Keep {
+        visit: &mut |message| messages.push(message),
+        tools: read.tools,
+    };
+    let scan = scan_transcript(path, Some(keep), false)?;
+    Ok(Transcript {
+        messages,
+        message_count: scan.messages,
+        content_chars: scan.chars,
+    })
+}
+
+/// Where [`scan_transcript`] hands the messages it reads.
+struct Keep<'a> {
+    visit: &'a mut dyn FnMut(Message),
+    /// Whether tool calls and results are kept too.
+    tools: bool,
 }
 
 /// Calls `visit` with each message of the transcript at `path` in order, the
 /// messages [`read_jsonl`] returns, holding no more than one line at a time.
 pub fn visit_jsonl(path: &Path, visit: &mut dyn FnMut(Message)) -> Result<()> {
-    scan_transcript(path, Some(visit), false).map(drop)
+    let keep = Keep {
+        visit,
+        tools: false,
+    };
+    scan_transcript(path, Some(keep), false).map(drop)
 }
 
 /// What a transcript holds, as far as it was read.
 #[derive(Debug, Default)]
 struct Scan {
     messages: usize,
+    /// The characters of their content, as reading them builds it.
+    chars: usize,
     /// Lines that should hold a message: the user's, the assistant's, and
     /// those this version cannot read, such as lines of an unknown role.
     expected: usize,
@@ -759,12 +833,9 @@ impl Scan {
 
 /// Reads the transcript at `path` line by line, keeping no more than one line
 /// in memory. Its messages go to `keep` when given; otherwise they are only
-/// counted. With `until_first`, reading stops at the first message.
-fn scan_transcript(
-    path: &Path,
-    mut keep: Option<&mut dyn FnMut(Message)>,
-    until_first: bool,
-) -> Result<Scan> {
+/// counted, with the characters of their content. With `until_first`,
+/// reading stops at the first message.
+fn scan_transcript(path: &Path, mut keep: Option<Keep<'_>>, until_first: bool) -> Result<Scan> {
     let io_err = |source| Error::Io {
         path: path.to_path_buf(),
         source,
@@ -779,19 +850,26 @@ fn scan_transcript(
         if line.is_empty() {
             continue;
         }
+        let mut built = None;
         match read_line(line, keep.is_some()) {
             Line::Nothing => {}
             Line::NoMessage => scan.expected += 1,
-            Line::Message(message) => {
+            Line::Message { message, chars } => {
                 scan.expected += 1;
                 scan.messages += 1;
-                if let (Some(keep), Some(message)) = (keep.as_mut(), message) {
-                    keep(message);
-                }
-                if until_first {
-                    break;
-                }
+                scan.chars += chars;
+                built = message;
             }
+        }
+        match &mut keep {
+            Some(keep) if keep.tools => with_tools(line, built)
+                .into_iter()
+                .for_each(&mut keep.visit),
+            Some(keep) => built.into_iter().for_each(&mut keep.visit),
+            None => {}
+        }
+        if until_first && scan.messages > 0 {
+            break;
         }
     }
     Ok(scan)
@@ -805,8 +883,12 @@ enum Line {
     /// A line that should hold a message but holds none this version can
     /// show: unreadable, of an unknown role, or without text.
     NoMessage,
-    /// A message, built when asked for.
-    Message(Option<Message>),
+    /// A message, built when asked for, and the characters of the content it
+    /// shows.
+    Message {
+        message: Option<Message>,
+        chars: usize,
+    },
 }
 
 fn read_line(line: &str, build: bool) -> Line {
@@ -827,41 +909,207 @@ fn read_line(line: &str, build: bool) -> Line {
         return Line::NoMessage;
     }
     if !build {
-        return if has_text(&role, &content) {
-            Line::Message(None)
-        } else {
-            Line::NoMessage
+        return match shown_chars(&role, &content) {
+            0 => Line::NoMessage,
+            chars => Line::Message {
+                message: None,
+                chars,
+            },
         };
     }
-    let raw_content = extract_content(&content);
-    let timestamp = extract_timestamp_tag(&raw_content);
-    let content = if role == "user" {
-        clean_user_text(&raw_content)
-    } else {
-        raw_content.trim().to_string()
-    };
-    if content.is_empty() {
-        return Line::NoMessage;
+    match build_message(role, &extract_content(&content)) {
+        Some(message) => Line::Message {
+            chars: content_chars(&message.content),
+            message: Some(message),
+        },
+        None => Line::NoMessage,
     }
-    Line::Message(Some(Message {
+}
+
+/// The message of `role` (user or assistant) whose text, its parts joined,
+/// is `raw`: `None` when it has no text to show.
+fn build_message(role: String, raw: &str) -> Option<Message> {
+    let timestamp = extract_timestamp_tag(raw);
+    let content = if role == "user" {
+        clean_user_text(raw)
+    } else {
+        raw.trim().to_string()
+    };
+    (!content.is_empty()).then_some(Message {
         role,
         content,
         timestamp,
-    }))
+    })
 }
 
-/// Whether a message of `role` with `content` has text to show, as
-/// [`read_line`] decides when it builds the message.
-fn has_text(role: &str, content: &TranscriptContent) -> bool {
+/// The characters of the content [`read_line`] builds for a message of
+/// `role` with `content`, counted without building it where that is cheaper:
+/// 0 when it has no text to show.
+fn shown_chars(role: &str, content: &TranscriptContent) -> usize {
     if role == "user" {
-        return !clean_user_text(&extract_content(content)).is_empty();
+        return content_chars(&clean_user_text(&extract_content(content)));
     }
-    // Joined with blank lines and trimmed, the parts have text when one does.
-    let visible = |text: &str| !text.trim().is_empty();
     match content {
-        TranscriptContent::Text(text) => visible(text),
-        TranscriptContent::Parts(parts) => text_parts(parts).any(visible),
-        TranscriptContent::Other(_) => false,
+        TranscriptContent::Text(text) => content_chars(text.trim()),
+        TranscriptContent::Parts(parts) => joined_trimmed_chars(text_parts(parts)),
+        TranscriptContent::Other(_) => 0,
+    }
+}
+
+/// The characters of `texts` joined with blank lines, as [`extract_content`]
+/// joins them, and then trimmed, without joining them.
+fn joined_trimmed_chars<'a>(texts: impl Iterator<Item = &'a str>) -> usize {
+    // Characters up to the last one that is not whitespace, and the
+    // whitespace after it, which counts only when more text follows.
+    let (mut shown, mut trailing) = (0, 0);
+    let mut started = false;
+    for text in texts {
+        let text = if started {
+            // The blank line before it.
+            trailing += 2;
+            text
+        } else {
+            text.trim_start()
+        };
+        let visible = text.trim_end();
+        if visible.is_empty() {
+            trailing += content_chars(text);
+            continue;
+        }
+        if started {
+            shown += trailing;
+        }
+        shown += content_chars(visible);
+        trailing = content_chars(&text[visible.len()..]);
+        started = true;
+    }
+    shown
+}
+
+/// A transcript line as read for its tool calls and results.
+#[derive(Debug, Deserialize)]
+struct ToolLine {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    message: Option<ToolLineMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolLineMessage {
+    #[serde(default)]
+    content: Value,
+}
+
+/// The messages of a transcript line with its tool calls and results, in
+/// the order of its parts: a tool message for each `tool_use` and
+/// `tool_result` part, and a message for each run of text parts between
+/// them, built as [`read_line`] builds the message of a line of that text.
+/// `message` is the one [`read_line`] built from the whole line, which is
+/// what a line without tool parts gives. A line of the role `tool` is all
+/// tool messages; lines of other roles than user and assistant give none.
+fn with_tools(line: &str, message: Option<Message>) -> Vec<Message> {
+    let Ok(entry) = json::from_str::<ToolLine>(line) else {
+        return message.into_iter().collect();
+    };
+    let role = entry.role.unwrap_or_default();
+    let content = entry.message.map(|m| m.content).unwrap_or_default();
+    match role.as_str() {
+        TOOL_ROLE => {
+            let mut messages = tool_line(&content);
+            messages.extend(message);
+            return messages;
+        }
+        "user" | "assistant" => {}
+        // System lines are never shown, tools or not, and a role this
+        // version does not know shows nothing.
+        _ => return message.into_iter().collect(),
+    }
+    let parts = match &content {
+        Value::Array(parts) if parts.iter().any(is_tool_part) => parts,
+        _ => return message.into_iter().collect(),
+    };
+    // The text of the parts, as `read_line` reads them.
+    let read = TranscriptContent::deserialize(&content).ok();
+    let texts = match &read {
+        Some(TranscriptContent::Parts(read)) if read.len() == parts.len() => read.as_slice(),
+        _ => &[],
+    };
+    let mut messages = Vec::new();
+    let mut run: Vec<&str> = Vec::new();
+    let flush = |run: &mut Vec<&str>, messages: &mut Vec<Message>| {
+        if !run.is_empty() {
+            messages.extend(build_message(role.clone(), &run.join("\n\n")));
+            run.clear();
+        }
+    };
+    for (at, part) in parts.iter().enumerate() {
+        if is_tool_part(part) {
+            flush(&mut run, &mut messages);
+            messages.extend(tool_part(part).and_then(tools::message));
+        } else if let Some(text) = texts.get(at).and_then(|read| {
+            read.text
+                .as_deref()
+                .filter(|_| read.kind.as_deref().unwrap_or("text") == "text")
+        }) {
+            run.push(text);
+        }
+    }
+    flush(&mut run, &mut messages);
+    messages
+}
+
+/// The tool messages of a line of the role `tool`.
+fn tool_line(content: &Value) -> Vec<Message> {
+    let mut messages = Vec::new();
+    match content {
+        Value::Array(parts) => {
+            for part in parts {
+                let text = match part_kind(part) {
+                    "text" => part.get("text").and_then(tools::result),
+                    "tool_use" | "tool_result" => tool_part(part),
+                    // Any other part, such as an image, as a result's part
+                    // is shown: by its text, or a placeholder.
+                    _ => tool_part(part).or_else(|| tools::result(part)),
+                };
+                messages.extend(text.and_then(tools::message));
+            }
+        }
+        other => messages.extend(tools::result(other).and_then(tools::message)),
+    }
+    messages
+}
+
+/// Whether a content part is a tool call or result.
+fn is_tool_part(part: &Value) -> bool {
+    matches!(part_kind(part), "tool_use" | "tool_result")
+}
+
+/// The `type` of a content part; a part without one is text.
+fn part_kind(part: &Value) -> &str {
+    match part.get("type") {
+        Some(Value::String(kind)) => kind,
+        Some(_) => "",
+        None => "text",
+    }
+}
+
+/// A `tool_use` part as a call, and any other part as what a tool returned,
+/// marked `(error)` when it says it is an error (`is_error`).
+fn tool_part(part: &Value) -> Option<String> {
+    if part_kind(part) == "tool_use" {
+        let name = part.get("name").and_then(Value::as_str);
+        let args = ["input", "arguments", "args"]
+            .iter()
+            .find_map(|key| part.get(*key));
+        return Some(tools::call(name, args));
+    }
+    let text = ["content", "result", "output", "text"]
+        .iter()
+        .find_map(|key| part.get(*key).and_then(tools::result));
+    match part.get("is_error") {
+        Some(Value::Bool(true)) => Some(tools::marked(text, "error")),
+        _ => text,
     }
 }
 
@@ -970,6 +1218,7 @@ mod tests {
     fn candidate(count: usize, modified: Option<u64>, path: &str) -> TranscriptCandidate {
         TranscriptCandidate {
             messages: count,
+            chars: 0,
             modified: modified
                 .map(|seconds| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
             path: path.into(),
@@ -1008,7 +1257,7 @@ mod tests {
     }
 
     /// Counting a transcript gives the number of messages reading it gives,
-    /// whatever its lines hold.
+    /// and the characters of their content, whatever its lines hold.
     #[test]
     fn counted_messages_are_the_messages_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -1025,6 +1274,8 @@ mod tests {
             r#"{"role":"assistant","message":{"content":null}}"#,
             r#"{"role":"assistant","message":{"content":"   "}}"#,
             r#"{"role":"assistant","message":{"content":"\u00a0plain\ud83d"}}"#,
+            r#"{"role":"assistant","message":{"content":[{"text":" \n"},{"text":"  ünï "},{"type":"tool_use","name":"Read"},{"text":"\t"},{"text":"日本\u3000"},{"text":" "}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"text":"👨‍👩‍👧 one"},{"type":"image"}]}}"#,
             r#"{"role":"system","message":{"content":"setup"}}"#,
             r#"{"role":"human","message":{"content":"hello"}}"#,
             r#"["user",{"content":"by position"}]"#,
@@ -1034,9 +1285,221 @@ mod tests {
         let read = read_jsonl(&path).unwrap();
         let counted = scan_transcript(&path, None, false).unwrap();
         assert_eq!(counted.messages, read.len());
-        assert_eq!(read.len(), 4, "{read:?}");
+        assert_eq!(read.len(), 6, "{read:?}");
+        let chars: usize = read.iter().map(|m| content_chars(&m.content)).sum();
+        assert_eq!(counted.chars, chars);
+        assert_eq!(read[3].content, "ünï \n\n\t\n\n日本", "{read:?}");
         let first = scan_transcript(&path, None, true).unwrap();
         assert_eq!((first.messages, first.expected), (1, 1));
+    }
+
+    #[test]
+    fn joined_text_is_counted_as_joining_and_trimming_counts_it() {
+        let texts: [&[&str]; 9] = [
+            &[],
+            &[""],
+            &["  ", "\n"],
+            &["a"],
+            &[" a ", " b "],
+            &["", "a", "", "b", ""],
+            &["\u{a0}x", " \u{3000}", "y\u{2028}"],
+            &["  ", "é", "  "],
+            &["日本語", "\t\n", "👨‍👩‍👧"],
+        ];
+        for parts in texts {
+            let joined = parts.join("\n\n");
+            assert_eq!(
+                joined_trimmed_chars(parts.iter().copied()),
+                joined.trim().chars().count(),
+                "{parts:?}"
+            );
+        }
+    }
+
+    fn tool_messages(lines: &[&str]) -> Vec<(String, String)> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        fs::write(&path, lines.join("\n")).unwrap();
+        let with = read_transcript(&path, ReadOptions { tools: true }).unwrap();
+        let without = read_transcript(&path, ReadOptions::default()).unwrap();
+        // The counts are those of the messages read without the tools.
+        assert_eq!(
+            (with.message_count, with.content_chars),
+            (without.message_count, without.content_chars)
+        );
+        assert_eq!(without.message_count, without.messages.len());
+        assert!(without.messages.iter().all(|m| !m.is_tool()));
+        with.messages
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .collect()
+    }
+
+    fn pairs(read: &[(String, String)]) -> Vec<(&str, &str)> {
+        read.iter()
+            .map(|(role, content)| (role.as_str(), content.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn tool_calls_split_the_text_of_their_line_in_order() {
+        let line =
+            |parts: &str| format!(r#"{{"role":"assistant","message":{{"content":[{parts}]}}}}"#);
+        let text = |text: &str| format!(r#"{{"type":"text","text":"{text}"}}"#);
+        let call = r#"{"type":"tool_use","name":"Grep","input":{"pattern":"x"}}"#;
+        let cases: [(String, Vec<(&str, &str)>); 5] = [
+            (
+                line(&format!("{},{call},{}", text("A"), text("B"))),
+                vec![
+                    ("assistant", "A"),
+                    ("tool", r#"Grep {"pattern":"x"}"#),
+                    ("assistant", "B"),
+                ],
+            ),
+            (
+                line(&format!("{call},{}", text("A"))),
+                vec![("tool", r#"Grep {"pattern":"x"}"#), ("assistant", "A")],
+            ),
+            (
+                line(&format!("{},{call}", text("A"))),
+                vec![("assistant", "A"), ("tool", r#"Grep {"pattern":"x"}"#)],
+            ),
+            // Text parts next to each other stay one message, as without the
+            // tools, and a run without text makes none.
+            (
+                line(&format!(
+                    "{},{},{call},{},{call}",
+                    text(" A"),
+                    text("B "),
+                    text("  ")
+                )),
+                vec![
+                    ("assistant", "A\n\nB"),
+                    ("tool", r#"Grep {"pattern":"x"}"#),
+                    ("tool", r#"Grep {"pattern":"x"}"#),
+                ],
+            ),
+            // A user's text is cleaned in each run.
+            (
+                format!(
+                    r#"{{"role":"user","message":{{"content":[{},{call},{}]}}}}"#,
+                    text("<user_query>q</user_query>"),
+                    text("<timestamp>t</timestamp> more")
+                ),
+                vec![
+                    ("user", "q"),
+                    ("tool", r#"Grep {"pattern":"x"}"#),
+                    ("user", "more"),
+                ],
+            ),
+        ];
+        for (line, expected) in cases {
+            let read = tool_messages(&[&line]);
+            assert_eq!(pairs(&read), expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn lines_of_an_unknown_role_give_no_tool_messages() {
+        let read = tool_messages(&[
+            r#"{"role":"human","message":{"content":[{"type":"tool_use","name":"Read"},{"type":"tool_result","content":"x"}]}}"#,
+            r#"{"role":"system","message":{"content":[{"type":"tool_use","name":"Setup"}]}}"#,
+            r#"{"message":{"content":[{"type":"tool_use","name":"Anon"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+        ]);
+        assert_eq!(pairs(&read), [("tool", "Read")]);
+    }
+
+    #[test]
+    fn failed_tool_results_are_marked() {
+        let read = tool_messages(&[
+            r#"{"role":"tool","message":{"content":[{"type":"tool_result","is_error":true,"content":"No such file\n"},{"type":"tool_result","is_error":true},{"type":"tool_result","is_error":false,"content":"fine"}]}}"#,
+            r#"{"role":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"denied"}]},{"type":"text","text":"why?"}]}}"#,
+        ]);
+        assert_eq!(
+            pairs(&read),
+            [
+                ("tool", "No such file (error)"),
+                ("tool", "(error)"),
+                ("tool", "fine"),
+                ("tool", "denied (error)"),
+                ("user", "why?"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parts_of_a_tool_line_without_text_are_placeholders() {
+        let image = r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}"#;
+        let read = tool_messages(&[
+            &format!(r#"{{"role":"tool","message":{{"content":[{image}]}}}}"#),
+            &format!(
+                r#"{{"role":"tool","message":{{"content":[{{"type":"tool_result","content":[{image}]}}]}}}}"#
+            ),
+            r#"{"role":"tool","message":{"content":[{"type":"output","output":"ran"}]}}"#,
+        ]);
+        assert_eq!(
+            pairs(&read),
+            [("tool", "[image]"), ("tool", "[image]"), ("tool", "ran")]
+        );
+    }
+
+    #[test]
+    fn tool_calls_and_results_are_read_in_order_when_asked_for() {
+        let read = tool_messages(&[
+            r#"{"role":"user","message":{"content":"<user_query>find it</user_query>"}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Looking."},{"type":"tool_use","name":"Grep","input":{"pattern":"langfuse","path":"src"}},{"type":"tool_use","name":"Read","input":{"path":"a.rs"}}]}}"#,
+            r#"{"role":"tool","message":{"content":[{"type":"tool_result","tool_use_id":"1","content":"src/a.rs:3: langfuse"},{"type":"tool_result","content":[{"type":"text","text":"fn main() {}"}]}]}}"#,
+            r#"{"role":"tool","message":{"content":"plain output"}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"ls"}},{"type":"text","text":"Then "},{"type":"tool_use","name":"Read"},{"type":"text","text":"done."}]}}"#,
+            r#"{"role":"user","message":{"content":[{"type":"tool_result","content":"ok"},{"type":"text","text":"thanks"}]}}"#,
+            r#"{"role":"tool","message":{"content":[{"type":"tool_result","content":"  "},{"type":"text","text":"note"}]}}"#,
+            r#"{"role":"system","message":{"content":[{"type":"tool_use","name":"Setup"}]}}"#,
+            r#"{"role":"tool","message":{"content":{"odd":true}}}"#,
+            "{not json",
+        ]);
+        let expected = [
+            ("user", "find it"),
+            ("assistant", "Looking."),
+            ("tool", r#"Grep {"pattern":"langfuse","path":"src"}"#),
+            ("tool", r#"Read {"path":"a.rs"}"#),
+            ("tool", "src/a.rs:3: langfuse"),
+            ("tool", "fn main() {}"),
+            ("tool", "plain output"),
+            ("tool", r#"Shell {"command":"ls"}"#),
+            // Tool calls between its text parts split a line's text.
+            ("assistant", "Then"),
+            ("tool", "Read"),
+            ("assistant", "done."),
+            ("tool", "ok"),
+            ("user", "thanks"),
+            ("tool", "note"),
+            ("tool", "{\n  \"odd\": true\n}"),
+        ];
+        let read: Vec<(&str, &str)> = read
+            .iter()
+            .map(|(role, content)| (role.as_str(), content.as_str()))
+            .collect();
+        assert_eq!(read, expected);
+    }
+
+    #[test]
+    fn tool_lines_still_count_for_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let lines = [
+            r#"{"role":"user","message":{"content":"hi"}}"#,
+            r#"{"role":"tool","message":{"content":"ran"}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let counted = scan_transcript(&path, None, false).unwrap();
+        assert_eq!((counted.messages, counted.chars), (1, 2));
+        let with = read_jsonl_with(&path, ReadOptions { tools: true }).unwrap();
+        assert_eq!(with.len(), 3);
+        let session =
+            crate::model::Session::new(SessionSummary::new("t", "t", Source::Agent), with);
+        assert_eq!((session.message_count, session.content_chars), (1, 2));
     }
 
     fn write(path: &Path, contents: &str) {

@@ -32,6 +32,11 @@ fn reply(n: usize) -> String {
         .repeat(24)
 }
 
+/// About 2 KB of what a command printed.
+fn command_output(n: usize) -> String {
+    format!("test retry::backoff_{n} ... ok\n").repeat(64)
+}
+
 fn agent_id(n: usize) -> String {
     format!("{n:08x}-0000-4000-8000-{n:012x}")
 }
@@ -105,7 +110,18 @@ fn write_history(fixture: &Fixture) {
                 } else {
                     reply(headers.len())
                 };
-                let json = text_bubble(&bubble_id, kind, &text);
+                // Every other reply runs a command, whose output is kept with it.
+                let json = if headers.len() % 4 == 1 {
+                    tool_bubble(
+                        &bubble_id,
+                        &text,
+                        "run_terminal_cmd",
+                        &serde_json::json!({"command": "cargo test"}),
+                        &serde_json::json!({"output": command_output(headers.len()), "exitCodeV2": 0}),
+                    )
+                } else {
+                    text_bubble(&bubble_id, kind, &text)
+                };
                 bytes += json.to_string().len();
                 put(bubble(&id, &bubble_id, &json, Stored::Text));
                 headers.push((bubble_id, kind));
@@ -195,7 +211,7 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
 
     let newest_agent = agent_id(AGENT_SESSIONS - 1);
     let newest_chat = chat_id(IDE_CHATS - 1);
-    let commands: [&[&str]; 15] = [
+    let commands: [&[&str]; 19] = [
         &["list"],
         &["list", "--json"],
         &["list", "--limit", "5"],
@@ -203,6 +219,24 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
         &["list", "--since", "10000d", "--json", "--limit", "5"],
         &["show", &newest_agent, "--json"],
         &["show", &newest_chat],
+        // Tool calls are read only for these, and only for this session.
+        &[
+            "show",
+            &newest_agent,
+            "--only",
+            "user,assistant,tool",
+            "--json",
+        ],
+        &["show", &newest_agent, "--only", "tool", "--short"],
+        &[
+            "show",
+            &newest_chat,
+            "--only",
+            "assistant,tool",
+            "--short",
+            "--json",
+        ],
+        &["show", &newest_chat, "--only", "tool"],
         &["healthcheck"],
         &["completions", "bash"],
         &["man"],
@@ -257,21 +291,68 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
             .all(|hit| hit["all_terms_in_one_message"] == true)
     );
 
-    // Counted without holding the messages, the counts are the messages.
+    // Counted without holding the messages, the counts are the messages,
+    // and the token estimates theirs.
     let listed = json(&ok(&fixture, &["list", "--json"]));
-    let show = json(&ok(&fixture, &["show", &newest_chat, "--json"]));
-    let count = listed
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|session| session["id"] == newest_chat.as_str())
-        .unwrap()["message_count"]
-        .clone();
-    assert_eq!(count, show["message_count"]);
-    assert_eq!(
-        show["messages"].as_array().unwrap().len() as u64,
-        count.as_u64().unwrap()
+    for id in [&newest_chat, &newest_agent] {
+        let show = json(&ok(&fixture, &["show", id, "--json"]));
+        let summary = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["id"] == id.as_str())
+            .unwrap();
+        let count = summary["message_count"].clone();
+        assert_eq!(count, show["message_count"]);
+        assert_eq!(
+            show["messages"].as_array().unwrap().len() as u64,
+            count.as_u64().unwrap()
+        );
+        let chars: usize = show["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap().chars().count())
+            .sum();
+        assert_eq!(summary["token_estimate"], show["token_estimate"]);
+        assert_eq!(
+            summary["token_estimate"].as_u64().unwrap(),
+            chars.div_ceil(4) as u64
+        );
+    }
+    // Each assistant message of the transcript makes a tool call.
+    let tools = json(&ok(
+        &fixture,
+        &["show", &newest_agent, "--only", "tool", "--json"],
+    ));
+    let tools = tools["messages"].as_array().unwrap();
+    assert!(!tools.is_empty());
+    assert!(
+        tools
+            .iter()
+            .all(|m| m["content"] == r#"Read {"path":"src/lib.rs"}"#)
     );
+    // Every other reply of the chat runs a command: its call, then what it
+    // printed.
+    let tools = json(&ok(
+        &fixture,
+        &["show", &newest_chat, "--only", "tool", "--all", "--json"],
+    ));
+    let tools = tools["messages"].as_array().unwrap();
+    assert!(
+        !tools.is_empty() && tools.len().is_multiple_of(2),
+        "{}",
+        tools.len()
+    );
+    for pair in tools.chunks(2) {
+        assert_eq!(
+            pair[0]["content"],
+            r#"run_terminal_cmd {"command":"cargo test"}"#
+        );
+        let output = pair[1]["content"].as_str().unwrap();
+        assert!(output.starts_with("test retry::backoff_"), "{output}");
+        assert!(output.ends_with(" ... ok"), "{output}");
+    }
 }
 
 fn ok(fixture: &Fixture, args: &[&str]) -> String {

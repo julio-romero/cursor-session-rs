@@ -63,7 +63,18 @@ pub struct Message {
     pub timestamp: Option<String>,
 }
 
+/// The role of the tool calls and results that reading builds only when
+/// asked to (see [`crate::ReadOptions`]). They are no part of a session's
+/// `message_count` or `content_chars`.
+pub const TOOL_ROLE: &str = "tool";
+
 impl Message {
+    /// Whether this is a tool call or result rather than a message `show`
+    /// prints by default.
+    pub fn is_tool(&self) -> bool {
+        self.role == TOOL_ROLE
+    }
+
     /// The time to show with the message: epoch milliseconds, as the IDE
     /// stores them, as a UTC time; anything else as stored.
     pub fn timestamp_display(&self) -> Option<Cow<'_, str>> {
@@ -117,6 +128,10 @@ pub struct SessionSummary {
     /// How many messages `show` and `export` read from `messages_at`.
     #[serde(skip)]
     pub message_count: usize,
+    /// The characters (Unicode scalar values) of the content of those
+    /// messages, for [`SessionSummary::token_estimate`].
+    #[serde(skip)]
+    pub content_chars: usize,
     #[serde(skip)]
     pub messages_at: MessagesAt,
 }
@@ -134,6 +149,7 @@ impl SessionSummary {
             updated_at_ms: None,
             model: None,
             message_count: 0,
+            content_chars: 0,
             messages_at: MessagesAt::Nowhere,
         }
     }
@@ -164,6 +180,12 @@ impl SessionSummary {
         shown(self.updated_at_ms).or(shown(self.created_at_ms))
     }
 
+    /// An estimate of how many tokens the messages `show` prints by default
+    /// take: one per four characters, rounded up. It is no tokenizer's count.
+    pub fn token_estimate(&self) -> usize {
+        token_estimate(self.content_chars)
+    }
+
     /// The `list --json` entry.
     pub fn json(&self) -> SummaryJson<'_> {
         SummaryJson {
@@ -176,12 +198,16 @@ impl SessionSummary {
             created_at: rfc3339(self.created_at_ms),
             updated_at: rfc3339(self.updated_at_ms),
             message_count: self.message_count,
+            token_estimate: self.token_estimate(),
         }
     }
 }
 
 /// A session with its messages: what `show` and `export` print. It derefs to
-/// its summary, whose `message_count` is the number of `messages`.
+/// its summary, whose `message_count` is the number of `messages` and
+/// `content_chars` the characters of their content, tool messages left out.
+/// Read with its tool messages, an Agent CLI session's text that tool calls
+/// separate is several messages, which count as the one they are without.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "StoredSession")]
 pub struct Session {
@@ -206,7 +232,11 @@ impl From<StoredSession> for Session {
 
 impl Session {
     pub fn new(mut summary: SessionSummary, messages: Vec<Message>) -> Self {
-        summary.message_count = messages.len();
+        let counted = || messages.iter().filter(|message| !message.is_tool());
+        summary.message_count = counted().count();
+        summary.content_chars = counted()
+            .map(|message| content_chars(&message.content))
+            .sum();
         Self { summary, messages }
     }
 
@@ -254,6 +284,8 @@ pub struct SummaryJson<'a> {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub message_count: usize,
+    /// See [`SessionSummary::token_estimate`].
+    pub token_estimate: usize,
 }
 
 /// JSON shape of `show --json`.
@@ -270,6 +302,17 @@ pub struct MessageJson<'a> {
     pub content: &'a str,
     /// As stored by Cursor; not normalised.
     pub timestamp: Option<&'a str>,
+}
+
+/// The characters of a message's content, as [`SessionSummary`] counts them:
+/// Unicode scalar values.
+pub fn content_chars(content: &str) -> usize {
+    content.chars().count()
+}
+
+/// The tokens `chars` characters are estimated to take: `ceil(chars / 4)`.
+pub fn token_estimate(chars: usize) -> usize {
+    chars.div_ceil(4)
 }
 
 /// `ms` as a UTC time in the years 0000 to 9999, which RFC 3339 and the
@@ -345,6 +388,7 @@ fn merge_into(dst: &mut SessionSummary, src: SessionSummary) {
         && (dst.message_count == 0 || dst.source == Source::Ide && src.source == Source::Agent);
     if takes_messages {
         dst.message_count = src.message_count;
+        dst.content_chars = src.content_chars;
         dst.messages_at = src.messages_at;
     }
     if dst.source == Source::Ide && src.source == Source::Agent {
@@ -408,7 +452,8 @@ mod tests {
                 "model",
                 "created_at",
                 "updated_at",
-                "message_count"
+                "message_count",
+                "token_estimate"
             ]
         );
         assert_eq!(value["source"], "ide");
@@ -417,6 +462,8 @@ mod tests {
         assert_eq!(value["created_at"], "2023-11-14T22:13:20Z");
         assert_eq!(value["updated_at"], "2023-11-14T22:15:00Z");
         assert_eq!(value["message_count"], 2);
+        // "hello" and "hi": seven characters.
+        assert_eq!(value["token_estimate"], 2);
 
         let bare = SessionSummary {
             created_at_ms: None,
@@ -452,7 +499,7 @@ mod tests {
         let session = session();
         let value = serde_json::to_value(session.detail(&session.messages[1..])).unwrap();
         let object = value.as_object().unwrap();
-        assert_eq!(object.len(), 10);
+        assert_eq!(object.len(), 11);
         assert_eq!(object.keys().next_back().unwrap(), "messages");
         assert_eq!(value["message_count"], 2);
         assert_eq!(
@@ -543,6 +590,50 @@ mod tests {
             ..summary()
         };
         assert_eq!(bare.created_utc(), "—");
+    }
+
+    #[test]
+    fn tokens_are_estimated_as_a_quarter_of_the_characters_rounded_up() {
+        for (chars, tokens) in [(0, 0), (1, 1), (4, 1), (5, 2), (8, 2), (1001, 251)] {
+            assert_eq!(token_estimate(chars), tokens, "{chars}");
+        }
+        // Characters are Unicode scalar values, not bytes.
+        assert_eq!(content_chars("ünï日本👨‍👩‍👧"), 10);
+
+        let message = |role: &str, content: &str| Message {
+            role: role.into(),
+            content: content.into(),
+            timestamp: None,
+        };
+        let session = Session::new(
+            summary(),
+            vec![
+                message("user", "héllo"),
+                message(TOOL_ROLE, "Grep {\"pattern\":\"x\"}"),
+                message("unknown", "?"),
+            ],
+        );
+        // Tool messages count for neither.
+        assert_eq!((session.message_count, session.content_chars), (2, 6));
+        assert_eq!(session.token_estimate(), 2);
+        assert_eq!(
+            serde_json::to_value(session.json()).unwrap()["token_estimate"],
+            2
+        );
+    }
+
+    #[test]
+    fn merged_sessions_keep_the_characters_of_the_messages_they_take() {
+        let copy = |source, count, chars| SessionSummary {
+            source,
+            message_count: count,
+            content_chars: chars,
+            ..summary()
+        };
+        let merged = merge_sessions(vec![copy(Source::Ide, 3, 30), copy(Source::Agent, 2, 20)]);
+        assert_eq!((merged[0].message_count, merged[0].content_chars), (2, 20));
+        let merged = merge_sessions(vec![copy(Source::Ide, 3, 30), copy(Source::Agent, 0, 0)]);
+        assert_eq!((merged[0].message_count, merged[0].content_chars), (3, 30));
     }
 
     #[test]

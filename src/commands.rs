@@ -10,9 +10,10 @@ use cursor_session::model::{self, Session, SessionSummary, Source, SummaryJson};
 use cursor_session::search::{self, Hit, HitJson};
 use cursor_session::since::Since;
 use cursor_session::ui;
+use cursor_session::view::View;
 use cursor_session::{
-    Error, LoadOptions, Loaded, filter_workspace, load_messages, load_session, load_sessions,
-    search_sessions,
+    Error, LoadOptions, Loaded, ReadOptions, filter_workspace, load_messages, load_session_with,
+    load_sessions, search_sessions,
 };
 use serde::Serialize;
 
@@ -55,26 +56,27 @@ fn load(
     Ok(loaded)
 }
 
-/// Loads the session `query` names (see [`load_session`]), printing what
-/// loading reported also when it fails. When it is not found, the error names
-/// the store that `--source` left unsearched, if it was found.
+/// Loads the session `query` names (see [`load_session_with`]), with its
+/// messages read as `read` says, printing what loading reported also when it
+/// fails. When it is not found, the error names the store that `--source`
+/// left unsearched, if it was found.
 fn load_one(
     paths: &StoragePaths,
     source: Option<Source>,
     query: &str,
+    read: ReadOptions,
     verbose: bool,
     err: &mut dyn Write,
 ) -> Result<Session> {
     warn_unread_source(paths, source, err)?;
-    let (mut warnings, mut notices) = (Vec::new(), Vec::new());
     let opts = LoadOptions {
         source,
         ..Default::default()
     };
-    let session = load_session(paths, &opts, query, &mut warnings, &mut notices);
-    print_warnings(&notices, true, err)?;
-    print_warnings(&warnings, verbose, err)?;
-    let session = session.map_err(|error| match error {
+    let loaded = load_session_with(paths, &opts, query, read);
+    print_warnings(&loaded.notices, true, err)?;
+    print_warnings(&loaded.warnings, verbose, err)?;
+    let session = loaded.session.map_err(|error| match error {
         Error::SessionNotFound { query, .. } => Error::SessionNotFound {
             query,
             unsearched: source.map(Source::other).filter(|other| paths.has(*other)),
@@ -185,17 +187,40 @@ fn cmd_show(
     if paths.is_empty() {
         return Err(Error::NoStorage.into());
     }
-    let session = load_one(paths, args.source, &args.session_id, args.verbose, err)?;
+    let view = View {
+        only: args.only.clone(),
+        short: args.short,
+    };
+    let mut session = load_one(
+        paths,
+        args.source,
+        &args.session_id,
+        view.read_options(),
+        args.verbose,
+        err,
+    )?;
+    // The summary, with its counts, stays that of the whole session; --limit
+    // and the terminal's default count only the messages printed.
+    let messages = std::mem::take(&mut session.messages);
+    let printed = view.apply(messages);
     if args.json {
-        let (messages, _) = ui::select_messages(&session.messages, false, args.limit, args.all);
+        let (messages, _) = ui::select_messages(&printed, false, args.limit, args.all);
         return write_json(out, &session.detail(messages));
     }
-    let (messages, hidden) = ui::select_messages(&session.messages, opts.tty, args.limit, args.all);
+    let (messages, hidden) = ui::select_messages(&printed, opts.tty, args.limit, args.all);
     write!(
         out,
         "{}",
         ui::render_show(&session, messages, hidden, opts.color)
     )?;
+    // Say why --only printed nothing, rather than leave a bare header.
+    if printed.is_empty() && !view.only.is_empty() {
+        write!(
+            out,
+            "{}",
+            ui::render_no_match(&view.only_list(), opts.color)
+        )?;
+    }
     Ok(())
 }
 
@@ -254,7 +279,14 @@ fn cmd_export(
     // Each session's messages are read only to write its file.
     let (one, loaded) = match &args.session_id {
         Some(id) => (
-            Some(load_one(paths, args.source, id, args.verbose, err)?),
+            Some(load_one(
+                paths,
+                args.source,
+                id,
+                ReadOptions::default(),
+                args.verbose,
+                err,
+            )?),
             None,
         ),
         None => {
@@ -768,7 +800,8 @@ mod tests {
         let terminal = OutputOpts {
             tty: true,
             color: false,
-            width: Some(98),
+            // Wide enough for the full IDs beside TOKENS and a title.
+            width: Some(106),
         };
         let table = |argv: &[&str]| {
             let cli =

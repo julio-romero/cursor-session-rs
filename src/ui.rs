@@ -6,7 +6,7 @@ use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table, presets};
 use owo_colors::OwoColorize;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::model::{Message, Session, SessionSummary, Source};
+use crate::model::{Message, Session, SessionSummary, Source, TOOL_ROLE};
 
 pub const DEFAULT_TTY_SHOW_LIMIT: usize = 20;
 /// The width of a full session ID, a UUID.
@@ -15,6 +15,10 @@ pub const ID_FULL_WIDTH: usize = 36;
 const ID_PREFIX_WIDTHS: [usize; 5] = [8, 13, 18, 23, 36];
 const SOURCE_WIDTH: usize = 6;
 const MSGS_WIDTH: usize = 5;
+const TOKENS_WIDTH: usize = 6;
+/// TOKENS in the plain layout, whose columns do not fit their contents: wide
+/// enough to keep 99,999,999 tokens aligned.
+const PLAIN_TOKENS_WIDTH: usize = 8;
 const UPDATED_WIDTH: usize = 16;
 const COL_GUTTER: usize = 2;
 const TABLE_CHROME: usize = 12;
@@ -44,14 +48,25 @@ fn width_from(cols: Option<u16>, columns: Option<&str>) -> usize {
         .map_or(DEFAULT_TERM_WIDTH, |width| width.max(MIN_TERM_WIDTH))
 }
 
-fn fixed_list_width() -> usize {
-    SOURCE_WIDTH + MSGS_WIDTH + UPDATED_WIDTH + COL_GUTTER * 4 + TABLE_CHROME
+/// The width of the table's columns other than ID and TITLE, with TOKENS when
+/// `tokens` is set.
+fn fixed_list_width(tokens: bool) -> usize {
+    let tokens = if tokens { TOKENS_WIDTH + COL_GUTTER } else { 0 };
+    SOURCE_WIDTH + MSGS_WIDTH + tokens + UPDATED_WIDTH + COL_GUTTER * 4 + TABLE_CHROME
+}
+
+/// Whether the table has a TOKENS column in this terminal: only when it fits
+/// beside the shortest IDs and titles, so that a narrow terminal keeps the
+/// columns it has room for.
+pub fn shows_tokens(term_width: usize) -> bool {
+    term_width >= fixed_list_width(true) + ID_PREFIX_WIDTHS[0] + MIN_TITLE_WIDTH
 }
 
 /// How many leading ID characters fit in this terminal without crowding TITLE.
 pub fn id_prefix_width(term_width: usize) -> usize {
+    let fixed = fixed_list_width(shows_tokens(term_width));
     let available = term_width
-        .saturating_sub(fixed_list_width() + MIN_TITLE_WIDTH)
+        .saturating_sub(fixed + MIN_TITLE_WIDTH)
         .max(ID_PREFIX_WIDTHS[0]);
     ID_PREFIX_WIDTHS
         .into_iter()
@@ -117,6 +132,7 @@ pub fn paint_role(role: &str, use_color: bool) -> String {
     match role {
         "user" => role.blue().bold().to_string(),
         "assistant" => role.magenta().bold().to_string(),
+        TOOL_ROLE => role.cyan().to_string(),
         _ => role.to_string(),
     }
 }
@@ -479,7 +495,7 @@ pub fn title_width(term_width: usize) -> usize {
 
 /// How wide titles may be next to IDs `id_width` wide.
 fn title_width_beside(term_width: usize, id_width: usize) -> usize {
-    let used = id_width + SOURCE_WIDTH + MSGS_WIDTH + UPDATED_WIDTH + COL_GUTTER * 4 + TABLE_CHROME;
+    let used = id_width + fixed_list_width(shows_tokens(term_width));
     term_width.saturating_sub(used).max(MIN_TITLE_WIDTH)
 }
 
@@ -514,6 +530,8 @@ pub fn format_message_header(role: &str, timestamp: Option<&str>, use_color: boo
 
 /// Renders the session list. `term_width` is the terminal width when stdout is a
 /// terminal, which selects the fitted table; `None` selects the plain layout.
+/// Both show each session's [`SessionSummary::token_estimate`] as TOKENS, the
+/// table only where it fits (see [`shows_tokens`]).
 /// Color is independent of the layout. The plain layout and `render_show` keep
 /// stored text byte for byte; a terminal writer applies [`TerminalFilter`].
 ///
@@ -550,14 +568,16 @@ pub fn render_list_among(
 fn render_list_plain(sessions: &[SessionSummary], use_color: bool) -> String {
     let mut out = format!("Found {} session(s)\n\n", sessions.len());
     let header = format!(
-        "{:<id_w$}  {:<src_w$}  {:>msgs_w$}  {:<upd_w$}  TITLE",
+        "{:<id_w$}  {:<src_w$}  {:>msgs_w$}  {:>tok_w$}  {:<upd_w$}  TITLE",
         "ID",
         "SOURCE",
         "MSGS",
+        "TOKENS",
         "UPDATED",
         id_w = ID_FULL_WIDTH,
         src_w = SOURCE_WIDTH,
         msgs_w = MSGS_WIDTH,
+        tok_w = PLAIN_TOKENS_WIDTH,
         upd_w = UPDATED_WIDTH
     );
     out.push_str(&paint_bold(&header, use_color));
@@ -572,14 +592,16 @@ fn render_list_plain(sessions: &[SessionSummary], use_color: bool) -> String {
             upd_w = UPDATED_WIDTH
         );
         out.push_str(&format!(
-            "{:<id_w$}  {}  {:>msgs_w$}  {}  {}\n",
+            "{:<id_w$}  {}  {:>msgs_w$}  {:>tok_w$}  {}  {}\n",
             session.id,
             paint_source_text(&source, session.source, use_color),
             session.message_count,
+            session.token_estimate(),
             paint_dim(&updated, use_color),
             session.title,
             id_w = ID_FULL_WIDTH,
             msgs_w = MSGS_WIDTH,
+            tok_w = PLAIN_TOKENS_WIDTH,
         ));
     }
     out
@@ -602,24 +624,34 @@ fn render_list_table(
         table.enforce_styling();
     }
     table.set_width(width);
-    table.set_header(vec![
+    let tokens = shows_tokens(term_width);
+    let mut header = vec![
         header_cell("ID"),
         header_cell("SOURCE"),
         header_cell("MSGS"),
-        header_cell("UPDATED"),
-        header_cell("TITLE"),
-    ]);
+    ];
+    if tokens {
+        header.push(header_cell("TOKENS"));
+    }
+    header.extend([header_cell("UPDATED"), header_cell("TITLE")]);
+    table.set_header(header);
 
     let id_width = shown_id_width(among, term_width);
     let max_title = title_width_beside(term_width, id_width);
     for session in sessions {
-        table.add_row(vec![
+        let mut row = vec![
             Cell::new(shorten_id(&one_line(&session.id), id_width)),
             source_cell(session.source),
             Cell::new(session.message_count),
+        ];
+        if tokens {
+            row.push(Cell::new(session.token_estimate()));
+        }
+        row.extend([
             Cell::new(session.updated_display()).fg(Color::DarkGrey),
             Cell::new(truncate_width(&one_line(&session.title), max_title)),
         ]);
+        table.add_row(row);
     }
 
     let mut out = format!("Found {} session(s)\n\n{table}\n", sessions.len());
@@ -668,6 +700,10 @@ pub fn render_show_header(session: &Session, use_color: bool) -> String {
         paint_dim(&session.updated_utc(), use_color)
     ));
     lines.push(format!("messages:  {}", session.message_count));
+    lines.push(format!(
+        "tokens:    ~{} (estimate)",
+        session.token_estimate()
+    ));
     lines.join("\n")
 }
 
@@ -699,6 +735,15 @@ pub fn render_show(
         out.push('\n');
     }
     out
+}
+
+/// The note `show` prints after the header when `--only` (here `only`, such
+/// as `tool` or `user,tool`) leaves none of the session's messages.
+pub fn render_no_match(only: &str, use_color: bool) -> String {
+    format!(
+        "\n{}\n",
+        paint_dim(&format!("No messages match --only {only}."), use_color)
+    )
 }
 
 #[cfg(test)]
@@ -779,6 +824,8 @@ mod tests {
     fn color_helpers_emit_ansi() {
         assert!(has_ansi(&paint_source(Source::Agent, true)));
         assert!(has_ansi(&paint_role("user", true)));
+        assert!(has_ansi(&paint_role("tool", true)));
+        assert!(!has_ansi(&paint_role("tool", false)));
         assert!(has_ansi(&format_message_header("user", Some("now"), true)));
     }
 
@@ -818,8 +865,13 @@ mod tests {
     #[test]
     fn id_prefix_snaps_to_uuid_groups() {
         assert_eq!(id_prefix_width(200), 36);
-        assert_eq!(id_prefix_width(80), 13);
+        assert_eq!(id_prefix_width(85), 13);
+        // TOKENS takes what a longer ID would.
+        assert_eq!(id_prefix_width(80), 8);
         assert_eq!(id_prefix_width(50), 8);
+        // Without room for it, there is no TOKENS column to make room for.
+        assert!(shows_tokens(79) && !shows_tokens(78));
+        assert_eq!(id_prefix_width(78), 13);
         assert_eq!(
             shorten_id("f4eea6d2-d2d3-41ad-b290-824445295a15", 13),
             "f4eea6d2-d2d3"
@@ -862,8 +914,34 @@ mod tests {
     }
 
     #[test]
+    fn plain_list_keeps_large_token_counts_aligned() {
+        let sized = |id: &str, chars: usize| SessionSummary {
+            message_count: 12_345,
+            content_chars: chars,
+            ..SessionSummary::new(id, "t", Source::Agent)
+        };
+        let sessions = [
+            sized("a", 7),
+            sized("b", 4_000_000),
+            sized("c", 399_999_996),
+        ];
+        let plain = render_list(&sessions, false, None);
+        let lines: Vec<&str> = plain
+            .lines()
+            .skip(2)
+            .filter(|l| !l.starts_with('-'))
+            .collect();
+        assert!(lines[3].contains("  99999999  "), "{plain}");
+        // Every row's UPDATED starts where its header does.
+        let updated = lines[0].find("UPDATED").unwrap();
+        for row in &lines[1..] {
+            assert_eq!(row.find('—'), Some(updated), "{plain}");
+        }
+    }
+
+    #[test]
     fn narrow_tty_list_shortens_id() {
-        let rendered = render_list(&[sample_summary()], true, Some(80));
+        let rendered = render_list(&[sample_summary()], true, Some(89));
         assert!(rendered.contains("f4eea6d2-d2d3"));
         assert!(!rendered.contains("f4eea6d2-d2d3-41ad-b290-824445295a15"));
         assert!(rendered.contains("show` accepts a prefix"));
@@ -1014,7 +1092,7 @@ mod tests {
         let session = control_session();
         let plain = render_list(std::slice::from_ref(&session.summary), false, None);
         let row = format!(
-            "{}  agent       2  {:<16}  Edge \u{1b}]0;pwned\u{7} title\twith\nnewline\n",
+            "{}  agent       2         2  {:<16}  Edge \u{1b}]0;pwned\u{7} title\twith\nnewline\n",
             session.id,
             session.updated_display()
         );
@@ -1024,6 +1102,7 @@ mod tests {
         assert!(shown.starts_with("Edge \u{1b}]0;pwned\u{7} title\twith\nnewline\nid: "));
         assert!(shown.ends_with(
             "messages:  2\n\
+             tokens:    ~2 (estimate)\n\
              \n[user]\nline one\r\nline two\r\n\n\
              \n[assistant]\ncolored \u{1b}[31mred\u{1b}[0m output and bell \u{7} done\n"
         ));

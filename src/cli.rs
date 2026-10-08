@@ -5,6 +5,7 @@ use cursor_session::export::Format;
 use cursor_session::model::Source;
 use cursor_session::search::{self, DEFAULT_CONTEXT, MAX_CONTEXT};
 use cursor_session::since::{Since, parse_since};
+use cursor_session::view::Role;
 
 const LONG_ABOUT: &str = "\
 List, show, and export Cursor IDE and Agent CLI chat sessions.
@@ -33,7 +34,9 @@ const SHOW_EXAMPLES: &str = "\
 Examples:
   cursor-session show f4eea6d2
   cursor-session show f4eea6d2 --all
-  cursor-session show f4eea6d2 --json --limit 5";
+  cursor-session show f4eea6d2 --json --limit 5
+  cursor-session show f4eea6d2 --only user,assistant --short
+  cursor-session show f4eea6d2 --only tool --limit 10";
 
 const SEARCH_EXAMPLES: &str = "\
 Examples:
@@ -137,12 +140,26 @@ pub enum ColorChoice {
 #[derive(Subcommand)]
 pub enum Commands {
     /// List sessions, most recently updated first
+    ///
+    /// TOKENS (`token_estimate` in --json) estimates how many tokens the
+    /// messages `show` prints by default take: ceil(characters / 4). It is an
+    /// estimate, not any model's tokenizer count. A terminal's table has the
+    /// column from 79 columns wide; piped output and --json always have it.
     #[command(
         after_help = LIST_EXAMPLES,
         after_long_help = format!("{LIST_EXAMPLES}\n\n{EXIT_CODES}")
     )]
     List(ListArgs),
     /// Show messages from a session
+    ///
+    /// The header's `tokens:` line (`token_estimate` in --json) estimates how
+    /// many tokens the messages `show` prints by default take: ceil(characters
+    /// / 4). Tool calls and results are not counted. It is an estimate, not
+    /// any model's tokenizer count.
+    ///
+    /// The header's `messages:` and `tokens:` lines (`message_count` and
+    /// `token_estimate` in --json) are always those of the whole session,
+    /// whatever --only, --short or --limit print.
     #[command(
         after_help = SHOW_EXAMPLES,
         after_long_help = format!("{SHOW_EXAMPLES}\n\n{EXIT_CODES}")
@@ -270,6 +287,16 @@ pub struct ShowArgs {
     /// Print the full transcript
     #[arg(long)]
     pub all: bool,
+    /// Print only messages of these roles, comma-separated; `tool` adds the
+    /// tool calls and results, which are left out otherwise, a call that
+    /// failed or was stopped marked `(error)` or `(cancelled)`. --limit counts
+    /// only the messages printed
+    #[arg(long, value_name = "ROLES", value_enum, value_delimiter = ',')]
+    pub only: Vec<Role>,
+    /// Cut each message to its first 300 characters, and tool calls and
+    /// results to a one-line preview
+    #[arg(long)]
+    pub short: bool,
     /// Print the session and its messages as JSON
     #[arg(long)]
     pub json: bool,

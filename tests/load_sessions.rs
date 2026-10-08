@@ -902,3 +902,130 @@ fn a_transcript_gone_since_it_was_listed_only_leaves_its_session_out() {
         after.warnings
     );
 }
+
+#[test]
+fn tool_messages_join_the_others_only_when_asked_for() {
+    use cursor_session::view::{Role, View};
+    use cursor_session::{ReadOptions, load_messages_with};
+
+    let fixture = tools();
+    let full = fixture.load();
+    assert!(full.warnings.is_empty() && full.notices.is_empty());
+    for summary in &full.summaries {
+        let plain = get(&full.sessions, &summary.id);
+        assert!(plain.messages.iter().all(|m| !m.is_tool()));
+        let with = load_messages_with(summary, ReadOptions { tools: true }).unwrap();
+        let tools: Vec<&Message> = with.messages.iter().filter(|m| m.is_tool()).collect();
+        assert!(tools.len() >= 2, "{}", summary.id);
+        // The rest, and what the session counts, is the same.
+        let others: Vec<&str> = with
+            .messages
+            .iter()
+            .filter(|m| !m.is_tool())
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(others, contents(plain));
+        assert_eq!(with.message_count, summary.message_count);
+        assert_eq!(with.content_chars, summary.content_chars);
+        assert_eq!(with.token_estimate(), summary.token_estimate());
+
+        // A view without tool selects what is read without them.
+        let chat = View {
+            only: vec![Role::User, Role::Assistant],
+            short: false,
+        };
+        let selected: Vec<String> = chat
+            .apply(with.messages.clone())
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(selected, contents(plain));
+    }
+    let agent = load_messages_with(
+        full.summaries
+            .iter()
+            .find(|s| s.id == AGENT_TOOLS_ID)
+            .unwrap(),
+        ReadOptions { tools: true },
+    )
+    .unwrap();
+    let roles: Vec<&str> = agent.messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(
+        roles,
+        [
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "tool",
+            "tool",
+            "assistant"
+        ]
+    );
+}
+
+#[test]
+fn a_transcript_of_only_tools_shows_them_when_asked_for() {
+    use cursor_session::{ReadOptions, load_session, load_session_with};
+
+    const ID: &str = "70015000-aaaa-4bbb-8ccc-000000000009";
+    let fixture = Fixture::new();
+    fixture.write_meta_json(
+        PROJECT_X,
+        ID,
+        &json!({"title": "Only tools", "updatedAtMs": 1_757_500_000_000_i64, "cwd": PROJECT_X}),
+    );
+    let before = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        ID,
+        Layout::Nested,
+        &[
+            assistant(&[tool_use("Shell", &json!({"command": "ls"}))]),
+            tool_line(&[tool_result(&json!("Cargo.toml"))]),
+        ],
+    );
+
+    // What lists, counts and shows it by default is as without the
+    // transcript.
+    let after = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    assert_eq!(
+        format!("{:?}", after.sessions),
+        format!("{:?}", before.sessions)
+    );
+    assert_eq!(after.ids, before.ids);
+    assert!(after.warnings.is_empty() && after.notices.is_empty());
+    let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+    let plain = load_session(
+        &fixture.paths(),
+        &LoadOptions::default(),
+        ID,
+        &mut warnings,
+        &mut notices,
+    )
+    .unwrap();
+    assert!(plain.messages.is_empty());
+    assert_eq!(plain.messages_at, MessagesAt::Nowhere);
+
+    let with = load_session_with(
+        &fixture.paths(),
+        &LoadOptions::default(),
+        ID,
+        ReadOptions { tools: true },
+    );
+    assert!(with.warnings.is_empty() && with.notices.is_empty());
+    let with = with.session.unwrap();
+    let shown: Vec<(&str, &str)> = with
+        .messages
+        .iter()
+        .map(|m| (m.role.as_str(), m.content.as_str()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("tool", r#"Shell {"command":"ls"}"#),
+            ("tool", "Cargo.toml")
+        ]
+    );
+    assert_eq!((with.message_count, with.token_estimate()), (0, 0));
+}
