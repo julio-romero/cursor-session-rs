@@ -193,8 +193,10 @@ fn search_with(
     let mut scorer = Scorer::new(query.terms().len());
     let mut best = None;
     read(&mut |message| {
-        if scorer.push(search::matches(query.set(), &message.content)) {
-            best = Some(search::snippet(query, &message, context));
+        // The text `show` displays, so that a match is always in the snippet.
+        let text = search::searched_text(&message.content);
+        if scorer.push(search::matches(query.set(), &text)) {
+            best = Some(search::snippet_of(query, &message.role, &text, context));
         }
     })?;
     Ok(scorer.finish().zip(best).map(|(score, snippet)| Hit {

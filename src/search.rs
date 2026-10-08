@@ -2,6 +2,7 @@
 //! and ranking them. Everything here is pure; the caller reads the messages
 //! and feeds them in one at a time (see [`crate::search_session`]).
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::ops::{BitOr, Range};
 
@@ -46,8 +47,8 @@ pub struct Query {
     terms: Vec<String>,
     /// One pattern per term, in order, so that a match's index is its bit.
     set: RegexSet,
-    /// Any term, the longest first, to find what to highlight.
-    any: Regex,
+    /// Each term on its own, in order, to find what to highlight.
+    each: Vec<Regex>,
 }
 
 impl Query {
@@ -132,15 +133,18 @@ pub fn parse_query(text: &str) -> Result<Query, QueryError> {
         .case_insensitive(true)
         .build()
         .map_err(|_| QueryError::TooLong)?;
-    // Alternation takes the first term that matches at a position, so a
-    // longer term is tried before a shorter one it starts with.
-    let mut longest_first: Vec<&str> = patterns.iter().map(String::as_str).collect();
-    longest_first.sort_by_key(|pattern| std::cmp::Reverse(pattern.len()));
-    let any = RegexBuilder::new(&longest_first.join("|"))
-        .case_insensitive(true)
-        .build()
-        .map_err(|_| QueryError::TooLong)?;
-    Ok(Query { terms, set, any })
+    // Each term is highlighted on its own, so that terms that overlap, such
+    // as `abc` and `bcd` in `abcd`, are both highlighted whole.
+    let each = patterns
+        .iter()
+        .map(|pattern| {
+            RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+                .map_err(|_| QueryError::TooLong)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Query { terms, set, each })
 }
 
 /// Which terms of a query a text holds: bit `i` for the query's term `i`.
@@ -180,7 +184,16 @@ impl BitOr for TermMask {
     }
 }
 
-/// The terms of `set` that `text` holds, found in one pass over it.
+/// The text of a message content that is searched, the one that `show`
+/// displays and that a snippet is cut from: on one line, without escape
+/// sequences (see [`ui::one_line`]). It borrows `content` when there is
+/// nothing to leave out.
+pub fn searched_text(content: &str) -> Cow<'_, str> {
+    ui::one_line(content)
+}
+
+/// The terms of `set` that `text` holds, found in one pass over it. `text`
+/// is a message's [`searched_text`].
 pub fn matches(set: &RegexSet, text: &str) -> TermMask {
     set.matches(text)
         .iter()
@@ -281,16 +294,32 @@ pub struct Snippet {
     pub highlights: Vec<Range<usize>>,
 }
 
-/// The snippet of `message`: its content on one line, with runs of
-/// whitespace made one space, cut to `context` characters on each side of
-/// the first match (at most [`MAX_CONTEXT`]), and the matches in it.
+/// The snippet of `message`: its [`searched_text`], with runs of whitespace
+/// made one space, cut to `context` characters on each side of the first
+/// match (at most [`MAX_CONTEXT`]), and the matches in it.
 pub fn snippet(query: &Query, message: &Message, context: usize) -> Snippet {
+    snippet_of(
+        query,
+        &message.role,
+        &searched_text(&message.content),
+        context,
+    )
+}
+
+/// The snippet of a message of `role` whose [`searched_text`] is `text`
+/// (see [`snippet`]).
+pub fn snippet_of(query: &Query, role: &str, text: &str, context: usize) -> Snippet {
     let context = context.min(MAX_CONTEXT);
-    let line = collapse_whitespace(&ui::one_line(&message.content));
-    let first = query.any.find(&line).map(|found| found.range());
-    // Without a match on the line, as for a term found only inside an
-    // escape sequence that the line leaves out, the snippet is the start of
-    // the message.
+    let line = collapse_whitespace(text);
+    // The earliest match of any term, the longest of those that start there.
+    let first = query
+        .each
+        .iter()
+        .filter_map(|term| term.find(&line))
+        .map(|found| found.range())
+        .min_by_key(|found| (found.start, std::cmp::Reverse(found.end)));
+    // Without a match on the line, which a text that matched always has,
+    // the snippet is the start of the message.
     let (start, end) = match &first {
         Some(found) => (
             chars_before(&line, found.start, context),
@@ -315,20 +344,34 @@ pub fn snippet(query: &Query, message: &Message, context: usize) -> Snippet {
     if end < line.len() {
         text.push('…');
     }
-    let highlights = query
-        .any
-        .find_iter(&line)
-        .take_while(|found| found.start() < end)
-        .filter_map(|found| {
-            let (from, to) = (found.start().max(start), found.end().min(end));
-            (from < to).then(|| from - start + offset..to - start + offset)
-        })
-        .collect();
+    // Every match of every term in the window, cut to it.
+    let found = query.each.iter().flat_map(|term| {
+        term.find_iter(&line)
+            .take_while(|found| found.start() < end)
+            .filter_map(|found| {
+                let (from, to) = (found.start().max(start), found.end().min(end));
+                (from < to).then(|| from - start + offset..to - start + offset)
+            })
+    });
     Snippet {
-        role: message.role.clone(),
+        role: role.to_string(),
         text,
-        highlights,
+        highlights: union(found.collect()),
     }
+}
+
+/// The union of `ranges`: in order, those that overlap or touch merged.
+/// Their ends stay where they were, so on character boundaries.
+fn union(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    merged
 }
 
 fn collapse_whitespace(text: &str) -> String {
@@ -697,6 +740,55 @@ mod tests {
         );
         assert_eq!(lost.text, "xy…");
         assert!(lost.highlights.is_empty());
+    }
+
+    #[test]
+    fn a_term_only_inside_an_escape_sequence_does_not_match() {
+        let q = query("pwned");
+        for content in [
+            "xyz \u{1b}]0;pwned\u{7} and more",
+            "xyz \u{1b}]8;;https://pwned.example\u{1b}\\link\u{1b}]8;;\u{1b}\\",
+            "\u{1b}[pwned",
+        ] {
+            assert_eq!(searched_text(content).find("pwned"), None, "{content:?}");
+            assert_eq!(matches(q.set(), &searched_text(content)), TermMask(0));
+        }
+        // Text around the sequence is searched, and the snippet shows it.
+        let content = "\u{1b}]0;title\u{7}pwned \u{1b}[31mred\u{1b}[0m";
+        assert_eq!(matches(q.set(), &searched_text(content)), TermMask(1));
+        let shown = snippet(&q, &message("user", content), 60);
+        assert_eq!(shown.text, "pwned red");
+        assert_eq!(shown.highlights.len(), 1);
+        assert_eq!(shown.highlights[0], 0..5);
+        // Plain text is searched as it is, borrowed.
+        assert!(matches!(
+            searched_text("plain text"),
+            Cow::Borrowed("plain text")
+        ));
+    }
+
+    #[test]
+    fn overlapping_terms_are_highlighted_whole() {
+        let shown = |text: &str, content: &str| {
+            let found = snippet(&query(text), &message("user", content), 60);
+            found
+                .highlights
+                .iter()
+                .map(|range| found.text[range.clone()].to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown("abc bcd", "x abcd y"), ["abcd"]);
+        assert_eq!(shown("bcd abc", "x ABCD y"), ["ABCD"]);
+        // One term inside another, and terms that touch, are one highlight.
+        assert_eq!(shown("bc abcd", "abcde"), ["abcd"]);
+        assert_eq!(shown("ab cd", "abcd ab cd"), ["abcd", "ab", "cd"]);
+        // Case-insensitive spans over characters of several bytes.
+        assert_eq!(shown("ÉCO cole", "une école"), ["école"]);
+        assert_eq!(shown("σοφ φία", "ΣΟΦΊΑ"), ["ΣΟΦΊΑ"]);
+        let found = snippet(&query("ÉCO cole"), &message("user", "une école"), 60);
+        assert_eq!(found.highlights.len(), 1);
+        assert_eq!(found.highlights[0], 4..10);
+        assert_eq!(union(vec![5..7, 0..2, 1..3, 3..4]), [0..4, 5..7]);
     }
 
     fn summary(id: &str, updated: Option<i64>) -> SessionSummary {
