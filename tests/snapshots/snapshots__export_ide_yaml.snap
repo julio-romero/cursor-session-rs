@@ -1,0 +1,25 @@
+---
+source: tests/snapshots.rs
+expression: "String::from_utf8(out).unwrap()"
+---
+id: c0ffee00-0000-4000-8000-000000000001
+title: Dynamic table proposal
+source: ide
+created_at_ms: 1757200000000
+updated_at_ms: 1757203600000
+messages:
+- role: user
+  content: Replace this view with a dynamic table.
+  timestamp: '1757200000000'
+- role: assistant
+  content: Here is a plan.
+  timestamp: '1757200060000'
+- role: assistant
+  content: |-
+    Use this component:
+
+    ```tsx
+    export function Table() {
+      return null;
+    }
+    ```

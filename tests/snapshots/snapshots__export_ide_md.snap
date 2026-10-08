@@ -1,0 +1,35 @@
+---
+source: tests/snapshots.rs
+expression: "String::from_utf8(out).unwrap()"
+---
+# Dynamic table proposal
+
+- **ID:** `c0ffee00-0000-4000-8000-000000000001`
+- **Source:** ide
+- **Created:** 2025-09-06 23:06 UTC
+- **Updated:** 2025-09-07 00:06 UTC
+- **Messages:** 3
+
+---
+
+**user:** (2025-09-06 23:06 UTC)
+
+Replace this view with a dynamic table.
+
+---
+
+**assistant:** (2025-09-06 23:07 UTC)
+
+Here is a plan.
+
+---
+
+**assistant:**
+
+Use this component:
+
+```tsx
+export function Table() {
+  return null;
+}
+```

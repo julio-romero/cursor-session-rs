@@ -1,0 +1,22 @@
+---
+source: tests/snapshots.rs
+expression: "ui::render_show(&session, messages, hidden, true)"
+---
+[1mLangfuse Semantic Layer[0m
+id:        f4eea6d2-d2d3-41ad-b290-824445295a15
+source:    [36magent[39m
+workspace: /Users/demo/project-x
+model:     claude-4.5-sonnet
+created:   [2m2025-09-04 15:33 UTC[0m
+updated:   [2m2025-09-04 16:33 UTC[0m
+messages:  4
+
+[2m2 earlier message(s) omitted. Use --limit N or --all to see more.[0m
+
+[[1m[34muser[39m[0m]
+Keep it read-only.
+
+[[1m[35massistant[39m[0m]
+Here is the plan:
+1. Model traces as facts.
+2. Expose metrics.

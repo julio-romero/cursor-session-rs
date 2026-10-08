@@ -1,0 +1,32 @@
+---
+source: tests/snapshots.rs
+expression: "cli_stdout(&fixture, &[\"show\", \"c0ffee00\", \"--json\"])"
+---
+{
+  "id": "c0ffee00-0000-4000-8000-000000000001",
+  "title": "Dynamic table proposal",
+  "source": "ide",
+  "workspace": null,
+  "workspace_hash": null,
+  "model": null,
+  "created_at": "2025-09-06T23:06:40Z",
+  "updated_at": "2025-09-07T00:06:40Z",
+  "message_count": 3,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Replace this view with a dynamic table.",
+      "timestamp": "1757200000000"
+    },
+    {
+      "role": "assistant",
+      "content": "Here is a plan.",
+      "timestamp": "1757200060000"
+    },
+    {
+      "role": "assistant",
+      "content": "Use this component:\n\n```tsx\nexport function Table() {\n  return null;\n}\n```",
+      "timestamp": null
+    }
+  ]
+}

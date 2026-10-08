@@ -1,0 +1,39 @@
+---
+source: tests/snapshots.rs
+expression: "String::from_utf8(out).unwrap()"
+---
+# Langfuse Semantic Layer
+
+- **ID:** `f4eea6d2-d2d3-41ad-b290-824445295a15`
+- **Source:** agent
+- **Workspace:** /Users/demo/project-x
+- **Model:** claude-4.5-sonnet
+- **Created:** 2025-09-04 15:33 UTC
+- **Updated:** 2025-09-04 16:33 UTC
+- **Messages:** 4
+
+---
+
+**user:** (Thursday, Sep 4, 2025, 9:33 AM (UTC-6))
+
+Design a semantic layer for Langfuse traces.
+
+---
+
+**assistant:**
+
+Let me look at the trace schema first.
+
+---
+
+**user:**
+
+Keep it read-only.
+
+---
+
+**assistant:**
+
+Here is the plan:
+1. Model traces as facts.
+2. Expose metrics.

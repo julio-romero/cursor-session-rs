@@ -1,0 +1,8 @@
+---
+source: tests/snapshots.rs
+expression: "String::from_utf8(out).unwrap()"
+---
+{"role":"user","content":"Design a semantic layer for Langfuse traces.","timestamp":"Thursday, Sep 4, 2025, 9:33 AM (UTC-6)"}
+{"role":"assistant","content":"Let me look at the trace schema first."}
+{"role":"user","content":"Keep it read-only."}
+{"role":"assistant","content":"Here is the plan:\n1. Model traces as facts.\n2. Expose metrics."}

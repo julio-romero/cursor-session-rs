@@ -2,8 +2,15 @@
 name = "cursor-session"
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.88"
 description = "List, show, and export Cursor IDE and Agent CLI chat sessions"
 license = "MIT"
+repository = "https://github.com/julio-romero/cursor-session-rs"
+homepage = "https://github.com/julio-romero/cursor-session-rs"
+readme = "README.md"
+keywords = ["cursor", "cli", "chat", "transcript", "export"]
+categories = ["command-line-utilities"]
+include = ["/src", "/README.md", "/LICENSE", "/tests/fixtures"]
 
 [lib]
 name = "cursor_session"
@@ -25,3 +32,25 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
+thiserror = "2"
+unicode-width = "0.2"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+assert_cmd = "2"
+insta = "1"
+predicates = "3"
+tempfile = "3"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
