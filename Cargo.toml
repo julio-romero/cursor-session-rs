@@ -31,7 +31,7 @@ owo-colors = "4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-serde_yaml = "0.9"
+serde_norway = "0.9"
 thiserror = "2"
 unicode-width = "0.2"
 
