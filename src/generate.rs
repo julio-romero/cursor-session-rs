@@ -3,7 +3,7 @@
 //! committed in `completions/` and `man/`, which `tests/generated.rs` keeps
 //! current.
 
-use std::io;
+use std::io::{self, Write};
 
 use clap::CommandFactory;
 use clap_mangen::Man;
@@ -68,12 +68,21 @@ pub fn man_page(command: Option<&str>) -> io::Result<Vec<u8>> {
                 io::Error::new(io::ErrorKind::NotFound, format!("no man page for `{name}`"))
             })?,
     };
-    let man = Man::new(cmd.clone())
-        .source(format!("{NAME} {}", env!("CARGO_PKG_VERSION")))
-        .manual("User Commands");
+    let man = Man::new(cmd.clone());
 
     let mut page = Page::default();
-    page.append(|w| man.render_title(w))?;
+    // clap_mangen leaves the date out of `.TH` without quoting the empty
+    // argument, which shifts the source and manual into the wrong fields. The
+    // date stays empty so that a version always has the same pages.
+    let title = cmd.get_display_name().unwrap_or_else(|| cmd.get_name());
+    page.append(|w| {
+        Roff::new().to_writer(w)?;
+        writeln!(
+            w,
+            ".TH {title} 1 \"\" \"{NAME} {}\" \"User Commands\"",
+            env!("CARGO_PKG_VERSION")
+        )
+    })?;
     page.append(|w| man.render_name_section(w))?;
     page.append(|w| man.render_synopsis_section(w))?;
     let mut description = Roff::new();
@@ -230,7 +239,7 @@ mod tests {
         let page = page(None);
         assert!(page.starts_with(".ie \\n(.g .ds Aq"), "{page}");
         assert_eq!(page.matches(".ds Aq").count(), 2, "one preamble: {page}");
-        assert!(page.contains("\n.TH cursor-session 1  \"cursor-session "));
+        assert!(page.contains("\n.TH cursor-session 1 \"\" \"cursor-session "));
         for command in documented_commands() {
             assert!(
                 page.contains(&format!("cursor\\-session\\-{command}(1)")),

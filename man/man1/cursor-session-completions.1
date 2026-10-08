@@ -1,16 +1,31 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH cursor-session-healthcheck 1  "cursor-session 0.3.0" "User Commands"
+.TH cursor-session-completions 1 "" "cursor-session 0.3.0" "User Commands"
 .SH NAME
-cursor\-session\-healthcheck \- Check that session stores can be found and loaded
+cursor\-session\-completions \- Print a shell completion script
 .SH SYNOPSIS
-\fBcursor\-session healthcheck\fR [\fB\-\-storage\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBcursor\-session completions\fR [\fB\-\-storage\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fISHELL\fR> 
 .SH DESCRIPTION
-Check that session stores can be found and loaded
+Print a shell completion script
 .SH OPTIONS
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fISHELL\fR>
+The shell to complete in
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+bash
+.IP \(bu 2
+zsh
+.IP \(bu 2
+fish
+.RE
 .SH "GLOBAL OPTIONS"
 .TP
 \fB\-\-storage\fR \fI<PATH>\fR
@@ -36,8 +51,9 @@ never
 .SH EXAMPLES
 .RS 4
 .nf
-cursor\-session healthcheck
-cursor\-session \-v healthcheck
+cursor\-session completions bash > ~/.local/share/bash\-completion/completions/cursor\-session
+cursor\-session completions zsh > ~/.zfunc/_cursor\-session
+cursor\-session completions fish > ~/.config/fish/completions/cursor\-session.fish
 .fi
 .RE
 .SH "EXIT STATUS"

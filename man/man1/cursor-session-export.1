@@ -1,13 +1,39 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH cursor-session-show 1  "cursor-session 0.3.0" "User Commands"
+.TH cursor-session-export 1 "" "cursor-session 0.3.0" "User Commands"
 .SH NAME
-cursor\-session\-show \- Show messages from a session
+cursor\-session\-export \- Export sessions to files
 .SH SYNOPSIS
-\fBcursor\-session show\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-all\fR] [\fB\-\-color\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fISESSION_ID\fR> 
+\fBcursor\-session export\fR [\fB\-\-format\fR] [\fB\-\-storage\fR] [\fB\-\-out\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-session\-id\fR] [\fB\-\-workspace\fR] [\fB\-\-source\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Show messages from a session
+Export sessions to files
 .SH OPTIONS
+.TP
+\fB\-\-format\fR \fI<FORMAT>\fR [default: md]
+Output file format
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+md
+.IP \(bu 2
+json
+.IP \(bu 2
+jsonl
+.IP \(bu 2
+yaml
+.RE
+.TP
+\fB\-\-out\fR \fI<DIR>\fR [default: exports]
+Directory to write into (created if missing)
+.TP
+\fB\-\-session\-id\fR \fI<SESSION_ID>\fR
+Export only this session (ID or unique prefix)
+.TP
+\fB\-\-workspace\fR \fI<WORKSPACE>\fR
+Export the Agent CLI sessions of a workspace: its path or a directory above it, directory names in its path, or the MD5 hash of its path
 .TP
 \fB\-\-source\fR \fI<SOURCE>\fR
 Only read this store; the other one is never opened
@@ -23,19 +49,10 @@ ide: Cursor IDE composer chats (state.vscdb)
 .RE
 .TP
 \fB\-\-limit\fR \fI<N>\fR
-Print only the last N messages [default: 20 in a terminal, all when piped or with \-\-json]
-.TP
-\fB\-\-all\fR
-Print the full transcript
-.TP
-\fB\-\-json\fR
-Print the session and its messages as JSON
+Export only the N most recently updated of the selected sessions
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)
-.TP
-<\fISESSION_ID\fR>
-Session ID, or a unique prefix of one (case\-insensitive)
 .SH "GLOBAL OPTIONS"
 .TP
 \fB\-\-storage\fR \fI<PATH>\fR
@@ -61,9 +78,9 @@ never
 .SH EXAMPLES
 .RS 4
 .nf
-cursor\-session show f4eea6d2
-cursor\-session show f4eea6d2 \-\-all
-cursor\-session show f4eea6d2 \-\-json \-\-limit 5
+cursor\-session export
+cursor\-session export \-\-format json \-\-session\-id f4eea6d2 \-\-out sessions
+cursor\-session export \-\-workspace ~/src/billing\-api \-\-limit 5
 .fi
 .RE
 .SH "EXIT STATUS"

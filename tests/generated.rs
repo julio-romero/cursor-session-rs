@@ -1,5 +1,6 @@
 //! The completion scripts and man pages committed in `completions/` and
-//! `man/`, which release archives carry, are what the binary prints now.
+//! `man/man1/`, which release archives carry, are what the binary prints now.
+//! The pages sit in `man1/` so that the `man/` directory can go on `MANPATH`.
 //!
 //! After changing the command line, regenerate them with
 //!
@@ -25,6 +26,9 @@ const SCRIPTS: [(&str, &str); 3] = [
     ("zsh", "_cursor-session"),
     ("fish", "cursor-session.fish"),
 ];
+
+/// The directories that hold nothing but generated files.
+const GENERATED_DIRS: [&str; 2] = ["completions", "man/man1"];
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -65,10 +69,11 @@ fn expected_files(fixture: &Fixture) -> Vec<(PathBuf, Vec<u8>)> {
     }
     let overview = generate(fixture, &["man"]);
     let commands = documented_commands(&String::from_utf8(overview.clone()).unwrap());
-    files.push((root().join("man/cursor-session.1"), overview));
+    files.push((root().join("man/man1/cursor-session.1"), overview));
     for command in commands {
         let page = generate(fixture, &["man", &command]);
-        files.push((root().join(format!("man/cursor-session-{command}.1")), page));
+        let path = format!("man/man1/cursor-session-{command}.1");
+        files.push((root().join(path), page));
     }
     files
 }
@@ -99,7 +104,7 @@ fn committed_completions_and_man_pages_are_current() {
     let expected = expected_files(&fixture);
     let regenerate = std::env::var_os(REGENERATE).is_some_and(|value| value == "1");
     if regenerate {
-        for dir in ["completions", "man"] {
+        for dir in GENERATED_DIRS {
             let dir = root().join(dir);
             fs::create_dir_all(&dir).unwrap();
             for stale in files_in(&dir) {
@@ -121,7 +126,12 @@ fn committed_completions_and_man_pages_are_current() {
             shown(path)
         );
     }
-    for dir in ["completions", "man"] {
+    assert_eq!(
+        files_in(&root().join("man")),
+        [root().join("man/man1")],
+        "man/ holds only man1/; {how}"
+    );
+    for dir in GENERATED_DIRS {
         for path in files_in(&root().join(dir)) {
             assert!(
                 expected.iter().any(|(expected, _)| *expected == path),
@@ -142,7 +152,7 @@ fn pages_are_the_same_on_every_run() {
     assert_eq!(
         title,
         format!(
-            ".TH cursor-session 1  \"cursor-session {}\" \"User Commands\"",
+            ".TH cursor-session 1 \"\" \"cursor-session {}\" \"User Commands\"",
             env!("CARGO_PKG_VERSION")
         ),
         "no date"

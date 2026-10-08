@@ -1,0 +1,50 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cursor-session-healthcheck 1 "" "cursor-session 0.3.0" "User Commands"
+.SH NAME
+cursor\-session\-healthcheck \- Check that session stores can be found and loaded
+.SH SYNOPSIS
+\fBcursor\-session healthcheck\fR [\fB\-\-storage\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Check that session stores can be found and loaded
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-\-storage\fR \fI<PATH>\fR
+Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the storage paths in use and the rows and files that were skipped to stderr
+.TP
+\fB\-\-color\fR \fI<WHEN>\fR [default: auto]
+When to use color
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.SH EXAMPLES
+.RS 4
+.nf
+cursor\-session healthcheck
+cursor\-session \-v healthcheck
+.fi
+.RE
+.SH "EXIT STATUS"
+.RS 4
+.nf
+0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+1  Error: session not found, unreadable storage, failed healthcheck
+2  Usage error: unknown command or flag, invalid value
+.fi
+.RE

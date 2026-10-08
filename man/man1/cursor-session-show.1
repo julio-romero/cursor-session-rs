@@ -1,12 +1,12 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH cursor-session-list 1  "cursor-session 0.3.0" "User Commands"
+.TH cursor-session-show 1 "" "cursor-session 0.3.0" "User Commands"
 .SH NAME
-cursor\-session\-list \- List sessions, most recently updated first
+cursor\-session\-show \- Show messages from a session
 .SH SYNOPSIS
-\fBcursor\-session list\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+\fBcursor\-session show\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-all\fR] [\fB\-\-color\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fISESSION_ID\fR> 
 .SH DESCRIPTION
-List sessions, most recently updated first
+Show messages from a session
 .SH OPTIONS
 .TP
 \fB\-\-source\fR \fI<SOURCE>\fR
@@ -23,13 +23,19 @@ ide: Cursor IDE composer chats (state.vscdb)
 .RE
 .TP
 \fB\-\-limit\fR \fI<N>\fR
-Keep only the N most recently updated sessions
+Print only the last N messages [default: 20 in a terminal, all when piped or with \-\-json]
+.TP
+\fB\-\-all\fR
+Print the full transcript
 .TP
 \fB\-\-json\fR
-Print a JSON array of session summaries
+Print the session and its messages as JSON
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fISESSION_ID\fR>
+Session ID, or a unique prefix of one (case\-insensitive)
 .SH "GLOBAL OPTIONS"
 .TP
 \fB\-\-storage\fR \fI<PATH>\fR
@@ -55,9 +61,9 @@ never
 .SH EXAMPLES
 .RS 4
 .nf
-cursor\-session list
-cursor\-session list \-\-source ide \-\-limit 5
-cursor\-session list \-\-json | jq \-r \*(Aq.[].id\*(Aq
+cursor\-session show f4eea6d2
+cursor\-session show f4eea6d2 \-\-all
+cursor\-session show f4eea6d2 \-\-json \-\-limit 5
 .fi
 .RE
 .SH "EXIT STATUS"

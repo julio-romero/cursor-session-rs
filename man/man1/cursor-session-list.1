@@ -1,31 +1,35 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH cursor-session-completions 1  "cursor-session 0.3.0" "User Commands"
+.TH cursor-session-list 1 "" "cursor-session 0.3.0" "User Commands"
 .SH NAME
-cursor\-session\-completions \- Print a shell completion script
+cursor\-session\-list \- List sessions, most recently updated first
 .SH SYNOPSIS
-\fBcursor\-session completions\fR [\fB\-\-storage\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fISHELL\fR> 
+\fBcursor\-session list\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
-Print a shell completion script
+List sessions, most recently updated first
 .SH OPTIONS
 .TP
-\fB\-h\fR, \fB\-\-help\fR
-Print help (see a summary with \*(Aq\-h\*(Aq)
-.TP
-<\fISHELL\fR>
-The shell to complete in
+\fB\-\-source\fR \fI<SOURCE>\fR
+Only read this store; the other one is never opened
 .br
 
 .br
 \fIPossible values:\fR
 .RS 14
 .IP \(bu 2
-bash
+agent: Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)
 .IP \(bu 2
-zsh
-.IP \(bu 2
-fish
+ide: Cursor IDE composer chats (state.vscdb)
 .RE
+.TP
+\fB\-\-limit\fR \fI<N>\fR
+Keep only the N most recently updated sessions
+.TP
+\fB\-\-json\fR
+Print a JSON array of session summaries
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
 .SH "GLOBAL OPTIONS"
 .TP
 \fB\-\-storage\fR \fI<PATH>\fR
@@ -51,9 +55,9 @@ never
 .SH EXAMPLES
 .RS 4
 .nf
-cursor\-session completions bash > ~/.local/share/bash\-completion/completions/cursor\-session
-cursor\-session completions zsh > ~/.zfunc/_cursor\-session
-cursor\-session completions fish > ~/.config/fish/completions/cursor\-session.fish
+cursor\-session list
+cursor\-session list \-\-source ide \-\-limit 5
+cursor\-session list \-\-json | jq \-r \*(Aq.[].id\*(Aq
 .fi
 .RE
 .SH "EXIT STATUS"
