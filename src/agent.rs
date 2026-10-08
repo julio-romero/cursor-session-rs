@@ -116,6 +116,9 @@ pub(crate) struct Index {
     pub sessions: Vec<SessionSummary>,
     /// The transcripts of each session that hold a message.
     transcripts: HashMap<String, Vec<TranscriptFile>>,
+    /// Transcripts that hold no message, such as those of only tool calls
+    /// and results, which make no session; see [`tool_transcript`].
+    quiet: HashMap<String, Vec<TranscriptFile>>,
 }
 
 /// Finds the Agent CLI sessions, reading each transcript only up to its first
@@ -150,7 +153,7 @@ pub(crate) fn index(
     for (dir, err) in unreadable {
         notices.push(format!("could not read {}: {err}", dir.display()));
     }
-    let transcripts = match transcripts {
+    let (transcripts, quiet) = match transcripts {
         Some((dir, found)) if found.unrecognized > 0 && found.unrecognized == found.read => {
             return Err(Error::SchemaMismatch {
                 store: Source::Agent,
@@ -161,8 +164,8 @@ pub(crate) fn index(
                 },
             });
         }
-        Some((_, found)) => found.by_id,
-        None => HashMap::new(),
+        Some((_, found)) => (found.by_id, found.quiet),
+        None => (HashMap::new(), HashMap::new()),
     };
 
     let mut by_id: HashMap<String, SessionSummary> = HashMap::new();
@@ -179,7 +182,24 @@ pub(crate) fn index(
     Ok(Index {
         sessions: by_id.into_values().collect(),
         transcripts,
+        quiet,
     })
+}
+
+/// A transcript of session `id` that holds no message, for its tool calls
+/// and results when it has no transcript that holds a message: of several,
+/// the newest. Counting never uses it, so the session's messages and what
+/// lists it stay as they are.
+pub(crate) fn tool_transcript(index: &Index, id: &str) -> Option<PathBuf> {
+    if index.transcripts.contains_key(id) {
+        return None;
+    }
+    index
+        .quiet
+        .get(id)?
+        .iter()
+        .max_by(|a, b| (a.modified, &a.path).cmp(&(b.modified, &b.path)))
+        .map(|file| file.path.clone())
 }
 
 /// The sessions of `index` that `selected` accepts, each with the number of
@@ -614,7 +634,7 @@ fn select_transcript(best: &mut Option<TranscriptCandidate>, candidate: Transcri
     }
 }
 
-/// A transcript that holds a message.
+/// A transcript file.
 struct TranscriptFile {
     path: PathBuf,
     modified: Option<SystemTime>,
@@ -624,6 +644,8 @@ struct TranscriptFile {
 struct Transcripts {
     /// The transcripts of each session that hold a message.
     by_id: HashMap<String, Vec<TranscriptFile>>,
+    /// Those that hold none, though nothing in them is unreadable.
+    quiet: HashMap<String, Vec<TranscriptFile>>,
     /// Transcripts read that held messages or should have.
     read: usize,
     /// Those of them in which no message could be read.
@@ -635,6 +657,7 @@ struct Transcripts {
 /// cannot be read.
 fn scan_transcripts(projects_dir: &Path, warnings: &mut Vec<String>) -> io::Result<Transcripts> {
     let mut by_id: HashMap<String, Vec<TranscriptFile>> = HashMap::new();
+    let mut quiet: HashMap<String, Vec<TranscriptFile>> = HashMap::new();
     let mut unreadable = Unreadable::new("transcript");
     let mut read = 0;
     for project in read_subdirs(projects_dir)? {
@@ -675,20 +698,24 @@ fn scan_transcripts(projects_dir: &Path, warnings: &mut Vec<String>) -> io::Resu
                 unreadable.add_unrecognized(&path, "no user or assistant message could be read");
                 continue;
             }
-            if scan.messages > 0 {
+            let found = if scan.messages > 0 {
                 read += 1;
-                let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
-                by_id
-                    .entry(id)
-                    .or_default()
-                    .push(TranscriptFile { path, modified });
-            }
+                &mut by_id
+            } else {
+                &mut quiet
+            };
+            let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+            found
+                .entry(id)
+                .or_default()
+                .push(TranscriptFile { path, modified });
         }
     }
     let unrecognized = unreadable.unrecognized;
     unreadable.report(warnings);
     Ok(Transcripts {
         by_id,
+        quiet,
         read,
         unrecognized,
     })
@@ -725,13 +752,33 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
 /// The messages of the transcript at `path`, with its tool calls and results
 /// among them when `read.tools` is set (see [`with_tools`]).
 pub fn read_jsonl_with(path: &Path, read: ReadOptions) -> Result<Vec<Message>> {
+    Ok(read_transcript(path, read)?.messages)
+}
+
+/// What [`read_transcript`] read.
+pub(crate) struct Transcript {
+    pub messages: Vec<Message>,
+    /// The messages `show` prints by default, and the characters of their
+    /// content, as counting the transcript gives them. With the tools read,
+    /// text that tool calls separate makes several messages, which still
+    /// count as the one message they are without them.
+    pub message_count: usize,
+    pub content_chars: usize,
+}
+
+/// [`read_jsonl_with`], with the counts of the messages read.
+pub(crate) fn read_transcript(path: &Path, read: ReadOptions) -> Result<Transcript> {
     let mut messages = Vec::new();
     let keep = Keep {
         messages: &mut messages,
         tools: read.tools,
     };
-    scan_transcript(path, Some(keep), false)?;
-    Ok(messages)
+    let scan = scan_transcript(path, Some(keep), false)?;
+    Ok(Transcript {
+        messages,
+        message_count: scan.messages,
+        content_chars: scan.chars,
+    })
 }
 
 /// Where [`scan_transcript`] keeps the messages it reads.
@@ -845,24 +892,29 @@ fn read_line(line: &str, build: bool) -> Line {
             },
         };
     }
-    let raw_content = extract_content(&content);
-    let timestamp = extract_timestamp_tag(&raw_content);
+    match build_message(role, &extract_content(&content)) {
+        Some(message) => Line::Message {
+            chars: content_chars(&message.content),
+            message: Some(message),
+        },
+        None => Line::NoMessage,
+    }
+}
+
+/// The message of `role` (user or assistant) whose text, its parts joined,
+/// is `raw`: `None` when it has no text to show.
+fn build_message(role: String, raw: &str) -> Option<Message> {
+    let timestamp = extract_timestamp_tag(raw);
     let content = if role == "user" {
-        clean_user_text(&raw_content)
+        clean_user_text(raw)
     } else {
-        raw_content.trim().to_string()
+        raw.trim().to_string()
     };
-    if content.is_empty() {
-        return Line::NoMessage;
-    }
-    Line::Message {
-        chars: content_chars(&content),
-        message: Some(Message {
-            role,
-            content,
-            timestamp,
-        }),
-    }
+    (!content.is_empty()).then_some(Message {
+        role,
+        content,
+        timestamp,
+    })
 }
 
 /// The characters of the content [`read_line`] builds for a message of
@@ -924,60 +976,85 @@ struct ToolLineMessage {
     content: Value,
 }
 
-/// The messages of a transcript line with its tool calls and results:
-/// `message`, the one [`read_line`] built from it, and a tool message for
-/// each `tool_use` and `tool_result` part, in the order of the parts. Its
-/// text parts make one message, as without the tools, which goes where the
-/// first of them with text is. A line of the role `tool` is all tool
-/// messages.
+/// The messages of a transcript line with its tool calls and results, in
+/// the order of its parts: a tool message for each `tool_use` and
+/// `tool_result` part, and a message for each run of text parts between
+/// them, built as [`read_line`] builds the message of a line of that text.
+/// `message` is the one [`read_line`] built from the whole line, which is
+/// what a line without tool parts gives. A line of the role `tool` is all
+/// tool messages; lines of other roles than user and assistant give none.
 fn with_tools(line: &str, message: Option<Message>) -> Vec<Message> {
     let Ok(entry) = json::from_str::<ToolLine>(line) else {
         return message.into_iter().collect();
     };
     let role = entry.role.unwrap_or_default();
     let content = entry.message.map(|m| m.content).unwrap_or_default();
-    // System lines are never shown, tools or not.
-    if role == "system" {
-        return message.into_iter().collect();
+    match role.as_str() {
+        TOOL_ROLE => {
+            let mut messages = tool_line(&content);
+            messages.extend(message);
+            return messages;
+        }
+        "user" | "assistant" => {}
+        // System lines are never shown, tools or not, and a role this
+        // version does not know shows nothing.
+        _ => return message.into_iter().collect(),
     }
+    let parts = match &content {
+        Value::Array(parts) if parts.iter().any(is_tool_part) => parts,
+        _ => return message.into_iter().collect(),
+    };
+    // The text of the parts, as `read_line` reads them.
+    let read = TranscriptContent::deserialize(&content).ok();
+    let texts = match &read {
+        Some(TranscriptContent::Parts(read)) if read.len() == parts.len() => read.as_slice(),
+        _ => &[],
+    };
     let mut messages = Vec::new();
-    if role == TOOL_ROLE {
-        match &content {
-            Value::Array(parts) => {
-                for part in parts {
-                    let text = match part_kind(part) {
-                        "text" => part.get("text").and_then(tools::result),
-                        _ => tool_part(part),
-                    };
-                    messages.extend(text.and_then(tools::message));
-                }
-            }
-            other => messages.extend(tools::result(other).and_then(tools::message)),
+    let mut run: Vec<&str> = Vec::new();
+    let flush = |run: &mut Vec<&str>, messages: &mut Vec<Message>| {
+        if !run.is_empty() {
+            messages.extend(build_message(role.clone(), &run.join("\n\n")));
+            run.clear();
         }
-        messages.extend(message);
-        return messages;
-    }
-    let mut message = message;
-    if let Value::Array(parts) = &content {
-        for part in parts {
-            match part_kind(part) {
-                "tool_use" | "tool_result" => {
-                    messages.extend(tool_part(part).and_then(tools::message));
-                }
-                "text"
-                    if part
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .is_some_and(|text| !text.trim().is_empty()) =>
-                {
-                    messages.extend(message.take());
-                }
-                _ => {}
-            }
+    };
+    for (at, part) in parts.iter().enumerate() {
+        if is_tool_part(part) {
+            flush(&mut run, &mut messages);
+            messages.extend(tool_part(part).and_then(tools::message));
+        } else if let Some(text) = texts.get(at).and_then(|read| {
+            read.text
+                .as_deref()
+                .filter(|_| read.kind.as_deref().unwrap_or("text") == "text")
+        }) {
+            run.push(text);
         }
     }
-    messages.extend(message);
+    flush(&mut run, &mut messages);
     messages
+}
+
+/// The tool messages of a line of the role `tool`.
+fn tool_line(content: &Value) -> Vec<Message> {
+    let mut messages = Vec::new();
+    match content {
+        Value::Array(parts) => {
+            for part in parts {
+                let text = match part_kind(part) {
+                    "text" => part.get("text").and_then(tools::result),
+                    _ => tool_part(part),
+                };
+                messages.extend(text.and_then(tools::message));
+            }
+        }
+        other => messages.extend(tools::result(other).and_then(tools::message)),
+    }
+    messages
+}
+
+/// Whether a content part is a tool call or result.
+fn is_tool_part(part: &Value) -> bool {
+    matches!(part_kind(part), "tool_use" | "tool_result")
 }
 
 /// The `type` of a content part; a part without one is text.
@@ -1210,20 +1287,94 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.jsonl");
         fs::write(&path, lines.join("\n")).unwrap();
-        let with = read_jsonl_with(&path, ReadOptions { tools: true }).unwrap();
-        // The other messages are those read without the tools.
-        let without: Vec<String> = read_jsonl(&path)
-            .unwrap()
+        let with = read_transcript(&path, ReadOptions { tools: true }).unwrap();
+        let without = read_transcript(&path, ReadOptions::default()).unwrap();
+        // The counts are those of the messages read without the tools.
+        assert_eq!(
+            (with.message_count, with.content_chars),
+            (without.message_count, without.content_chars)
+        );
+        assert_eq!(without.message_count, without.messages.len());
+        assert!(without.messages.iter().all(|m| !m.is_tool()));
+        with.messages
             .into_iter()
-            .map(|m| format!("{}: {}", m.role, m.content))
-            .collect();
-        let others: Vec<String> = with
-            .iter()
-            .filter(|m| !m.is_tool())
-            .map(|m| format!("{}: {}", m.role, m.content))
-            .collect();
-        assert_eq!(others, without);
-        with.into_iter().map(|m| (m.role, m.content)).collect()
+            .map(|m| (m.role, m.content))
+            .collect()
+    }
+
+    fn pairs(read: &[(String, String)]) -> Vec<(&str, &str)> {
+        read.iter()
+            .map(|(role, content)| (role.as_str(), content.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn tool_calls_split_the_text_of_their_line_in_order() {
+        let line =
+            |parts: &str| format!(r#"{{"role":"assistant","message":{{"content":[{parts}]}}}}"#);
+        let text = |text: &str| format!(r#"{{"type":"text","text":"{text}"}}"#);
+        let call = r#"{"type":"tool_use","name":"Grep","input":{"pattern":"x"}}"#;
+        let cases: [(String, Vec<(&str, &str)>); 5] = [
+            (
+                line(&format!("{},{call},{}", text("A"), text("B"))),
+                vec![
+                    ("assistant", "A"),
+                    ("tool", r#"Grep {"pattern":"x"}"#),
+                    ("assistant", "B"),
+                ],
+            ),
+            (
+                line(&format!("{call},{}", text("A"))),
+                vec![("tool", r#"Grep {"pattern":"x"}"#), ("assistant", "A")],
+            ),
+            (
+                line(&format!("{},{call}", text("A"))),
+                vec![("assistant", "A"), ("tool", r#"Grep {"pattern":"x"}"#)],
+            ),
+            // Text parts next to each other stay one message, as without the
+            // tools, and a run without text makes none.
+            (
+                line(&format!(
+                    "{},{},{call},{},{call}",
+                    text(" A"),
+                    text("B "),
+                    text("  ")
+                )),
+                vec![
+                    ("assistant", "A\n\nB"),
+                    ("tool", r#"Grep {"pattern":"x"}"#),
+                    ("tool", r#"Grep {"pattern":"x"}"#),
+                ],
+            ),
+            // A user's text is cleaned in each run.
+            (
+                format!(
+                    r#"{{"role":"user","message":{{"content":[{},{call},{}]}}}}"#,
+                    text("<user_query>q</user_query>"),
+                    text("<timestamp>t</timestamp> more")
+                ),
+                vec![
+                    ("user", "q"),
+                    ("tool", r#"Grep {"pattern":"x"}"#),
+                    ("user", "more"),
+                ],
+            ),
+        ];
+        for (line, expected) in cases {
+            let read = tool_messages(&[&line]);
+            assert_eq!(pairs(&read), expected, "{line}");
+        }
+    }
+
+    #[test]
+    fn lines_of_an_unknown_role_give_no_tool_messages() {
+        let read = tool_messages(&[
+            r#"{"role":"human","message":{"content":[{"type":"tool_use","name":"Read"},{"type":"tool_result","content":"x"}]}}"#,
+            r#"{"role":"system","message":{"content":[{"type":"tool_use","name":"Setup"}]}}"#,
+            r#"{"message":{"content":[{"type":"tool_use","name":"Anon"}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
+        ]);
+        assert_eq!(pairs(&read), [("tool", "Read")]);
     }
 
     #[test]
@@ -1249,9 +1400,10 @@ mod tests {
             ("tool", "fn main() {}"),
             ("tool", "plain output"),
             ("tool", r#"Shell {"command":"ls"}"#),
-            // The text of a line stays one message, where its text starts.
-            ("assistant", "Then \n\ndone."),
+            // Tool calls between its text parts split a line's text.
+            ("assistant", "Then"),
             ("tool", "Read"),
+            ("assistant", "done."),
             ("tool", "ok"),
             ("user", "thanks"),
             ("tool", "note"),

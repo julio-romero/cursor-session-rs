@@ -33,8 +33,10 @@ pub struct LoadOptions {
 pub struct ReadOptions {
     /// Also build the tool calls and results, as messages of the role
     /// [`model::TOOL_ROLE`] among the others. They are no part of the
-    /// session's `message_count` or `content_chars`, and the other messages
-    /// are the same with or without them.
+    /// session's `message_count` or `content_chars`, which are the same with
+    /// or without them. So are the other messages, except that the text of an
+    /// Agent CLI transcript line that tool calls separate is read as one
+    /// message per run of text between them, to keep the order.
     pub tools: bool,
 }
 
@@ -119,13 +121,24 @@ pub fn load_session_with(
         let listed = model::merge_sessions(index.sessions());
         let id = find_session(&listed, query)?.id.clone();
         let counted = index.count(&|candidate| candidate == id, &mut warnings, &mut notices)?;
-        let summary = model::merge_sessions(counted)
+        let mut summary = model::merge_sessions(counted)
             .into_iter()
             .next()
             .ok_or_else(|| Error::SessionNotFound {
                 query: query.to_string(),
                 unsearched: None,
             })?;
+        if read.tools && summary.messages_at == MessagesAt::Nowhere {
+            // A transcript of only tool calls and results holds no message
+            // to count, but has tools to show.
+            let quiet = index
+                .agent
+                .as_ref()
+                .and_then(|agent| agent::tool_transcript(agent, &id));
+            if let Some(path) = quiet {
+                summary.messages_at = MessagesAt::Transcript(path);
+            }
+        }
         load_messages_with(&summary, read)
     };
     let session = load();
@@ -146,7 +159,16 @@ pub fn load_messages(summary: &SessionSummary) -> Result<Session> {
 pub fn load_messages_with(summary: &SessionSummary, read: ReadOptions) -> Result<Session> {
     let messages = match &summary.messages_at {
         MessagesAt::Nowhere => Vec::new(),
-        MessagesAt::Transcript(path) => agent::read_jsonl_with(path, read)?,
+        MessagesAt::Transcript(path) => {
+            let read = agent::read_transcript(path, read)?;
+            let mut summary = summary.clone();
+            summary.message_count = read.message_count;
+            summary.content_chars = read.content_chars;
+            return Ok(Session {
+                summary,
+                messages: read.messages,
+            });
+        }
         MessagesAt::IdeChat { db, key, blob_key } => {
             ide::read_messages(db, key, *blob_key, &summary.id, read)?
         }
