@@ -131,3 +131,23 @@ fn cli_json_output() {
         cli_stdout(&fixture, &["show", "c0ffee00", "--json"])
     );
 }
+
+#[test]
+fn cli_search_output() {
+    let fixture = standard();
+    insta::assert_snapshot!("search_plain", cli_stdout(&fixture, &["search", "plan"]));
+    insta::assert_snapshot!(
+        "search_color",
+        cli_stdout(
+            &fixture,
+            &["search", "PLAN", "--color", "always", "--context", "8"]
+        )
+    );
+    insta::assert_snapshot!(
+        "search_json",
+        cli_stdout(
+            &fixture,
+            &["search", "MIGRATION", "\"plan looks\"", "--json"]
+        )
+    );
+}

@@ -788,3 +788,52 @@ fn visiting_messages_gives_the_messages_loaded() {
         );
     }
 }
+
+#[test]
+fn search_session_scores_the_messages_show_lists() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let query = parse_query("PLAN here").unwrap();
+    let mut found = Vec::new();
+    for session in fixture.load().sessions {
+        let Some(hit) = cursor_session::search_session(&session.summary, &query, 60).unwrap()
+        else {
+            continue;
+        };
+        // The snippet is of the message `show --json` lists at its index.
+        let best = &session.messages[hit.score.best_message];
+        assert_eq!(hit.snippet.role, best.role);
+        found.push((
+            session.id.clone(),
+            hit.score.all_in_one,
+            hit.score.matching_messages,
+            hit.snippet.text,
+        ));
+    }
+    assert_eq!(
+        found,
+        [
+            (
+                IDE_TEXT_ID.to_string(),
+                true,
+                1,
+                "Here is a plan.".to_string()
+            ),
+            (
+                AGENT_ID.to_string(),
+                true,
+                1,
+                "Here is the plan: 1. Model traces as facts. 2. Expose metrics.".to_string()
+            ),
+        ]
+    );
+    // A term in no message: no hit, also where the other terms are.
+    let missing = parse_query("plan nowhere-to-be-found").unwrap();
+    for session in fixture.load().sessions {
+        assert!(
+            cursor_session::search_session(&session.summary, &missing, 60)
+                .unwrap()
+                .is_none()
+        );
+    }
+}

@@ -7,14 +7,16 @@ use anyhow::{Context, Result, bail};
 use cursor_session::detect::{self, Env, StoragePaths};
 use cursor_session::export::{self, Format};
 use cursor_session::model::{self, Session, SessionSummary, Source, SummaryJson};
+use cursor_session::search::{self, Hit, HitJson};
 use cursor_session::since::Since;
 use cursor_session::ui;
 use cursor_session::{
     Error, LoadOptions, Loaded, filter_workspace, load_messages, load_session, load_sessions,
+    search_session,
 };
 use serde::Serialize;
 
-use crate::cli::{Commands, ExportArgs, HealthcheckArgs, ListArgs, ShowArgs};
+use crate::cli::{Commands, ExportArgs, HealthcheckArgs, ListArgs, SearchArgs, ShowArgs};
 use crate::output::OutputOpts;
 
 /// Runs one subcommand. Normal output goes to `out`, diagnostics such as load
@@ -29,6 +31,7 @@ pub fn run(
     match command {
         Commands::List(args) => cmd_list(paths, opts, out, err, &args),
         Commands::Show(args) => cmd_show(paths, opts, out, err, &args),
+        Commands::Search(args) => cmd_search(paths, opts, out, err, &args),
         Commands::Export(args) => cmd_export(paths, out, err, &args),
         Commands::Healthcheck(args) => cmd_healthcheck(paths, out, err, &args),
     }
@@ -187,6 +190,51 @@ fn cmd_show(
         out,
         "{}",
         ui::render_show(&session, messages, hidden, opts.color)
+    )?;
+    Ok(())
+}
+
+fn cmd_search(
+    paths: &StoragePaths,
+    opts: &OutputOpts,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    args: &SearchArgs,
+) -> Result<()> {
+    let query = search::parse_query(&args.query.join(" "))?;
+    if paths.is_empty() {
+        return Err(Error::NoStorage.into());
+    }
+    let load_opts = LoadOptions {
+        source: args.source,
+        updated_since: cutoff(args.since),
+        ..Default::default()
+    };
+    let loaded = load(paths, &load_opts, args.verbose, err)?;
+    // One session's messages at a time; each match keeps only its snippet.
+    let mut hits = Vec::new();
+    for summary in &loaded.sessions {
+        let hit = search_session(summary, &query, args.context)
+            .with_context(|| format!("could not search session {}", ui::one_line(&summary.id)))?;
+        hits.extend(hit);
+    }
+    if hits.is_empty() {
+        bail!("no sessions match");
+    }
+    let mut hits = search::rank(hits);
+    if let Some(limit) = args.limit {
+        hits.truncate(limit);
+    }
+    if args.json {
+        let entries: Vec<HitJson> = hits.iter().map(Hit::json).collect();
+        return write_json(out, &entries);
+    }
+    // The IDs shown must tell apart all the sessions `show` looks through.
+    let ids: Vec<&str> = loaded.ids.iter().map(String::as_str).collect();
+    write!(
+        out,
+        "{}",
+        search::render(&hits, &ids, opts.color, opts.width)
     )?;
     Ok(())
 }

@@ -5,6 +5,7 @@ pub mod export;
 pub mod ide;
 mod json;
 pub mod model;
+pub mod search;
 pub mod since;
 mod sqlite;
 pub mod ui;
@@ -16,6 +17,7 @@ use std::collections::HashSet;
 
 use crate::detect::StoragePaths;
 use crate::model::{Message, MessagesAt, Session, SessionSummary, Source};
+use crate::search::{Hit, Query, Scorer};
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadOptions {
@@ -127,6 +129,29 @@ pub fn visit_messages(summary: &SessionSummary, visit: &mut dyn FnMut(Message)) 
             Ok(())
         }
     }
+}
+
+/// Searches the messages of the session `summary` lists for `query` (see
+/// [`search`]), reading them one at a time and keeping only the snippet of
+/// the best one, `context` characters on each side of its first match.
+/// `None` when some term is in none of its messages.
+pub fn search_session(
+    summary: &SessionSummary,
+    query: &Query,
+    context: usize,
+) -> Result<Option<Hit>> {
+    let mut scorer = Scorer::new(query.terms().len());
+    let mut best = None;
+    visit_messages(summary, &mut |message| {
+        if scorer.push(search::matches(query.set(), &message.content)) {
+            best = Some(search::snippet(query, &message, context));
+        }
+    })?;
+    Ok(scorer.finish().zip(best).map(|(score, snippet)| Hit {
+        session: summary.clone(),
+        score,
+        snippet,
+    }))
 }
 
 /// The sessions of the stores to load, found without counting messages.

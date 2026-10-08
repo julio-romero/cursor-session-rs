@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cursor_session::export::Format;
 use cursor_session::model::Source;
+use cursor_session::search::{self, DEFAULT_CONTEXT};
 use cursor_session::since::{Since, parse_since};
 
 const LONG_ABOUT: &str = "\
@@ -18,6 +19,7 @@ Examples:
   cursor-session list --source agent --limit 10
   cursor-session show f4eea6d2
   cursor-session show f4eea6d2 --json | jq -r '.messages[].content'
+  cursor-session search retry backoff --since 30d
   cursor-session export --format md --session-id f4eea6d2";
 
 const LIST_EXAMPLES: &str = "\
@@ -32,6 +34,13 @@ Examples:
   cursor-session show f4eea6d2
   cursor-session show f4eea6d2 --all
   cursor-session show f4eea6d2 --json --limit 5";
+
+const SEARCH_EXAMPLES: &str = "\
+Examples:
+  cursor-session search retry backoff
+  cursor-session search '\"connection pool\"' timeout --since 30d
+  cursor-session search migration --source ide -n 5 --context 120
+  cursor-session search flaky ci --json | jq -r '.[].id'";
 
 const EXPORT_EXAMPLES: &str = "\
 Examples:
@@ -50,6 +59,24 @@ Exit codes:
   0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
   1  Error: session not found, unreadable storage, failed healthcheck
   2  Usage error: unknown command or flag, invalid value";
+
+const SEARCH_EXIT_CODES: &str = "\
+Exit codes:
+  0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+  1  Error: no sessions match, unreadable storage
+  2  Usage error: unknown flag, invalid value, a query without terms or with more than 64";
+
+const SEARCH_ABOUT: &str = "\
+Find the sessions whose messages hold every word of a query.
+
+Every term must appear somewhere in a session's messages, in any order and
+any case (Unicode-aware); \"double-quoted phrases\" are one term, and every term
+is matched as written, never as a pattern. Titles are not searched.
+
+Sessions with every term in one message come first, then those with more
+matching messages, then the most recently updated. Each result shows the
+message with the most terms, cut around its first match, with the matches
+highlighted when color is on.";
 
 #[derive(Parser)]
 #[command(
@@ -106,6 +133,13 @@ pub enum Commands {
         after_long_help = format!("{SHOW_EXAMPLES}\n\n{EXIT_CODES}")
     )]
     Show(ShowArgs),
+    /// Find the sessions whose messages hold every word of a query
+    #[command(
+        long_about = SEARCH_ABOUT,
+        after_help = SEARCH_EXAMPLES,
+        after_long_help = format!("{SEARCH_EXAMPLES}\n\n{SEARCH_EXIT_CODES}")
+    )]
+    Search(SearchArgs),
     /// Export sessions to files
     #[command(
         after_help = EXPORT_EXAMPLES,
@@ -137,6 +171,42 @@ pub struct ListArgs {
     #[arg(long, value_name = "DURATION", value_parser = parse_since)]
     pub since: Option<Since>,
     /// Print a JSON array of session summaries
+    #[arg(long)]
+    pub json: bool,
+    #[arg(from_global)]
+    pub verbose: bool,
+}
+
+#[derive(Args)]
+pub struct SearchArgs {
+    /// Terms that must all appear in a session's messages; quote a "phrase" (inside shell quotes) to make it one term
+    #[arg(required = true, value_name = "QUERY")]
+    pub query: Vec<String>,
+    /// Only read this store; the other one is never opened
+    #[arg(long, value_enum)]
+    pub source: Option<Source>,
+    /// Keep only the N best matching sessions
+    #[arg(
+        short = 'n',
+        long,
+        value_name = "N",
+        value_parser = at_least_one,
+        allow_negative_numbers = true
+    )]
+    pub limit: Option<usize>,
+    /// Characters of the best message to show on each side of its first match
+    #[arg(
+        long,
+        value_name = "CHARS",
+        value_parser = whole_number,
+        allow_negative_numbers = true,
+        default_value_t = DEFAULT_CONTEXT
+    )]
+    pub context: usize,
+    /// Search only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)
+    #[arg(long, value_name = "DURATION", value_parser = parse_since)]
+    pub since: Option<Since>,
+    /// Print a JSON array of the matching sessions, best first
     #[arg(long)]
     pub json: bool,
     #[arg(from_global)]
@@ -230,6 +300,31 @@ fn at_least_one(value: &str) -> Result<usize, String> {
     }
 }
 
+/// A whole number, 0 included. One too large to store asks for everything.
+fn whole_number(value: &str) -> Result<usize, String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("expected a whole number".to_string());
+    }
+    Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+}
+
+impl Cli {
+    /// Checks what clap cannot check one value at a time: that the words of
+    /// a search query, together, make a query (see
+    /// [`search::parse_query`]). The error names the subcommand and gives a
+    /// usage error's message.
+    pub fn check(&self) -> Result<(), (&'static str, String)> {
+        if let Commands::Search(args) = &self.command {
+            let query = args.query.join(" ");
+            if let Err(error) = search::parse_query(&query) {
+                let message = format!("invalid value '{query}' for '<QUERY>...': {error}");
+                return Err(("search", message));
+            }
+        }
+        Ok(())
+    }
+}
+
 fn not_blank(value: &str) -> Result<String, String> {
     if value.trim().is_empty() {
         return Err("must not be empty".to_string());
@@ -311,8 +406,79 @@ mod tests {
     }
 
     #[test]
+    fn search_limit_must_be_positive_and_context_a_whole_number() {
+        let parse = |argv: &[&str]| {
+            Cli::try_parse_from(["cursor-session", "search", "x"].iter().chain(argv))
+        };
+        for argv in [&["-n", "0"][..], &["--limit", "-1"], &["--limit", "x"]] {
+            let err = parse(argv).err().unwrap();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            &["--context", "-1"][..],
+            &["--context", ""],
+            &["--context", "1.5"],
+        ] {
+            let err = parse(argv).err().unwrap();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{argv:?}"
+            );
+            assert!(
+                err.to_string().contains(": expected a whole number"),
+                "{err}"
+            );
+        }
+        let context = |argv: &[&str]| match parse(argv).unwrap().command {
+            Commands::Search(args) => (args.context, args.limit),
+            _ => panic!("expected search"),
+        };
+        assert_eq!(context(&[]), (60, None));
+        assert_eq!(context(&["--context", "0", "-n", "3"]), (0, Some(3)));
+        assert_eq!(
+            context(&["--context", "99999999999999999999999"]),
+            (usize::MAX, None)
+        );
+    }
+
+    #[test]
+    fn search_query_words_join_into_one_query() {
+        let cli =
+            Cli::try_parse_from(["cursor-session", "search", "\"two", "words\"", "more"]).unwrap();
+        assert!(cli.check().is_ok());
+        let Commands::Search(args) = cli.command else {
+            panic!("expected search");
+        };
+        let query = search::parse_query(&args.query.join(" ")).unwrap();
+        assert_eq!(query.terms(), ["two words", "more"]);
+
+        // Clap requires a word; the check, that the words make a term.
+        assert!(Cli::try_parse_from(["cursor-session", "search"]).is_err());
+        for empty in [&[""][..], &["  "], &["\"\""], &["\"", "\""]] {
+            let argv = ["cursor-session", "search"].iter().chain(empty);
+            let (name, message) = Cli::try_parse_from(argv).unwrap().check().unwrap_err();
+            assert_eq!(name, "search");
+            assert!(message.ends_with("': the query has no terms"), "{message}");
+        }
+        let many: Vec<String> = (0..65).map(|n| format!("t{n}")).collect();
+        let argv = ["cursor-session", "search"]
+            .into_iter()
+            .chain(many.iter().map(String::as_str));
+        let (_, message) = Cli::try_parse_from(argv).unwrap().check().unwrap_err();
+        assert!(
+            message.ends_with("the query has 65 terms; at most 64 are allowed"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn since_takes_a_duration_and_not_with_one_session() {
-        for command in [&["list"][..], &["export"]] {
+        for command in [&["list"][..], &["export"], &["search", "x"]] {
             let parse = |since: &str| {
                 let argv: Vec<&str> = ["cursor-session"]
                     .into_iter()
