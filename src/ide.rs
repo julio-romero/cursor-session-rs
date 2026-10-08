@@ -139,6 +139,9 @@ struct ToolCall {
     args: Option<Value>,
     /// Usually JSON in a string.
     result: Option<Value>,
+    /// The marker of a call that did not succeed, from its `status` (see
+    /// [`tools::status_marker`]).
+    marker: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for ToolCall {
@@ -158,8 +161,32 @@ impl<'de> Deserialize<'de> for ToolCall {
         let args = ["rawArgs", "params"]
             .iter()
             .find_map(|key| fields.remove(*key).filter(given));
-        let result = fields.remove("result").filter(given);
-        Ok(Self { name, args, result })
+        let result = fields.remove("result").filter(given).map(string_literal);
+        let marker = match fields.remove("status") {
+            Some(Value::String(status)) => tools::status_marker(&status),
+            _ => None,
+        };
+        Ok(Self {
+            name,
+            args,
+            result,
+            marker,
+        })
+    }
+}
+
+/// `value` with a string that holds a JSON string literal, such as
+/// `"\"done\""`, as the string it encodes, as JSON objects in a string are
+/// shown by what they hold.
+fn string_literal(value: Value) -> Value {
+    match &value {
+        Value::String(text) if text.trim_start().starts_with('"') => {
+            match json::from_str::<Value>(text) {
+                Ok(decoded @ Value::String(_)) => decoded,
+                _ => value,
+            }
+        }
+        _ => value,
     }
 }
 
@@ -167,10 +194,19 @@ impl ToolData for ToolCall {
     const READS: bool = true;
 
     /// The call, unless nothing names it or its arguments, then the result.
+    /// A call that did not succeed has its marker, such as `(error)`, on its
+    /// result, or on the call when it returned nothing.
     fn messages(self) -> impl Iterator<Item = Message> {
-        let call = (self.name.is_some() || self.args.is_some())
+        let mut call = (self.name.is_some() || self.args.is_some())
             .then(|| tools::call(self.name.as_deref(), self.args.as_ref()));
-        let result = self.result.as_ref().and_then(tools::result);
+        let mut result = self.result.as_ref().and_then(tools::result);
+        if let Some(marker) = &self.marker {
+            if result.is_some() {
+                result = Some(tools::marked(result, marker));
+            } else if call.is_some() {
+                call = Some(tools::marked(call, marker));
+            }
+        }
         call.into_iter().chain(result).filter_map(tools::message)
     }
 
@@ -1440,7 +1476,8 @@ mod tests {
             ("tool", r#"read_file {"target_file":"a.rs"}"#),
             // The text of a result stored as JSON in a string.
             ("tool", "fn main() {}"),
-            ("tool", r#"run_terminal_cmd {"command":"ls"}"#),
+            // A call that did not complete is marked so.
+            ("tool", r#"run_terminal_cmd {"command":"ls"} (cancelled)"#),
             ("tool", "a\n\nb"),
             ("assistant", "answer"),
             ("user", "kept"),
@@ -1457,6 +1494,69 @@ mod tests {
         assert_eq!(
             (with.message_count, with.content_chars),
             (session.message_count, session.content_chars)
+        );
+    }
+
+    /// The tool messages of a `toolFormerData`.
+    fn tool_call(data: &str) -> Vec<String> {
+        json::from_str::<ToolCall>(data)
+            .unwrap()
+            .messages()
+            .map(|m| m.content)
+            .collect()
+    }
+
+    #[test]
+    fn tool_calls_that_did_not_succeed_are_marked() {
+        let call = r#""name":"read_file","rawArgs":"{\"target_file\":\"a.rs\"}""#;
+        let with = |rest: &str| tool_call(&format!("{{{call}{rest}}}"));
+        assert_eq!(
+            with(r#","result":"{\"contents\":\"x\"}","status":"completed""#),
+            [r#"read_file {"target_file":"a.rs"}"#, "x"]
+        );
+        // On the result, or on the call when it returned nothing.
+        assert_eq!(
+            with(r#","result":"{\"error\":\"File not found\"}","status":"error""#),
+            [
+                r#"read_file {"target_file":"a.rs"}"#,
+                "File not found (error)"
+            ]
+        );
+        assert_eq!(
+            with(r#","status":"cancelled""#),
+            [r#"read_file {"target_file":"a.rs"} (cancelled)"#]
+        );
+        assert_eq!(
+            with(r#","status":"rejected""#),
+            [r#"read_file {"target_file":"a.rs"} (rejected)"#]
+        );
+        // No status, or one that is not a word, marks nothing.
+        for rest in ["", r#","status":7"#, r#","status":"Odd (status)""#] {
+            assert_eq!(
+                with(rest),
+                [r#"read_file {"target_file":"a.rs"}"#],
+                "{rest}"
+            );
+        }
+        // Without a call or result, a status makes no message.
+        assert!(tool_call(r#"{"status":"error"}"#).is_empty());
+    }
+
+    #[test]
+    fn results_holding_a_json_string_are_its_text() {
+        assert_eq!(
+            tool_call(r#"{"name":"edit_file","result":"\"ide result\""}"#),
+            ["edit_file", "ide result"]
+        );
+        // Decoded, it is shown as any result in a string is.
+        assert_eq!(
+            tool_call(r#"{"name":"t","result":" \"{\\\"output\\\":\\\"ok\\\"}\""}"#),
+            ["t", "ok"]
+        );
+        // Text that only starts with a quote stays as it is.
+        assert_eq!(
+            tool_call(r#"{"name":"t","result":"\"quoted\" and more"}"#),
+            ["t", r#""quoted" and more"#]
         );
     }
 

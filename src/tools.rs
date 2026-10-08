@@ -44,6 +44,65 @@ pub(crate) fn call(name: Option<&str>, args: Option<&Value>) -> String {
     }
 }
 
+/// The marker of a tool call that ended as `status` says, when that was not
+/// a success: `error` for one that failed, `cancelled` for one stopped, and
+/// any other status that is a word as it is, such as `rejected`. `None` for a
+/// call that succeeded, or a status that is no word.
+pub(crate) fn status_marker(status: &str) -> Option<String> {
+    let status = status.trim().to_ascii_lowercase();
+    match status.as_str() {
+        "" | "completed" | "complete" | "success" | "succeeded" | "successful" | "done" | "ok"
+        | "finished" => None,
+        "error" | "errored" | "failed" | "failure" | "fail" => Some("error".to_string()),
+        "cancelled" | "canceled" | "aborted" => Some("cancelled".to_string()),
+        other => is_marker_word(other).then(|| other.to_string()),
+    }
+}
+
+/// The longest status marker.
+const MARKER_MAX_CHARS: usize = 24;
+
+/// Whether `word` can be a status marker: a few lowercase letters, digits,
+/// `_` or `-`.
+fn is_marker_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= MARKER_MAX_CHARS
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
+}
+
+/// The text of a tool message of a call that ended as `marker` says, such as
+/// `not found (error)`: `text` followed by the marker in parentheses, or the
+/// marker alone without text.
+pub(crate) fn marked(text: Option<String>, marker: &str) -> String {
+    match text {
+        Some(text) if !text.trim().is_empty() => format!("{} ({marker})", text.trim_end()),
+        _ => format!("({marker})"),
+    }
+}
+
+/// A tool message's `content` split into its text and the status marker it
+/// ends with (see [`marked`]), such as `("not found", Some("(error)"))`.
+pub(crate) fn split_marker(content: &str) -> (&str, Option<&str>) {
+    let Some(open) = content
+        .strip_suffix(')')
+        .and_then(|inside| inside.rfind('('))
+    else {
+        return (content, None);
+    };
+    let word = &content[open + 1..content.len() - 1];
+    let text = &content[..open];
+    if !is_marker_word(word) {
+        return (content, None);
+    }
+    match text.strip_suffix(' ') {
+        Some(text) => (text, Some(&content[open..])),
+        None if text.is_empty() => (text, Some(content)),
+        None => (content, None),
+    }
+}
+
 /// What a tool returned, as text, or `None` for nothing:
 ///
 /// - a string as it is, unless it holds a JSON object, as the IDE stores
@@ -294,6 +353,26 @@ mod tests {
             result(&json!(long_name)).as_deref(),
             Some(long_name.as_str())
         );
+    }
+
+    #[test]
+    fn failed_calls_are_marked() {
+        assert_eq!(status_marker("completed"), None);
+        assert_eq!(status_marker(" Success "), None);
+        assert_eq!(status_marker(""), None);
+        assert_eq!(status_marker("error").as_deref(), Some("error"));
+        assert_eq!(status_marker("FAILED").as_deref(), Some("error"));
+        assert_eq!(status_marker("canceled").as_deref(), Some("cancelled"));
+        assert_eq!(status_marker("rejected").as_deref(), Some("rejected"));
+        assert_eq!(status_marker("not a (word)"), None);
+        assert_eq!(marked(Some("gone\n".into()), "error"), "gone (error)");
+        assert_eq!(marked(None, "cancelled"), "(cancelled)");
+        assert_eq!(marked(Some(" ".into()), "error"), "(error)");
+        assert_eq!(split_marker("gone (error)"), ("gone", Some("(error)")));
+        assert_eq!(split_marker("(cancelled)"), ("", Some("(cancelled)")));
+        for unmarked in ["gone", "f(x)", "a (two words)", "a (Error)", "()", "a ()"] {
+            assert_eq!(split_marker(unmarked), (unmarked, None), "{unmarked}");
+        }
     }
 
     #[test]
