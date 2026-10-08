@@ -6,8 +6,10 @@
 mod common;
 
 use common::*;
+use cursor_session::LoadOptions;
+use cursor_session::detect::StoragePaths;
 use cursor_session::export::{self, Format};
-use cursor_session::model::{Session, SessionSummary};
+use cursor_session::model::{Session, SessionSummary, Source};
 use cursor_session::ui;
 use unicode_width::UnicodeWidthStr;
 
@@ -56,6 +58,50 @@ fn list_table_with_color() {
     let rendered = ui::render_list(&sessions(), true, Some(100));
     assert!(rendered.contains('\u{1b}'));
     insta::assert_snapshot!("list_table_100_color", rendered);
+}
+
+/// The table's lines, without the "Found" header and the note under it.
+fn table_lines(rendered: &str) -> Vec<&str> {
+    rendered
+        .lines()
+        .skip(2)
+        .take_while(|line| line.starts_with(['┌', '│', '╞', '└']))
+        .collect()
+}
+
+#[test]
+fn list_table_fits_titles_with_wide_characters() {
+    // comfy-table 7 measured wrapped cells in bytes, so a title holding a
+    // multi-byte character, such as the `…` of every shortened title, got a
+    // wider column than it needed. 0.3.0 padded TITLE with blanks to the full
+    // width here; comfy-table 8 sizes it to its longest line.
+    let rendered = ui::render_list(&sessions(), false, Some(64));
+    let table = table_lines(&rendered);
+    assert!(table.iter().all(|line| line.width() < 64), "{rendered}");
+    insta::assert_snapshot!("list_table_064", rendered);
+
+    // At 58 columns 0.3.0 wrapped the date of the static fixture's session
+    // onto two lines; now the date stays whole and the title wraps.
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/home/.cursor");
+    let paths = StoragePaths {
+        chats_dir: Some(fixture.join("chats")),
+        projects_dir: Some(fixture.join("projects")),
+        ..Default::default()
+    };
+    let only_agent = LoadOptions {
+        source: Some(Source::Agent),
+        ..Default::default()
+    };
+    let loaded = cursor_session::load_sessions(&paths, &only_agent).unwrap();
+    let rendered = ui::render_list(&loaded.sessions, false, Some(58));
+    let table = table_lines(&rendered);
+    assert!(table.iter().all(|line| line.width() <= 58), "{rendered}");
+    assert!(
+        table.iter().any(|line| line.contains("2023-11-14 22:15")),
+        "{rendered}"
+    );
+    insta::assert_snapshot!("list_table_fixture_home_058", rendered);
 }
 
 #[test]
@@ -129,5 +175,52 @@ fn cli_json_output() {
     insta::assert_snapshot!(
         "cli_show_ide_json",
         cli_stdout(&fixture, &["show", "c0ffee00", "--json"])
+    );
+}
+
+#[test]
+fn cli_search_output() {
+    let fixture = standard();
+    insta::assert_snapshot!("search_plain", cli_stdout(&fixture, &["search", "plan"]));
+    insta::assert_snapshot!(
+        "search_color",
+        cli_stdout(
+            &fixture,
+            &["search", "PLAN", "--color", "always", "--context", "8"]
+        )
+    );
+    insta::assert_snapshot!(
+        "search_json",
+        cli_stdout(
+            &fixture,
+            &["search", "MIGRATION", "\"plan looks\"", "--json"]
+        )
+    );
+}
+
+#[test]
+fn cli_handoff_stdout() {
+    let fixture = standard();
+    for (name, id) in [
+        ("cli_handoff_agent", "f4eea6d2"),
+        ("cli_handoff_ide", "c0ffee00"),
+    ] {
+        let out = cli_stdout(&fixture, &["handoff", id, "--stdout"]);
+        assert!(!out.contains('\u{1b}'));
+        insta::assert_snapshot!(name, out);
+    }
+    insta::assert_snapshot!(
+        "cli_handoff_agent_last_no_preamble",
+        cli_stdout(
+            &fixture,
+            &[
+                "handoff",
+                "f4eea6d2",
+                "--stdout",
+                "--no-preamble",
+                "--limit",
+                "2"
+            ]
+        )
     );
 }

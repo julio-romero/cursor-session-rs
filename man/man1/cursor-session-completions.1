@@ -1,0 +1,66 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cursor-session-completions 1 "" "cursor-session 0.4.0" "User Commands"
+.SH NAME
+cursor\-session\-completions \- Print a shell completion script
+.SH SYNOPSIS
+\fBcursor\-session completions\fR [\fB\-\-storage\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fISHELL\fR> 
+.SH DESCRIPTION
+Print a shell completion script
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fISHELL\fR>
+The shell to complete in
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+bash
+.IP \(bu 2
+zsh
+.IP \(bu 2
+fish
+.RE
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-\-storage\fR \fI<PATH>\fR
+Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the storage paths in use and the rows, lines and files that were skipped to stderr
+.TP
+\fB\-\-color\fR \fI<WHEN>\fR [default: auto]
+When to use color
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.SH EXAMPLES
+.RS 4
+.nf
+cursor\-session completions bash > ~/.local/share/bash\-completion/completions/cursor\-session
+cursor\-session completions zsh > ~/.zfunc/_cursor\-session
+cursor\-session completions fish > ~/.config/fish/completions/cursor\-session.fish
+.fi
+.RE
+.SH "EXIT STATUS"
+.RS 4
+.nf
+0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+1  Error: session not found or deleted while being read, no sessions match (search), unreadable storage, failed healthcheck
+2  Usage error: unknown command or flag, invalid value
+.fi
+.RE

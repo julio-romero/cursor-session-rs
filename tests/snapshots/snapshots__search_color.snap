@@ -1,0 +1,14 @@
+---
+source: tests/snapshots.rs
+expression: "cli_stdout(&fixture,\n&[\"search\", \"PLAN\", \"--color\", \"always\", \"--context\", \"8\"])"
+---
+Found 3 matching session(s)
+
+d00dfeed-0000-4000-8000-000000000002  [35mide[39m    [2m2025-09-09 02:53[0m  データパイプラインの再設計レビュー 🚀 — überprüfe den Migrationsplan für Q4 und die Rollback-Strategie (ünïcödé ✓)
+  [[1m[35massistant[39m[0m] …ollback [1m[31mplan[39m[0m looks f…
+
+c0ffee00-0000-4000-8000-000000000001  [35mide[39m    [2m2025-09-07 00:06[0m  Dynamic table proposal
+  [[1m[35massistant[39m[0m] …re is a [1m[31mplan[39m[0m.
+
+f4eea6d2-d2d3-41ad-b290-824445295a15  [36magent[39m  [2m2025-09-04 16:33[0m  Langfuse Semantic Layer
+  [[1m[35massistant[39m[0m] …is the [1m[31mplan[39m[0m: 1. Mod…

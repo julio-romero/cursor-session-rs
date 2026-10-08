@@ -1,5 +1,5 @@
-//! Listing a large history holds no session's messages: peak memory stays
-//! far below the size of the history.
+//! Listing, searching or exporting a large history holds no more than one
+//! session's messages: peak memory stays far below the size of the history.
 //!
 //! On Linux a spawned child starts out with the peak memory of the process
 //! that spawned it, so this test writes the history a row at a time and checks
@@ -30,6 +30,11 @@ const IDE_CHATS: usize = 32;
 fn reply(n: usize) -> String {
     format!("Reply {n}: the retry policy backs off exponentially, starting at 500 ms with jitter. ")
         .repeat(24)
+}
+
+/// About 2 KB of what a command printed.
+fn command_output(n: usize) -> String {
+    format!("test retry::backoff_{n} ... ok\n").repeat(64)
 }
 
 fn agent_id(n: usize) -> String {
@@ -105,7 +110,18 @@ fn write_history(fixture: &Fixture) {
                 } else {
                     reply(headers.len())
                 };
-                let json = text_bubble(&bubble_id, kind, &text);
+                // Every other reply runs a command, whose output is kept with it.
+                let json = if headers.len() % 4 == 1 {
+                    tool_bubble(
+                        &bubble_id,
+                        &text,
+                        "run_terminal_cmd",
+                        &serde_json::json!({"command": "cargo test"}),
+                        &serde_json::json!({"output": command_output(headers.len()), "exitCodeV2": 0}),
+                    )
+                } else {
+                    text_bubble(&bubble_id, kind, &text)
+                };
                 bytes += json.to_string().len();
                 put(bubble(&id, &bubble_id, &json, Stored::Text));
                 headers.push((bubble_id, kind));
@@ -195,13 +211,58 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
 
     let newest_agent = agent_id(AGENT_SESSIONS - 1);
     let newest_chat = chat_id(IDE_CHATS - 1);
-    let commands: [&[&str]; 6] = [
+    let commands: [&[&str]; 21] = [
         &["list"],
         &["list", "--json"],
         &["list", "--limit", "5"],
+        &["list", "--since", "10000d"],
+        &["list", "--since", "10000d", "--json", "--limit", "5"],
         &["show", &newest_agent, "--json"],
         &["show", &newest_chat],
+        // Tool calls are read only for these, and only for this session.
+        &[
+            "show",
+            &newest_agent,
+            "--only",
+            "user,assistant,tool",
+            "--json",
+        ],
+        &["show", &newest_agent, "--only", "tool", "--short"],
+        &[
+            "show",
+            &newest_chat,
+            "--only",
+            "assistant,tool",
+            "--short",
+            "--json",
+        ],
+        &["show", &newest_chat, "--only", "tool"],
+        // A transcript of the whole session, built in memory.
+        &["handoff", &newest_agent, "--stdout"],
+        &["handoff", &newest_chat, "--stdout"],
         &["healthcheck"],
+        &["completions", "bash"],
+        &["man"],
+        // Every message of every session is searched, one at a time.
+        &["search", "retry", "JITTER"],
+        &[
+            "search",
+            "\"backs off exponentially\"",
+            "question",
+            "--json",
+        ],
+        &[
+            "search",
+            "question",
+            "--since",
+            "10000d",
+            "--context",
+            "500",
+        ],
+        &["search", "reply", "-n", "3", "--source", "ide"],
+        &[
+            "export", "--since", "10000d", "--limit", "2", "--out", "exports",
+        ],
     ];
     // A child starts out with this peak on Linux, so it must leave room.
     let own = own_peak_rss();
@@ -222,21 +283,88 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
         );
     }
 
-    // Counted without holding the messages, the counts are the messages.
-    let listed = json(&ok(&fixture, &["list", "--json"]));
-    let show = json(&ok(&fixture, &["show", &newest_chat, "--json"]));
-    let count = listed
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|session| session["id"] == newest_chat.as_str())
-        .unwrap()["message_count"]
-        .clone();
-    assert_eq!(count, show["message_count"]);
-    assert_eq!(
-        show["messages"].as_array().unwrap().len() as u64,
-        count.as_u64().unwrap()
+    // Every session matched, each with its best message.
+    let found = json(&ok(&fixture, &["search", "retry", "jitter", "--json"]));
+    assert_eq!(found.as_array().unwrap().len(), AGENT_SESSIONS + IDE_CHATS);
+    assert!(
+        found
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hit| hit["all_terms_in_one_message"] == true)
     );
+
+    // Counted without holding the messages, the counts are the messages,
+    // and the token estimates theirs.
+    let listed = json(&ok(&fixture, &["list", "--json"]));
+    for id in [&newest_chat, &newest_agent] {
+        let show = json(&ok(&fixture, &["show", id, "--json"]));
+        let summary = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["id"] == id.as_str())
+            .unwrap();
+        let count = summary["message_count"].clone();
+        assert_eq!(count, show["message_count"]);
+        assert_eq!(
+            show["messages"].as_array().unwrap().len() as u64,
+            count.as_u64().unwrap()
+        );
+        let chars: usize = show["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap().chars().count())
+            .sum();
+        assert_eq!(summary["token_estimate"], show["token_estimate"]);
+        assert_eq!(
+            summary["token_estimate"].as_u64().unwrap(),
+            chars.div_ceil(4) as u64
+        );
+    }
+    // The transcript holds every user and assistant message, and no tool
+    // call.
+    let handoff = ok(&fixture, &["handoff", &newest_agent, "--stdout"]);
+    let shown = json(&ok(&fixture, &["show", &newest_agent, "--json"]));
+    let roles =
+        handoff.matches("\n\n[user]\n").count() + handoff.matches("\n\n[assistant]\n").count();
+    assert_eq!(roles as u64, shown["message_count"].as_u64().unwrap());
+    assert!(!handoff.contains("src/lib.rs"));
+
+    // Each assistant message of the transcript makes a tool call.
+    let tools = json(&ok(
+        &fixture,
+        &["show", &newest_agent, "--only", "tool", "--json"],
+    ));
+    let tools = tools["messages"].as_array().unwrap();
+    assert!(!tools.is_empty());
+    assert!(
+        tools
+            .iter()
+            .all(|m| m["content"] == r#"Read {"path":"src/lib.rs"}"#)
+    );
+    // Every other reply of the chat runs a command: its call, then what it
+    // printed.
+    let tools = json(&ok(
+        &fixture,
+        &["show", &newest_chat, "--only", "tool", "--all", "--json"],
+    ));
+    let tools = tools["messages"].as_array().unwrap();
+    assert!(
+        !tools.is_empty() && tools.len().is_multiple_of(2),
+        "{}",
+        tools.len()
+    );
+    for pair in tools.chunks(2) {
+        assert_eq!(
+            pair[0]["content"],
+            r#"run_terminal_cmd {"command":"cargo test"}"#
+        );
+        let output = pair[1]["content"].as_str().unwrap();
+        assert!(output.starts_with("test retry::backoff_"), "{output}");
+        assert!(output.ends_with(" ... ok"), "{output}");
+    }
 }
 
 fn ok(fixture: &Fixture, args: &[&str]) -> String {

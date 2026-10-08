@@ -4,15 +4,15 @@ expression: rendered
 ---
 Found 7 session(s)
 
-┌───────────────┬────────┬──────┬──────────────────┬──────────────────────┐
-│ ID            ┆ SOURCE ┆ MSGS ┆ UPDATED          ┆ TITLE                │
-╞═══════════════╪════════╪══════╪══════════════════╪══════════════════════╡
-│ 5ba7ed00-1111 ┆ agent  ┆ 2    ┆ 2025-09-09 06:42 ┆ Shared session from… │
-│ d00dfeed-0000 ┆ ide    ┆ 2    ┆ 2025-09-09 02:53 ┆ データパイプライン…  │
-│ e1e10000-5555 ┆ ide    ┆ 0    ┆ 2025-09-07 13:00 ┆ Untitled             │
-│ c0ffee00-0000 ┆ ide    ┆ 3    ┆ 2025-09-07 00:06 ┆ Dynamic table propo… │
-│ 7b1e0c55-9d2a ┆ agent  ┆ 2    ┆ 2025-09-05 19:20 ┆ Fix flaky CI on Win… │
-│ f4eea6d2-d2d3 ┆ agent  ┆ 4    ┆ 2025-09-04 16:33 ┆ Langfuse Semantic L… │
-│ 0a1b2c3d-4e5f ┆ agent  ┆ 2    ┆ —                ┆ 0a1b2c3d-4e5f-4061-… │
-└───────────────┴────────┴──────┴──────────────────┴──────────────────────┘
-IDs shortened to 13 chars; `show` accepts a prefix.
+┌──────────┬────────┬──────┬────────┬──────────────────┬───────────────────┐
+│ ID       ┆ SOURCE ┆ MSGS ┆ TOKENS ┆ UPDATED          ┆ TITLE             │
+╞══════════╪════════╪══════╪════════╪══════════════════╪═══════════════════╡
+│ 5ba7ed00 ┆ agent  ┆ 2    ┆ 11     ┆ 2025-09-09 06:42 ┆ Shared session f… │
+│ d00dfeed ┆ ide    ┆ 2    ┆ 20     ┆ 2025-09-09 02:53 ┆ データパイプライ… │
+│ e1e10000 ┆ ide    ┆ 0    ┆ 0      ┆ 2025-09-07 13:00 ┆ Untitled          │
+│ c0ffee00 ┆ ide    ┆ 3    ┆ 32     ┆ 2025-09-07 00:06 ┆ Dynamic table pr… │
+│ 7b1e0c55 ┆ agent  ┆ 2    ┆ 20     ┆ 2025-09-05 19:20 ┆ Fix flaky CI on … │
+│ f4eea6d2 ┆ agent  ┆ 4    ┆ 41     ┆ 2025-09-04 16:33 ┆ Langfuse Semanti… │
+│ 0a1b2c3d ┆ agent  ┆ 2    ┆ 14     ┆ —                ┆ 0a1b2c3d-4e5f-40… │
+└──────────┴────────┴──────┴────────┴──────────────────┴───────────────────┘
+IDs shortened to 8 chars; `show` accepts a prefix.

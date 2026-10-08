@@ -46,6 +46,49 @@ This builds from source and needs Rust 1.88 or newer.
 [latest release](https://github.com/julio-romero/cursor-session-rs/releases/latest)
 and put `cursor-session.exe` on your `PATH`, or use `cargo install`.
 
+## Shell completions and man pages
+
+Every install can print the completion scripts itself, for bash, zsh and fish:
+
+```sh
+# bash (needs the bash-completion package)
+cursor-session completions bash > ~/.local/share/bash-completion/completions/cursor-session
+# zsh: then add `fpath+=~/.zfunc; autoload -Uz compinit; compinit` to ~/.zshrc
+mkdir -p ~/.zfunc && cursor-session completions zsh > ~/.zfunc/_cursor-session
+# fish
+cursor-session completions fish > ~/.config/fish/completions/cursor-session.fish
+```
+
+Run them again after an upgrade, so that new commands and flags complete.
+
+The release archives (`.tar.xz` and `.zip`) also carry the scripts in
+`completions/` (`cursor-session.bash`, `_cursor-session`,
+`cursor-session.fish`) and the man pages in `man/man1/`: `cursor-session.1`
+and one `cursor-session-<command>.1` per command.
+
+- **Homebrew** installs the same files, but not where shells and `man` look on
+  their own: they land in the package's share directory,
+  `$(brew --prefix)/share/cursor-session/`. To use them:
+
+  ```sh
+  # zsh, in ~/.zshrc before compinit
+  fpath+=("$(brew --prefix)/share/cursor-session/completions")
+  # bash, in ~/.bashrc
+  source "$(brew --prefix)/share/cursor-session/completions/cursor-session.bash"
+  # fish
+  ln -s "$(brew --prefix)/share/cursor-session/completions/cursor-session.fish" ~/.config/fish/completions/
+  # man pages: one at a time, or add the directory to MANPATH
+  man "$(brew --prefix)/share/cursor-session/man/man1/cursor-session.1"
+  export MANPATH="$(brew --prefix)/share/cursor-session/man:$MANPATH"
+  ```
+
+  Or ignore them and use `cursor-session completions <shell>` as above.
+- **Shell installer** installs only the binary. Use `cursor-session
+  completions <shell>`, and for man pages take them from the release archive or
+  print them with the hidden `cursor-session man` command:
+  `cursor-session man > cursor-session.1 && man ./cursor-session.1`.
+- **Cargo** installs only the binary, too: the same applies.
+
 ## Upgrade and uninstall
 
 - **Homebrew:** `brew upgrade cursor-session`, and `brew uninstall

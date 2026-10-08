@@ -33,12 +33,25 @@ AGENT = [
             ("user", "Monday, Oct 5, 2026, 8:40 AM (UTC-5)",
              "Webhook deliveries fail for good on the first 503. Add retries with exponential backoff."),
             ("assistant", None,
-             "I added `RetryPolicy` to `webhooks/sender.rs`: 5 attempts, backoff from 500 ms with "
-             "jitter, only on 5xx responses and timeouts."),
+             "I added `RetryPolicy` to `webhooks/sender.rs`: 5 attempts, backoff from 500 ms "
+             "doubling up to 30 s, with full jitter so that endpoints coming back up are not hit "
+             "by every sender at once. Only 5xx responses, 429 and timeouts are retried; any other "
+             "4xx fails at once, because sending the same payload again cannot fix it. Each attempt "
+             "is logged with its delay, and the final error keeps the last status code, so the "
+             "dead-letter queue shows why a delivery gave up.",
+             [
+                 ("Grep", {"pattern": "fn deliver", "path": "src/webhooks"},
+                  "src/webhooks/sender.rs:58:    pub async fn deliver(&self, event: &Event) "
+                  "-> Result<(), SendError> {"),
+                 ("Shell", {"command": "cargo test webhooks"},
+                  "running 9 tests\n.........\ntest result: ok. 9 passed; 0 failed; 0 ignored; "
+                  "finished in 0.84s"),
+             ]),
             ("user", "Monday, Oct 5, 2026, 9:05 AM (UTC-5)", "Make the attempt count configurable."),
             ("assistant", None,
              "Done. `WEBHOOK_MAX_ATTEMPTS` (default 5) is read in `Config::from_env`, and the tests "
-             "cover 1, 3 and 5 attempts."),
+             "cover 1, 3 and 5 attempts.",
+             []),
         ],
     },
     {
@@ -171,9 +184,20 @@ def write_agent(home):
         transcript = home / ".cursor" / "projects" / project / "agent-transcripts" / s["id"] / f"{s['id']}.jsonl"
         transcript.parent.mkdir(parents=True)
         lines = []
-        for role, stamp, text in s["messages"]:
+        for role, stamp, text, *tools in s["messages"]:
             if role == "user":
                 text = f"<timestamp>{stamp}</timestamp>\n<user_query>\n{text}\n</user_query>"
+                parts = [{"type": "text", "text": text}]
+            elif tools:
+                # Each call on a line of its own, its result on a `tool` line,
+                # then the answer: `show --only assistant,tool` lists them in
+                # order. An empty list of calls leaves only the answer.
+                for n, (name, args, result) in enumerate(tools[0]):
+                    call = f"call-{s['id'][:4]}-{len(lines)}-{n}"
+                    use = {"type": "tool_use", "id": call, "name": name, "input": args}
+                    lines.append(json.dumps({"role": "assistant", "message": {"content": [use]}}))
+                    done = {"type": "tool_result", "tool_use_id": call, "content": result}
+                    lines.append(json.dumps({"role": "tool", "message": {"content": [done]}}))
                 parts = [{"type": "text", "text": text}]
             else:
                 parts = [

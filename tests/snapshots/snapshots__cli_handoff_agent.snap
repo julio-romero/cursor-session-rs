@@ -1,0 +1,21 @@
+---
+source: tests/snapshots.rs
+expression: out
+---
+The following is a transcript from a Cursor session that ran out of credits. Continue from where it ended; do not summarize it back.
+
+[user]
+Design a semantic layer for Langfuse traces.
+
+[assistant]
+Let me look at the trace schema first.
+
+[user]
+Keep it read-only.
+
+[assistant]
+Here is the plan:
+1. Model traces as facts.
+2. Expose metrics.
+
+[end of transcript: 4 messages, ~100 tokens (estimate)]

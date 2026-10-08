@@ -12,7 +12,8 @@ expression: "cli_stdout(&fixture, &[\"list\", \"--json\"])"
     "model": null,
     "created_at": "2025-09-09T06:40:00Z",
     "updated_at": "2025-09-09T06:42:00Z",
-    "message_count": 2
+    "message_count": 2,
+    "token_estimate": 11
   },
   {
     "id": "d00dfeed-0000-4000-8000-000000000002",
@@ -23,7 +24,8 @@ expression: "cli_stdout(&fixture, &[\"list\", \"--json\"])"
     "model": null,
     "created_at": "2025-09-08T02:53:20Z",
     "updated_at": "2025-09-09T02:53:20Z",
-    "message_count": 2
+    "message_count": 2,
+    "token_estimate": 20
   },
   {
     "id": "e1e10000-5555-4666-8777-888899990000",
@@ -34,7 +36,8 @@ expression: "cli_stdout(&fixture, &[\"list\", \"--json\"])"
     "model": null,
     "created_at": "2025-09-07T13:00:00Z",
     "updated_at": null,
-    "message_count": 0
+    "message_count": 0,
+    "token_estimate": 0
   },
   {
     "id": "c0ffee00-0000-4000-8000-000000000001",
@@ -45,7 +48,8 @@ expression: "cli_stdout(&fixture, &[\"list\", \"--json\"])"
     "model": null,
     "created_at": "2025-09-06T23:06:40Z",
     "updated_at": "2025-09-07T00:06:40Z",
-    "message_count": 3
+    "message_count": 3,
+    "token_estimate": 32
   },
   {
     "id": "7b1e0c55-9d2a-4c4e-8f61-2a3b4c5d6e7f",
@@ -56,7 +60,8 @@ expression: "cli_stdout(&fixture, &[\"list\", \"--json\"])"
     "model": "gpt-5",
     "created_at": "2025-09-05T19:20:00Z",
     "updated_at": null,
-    "message_count": 2
+    "message_count": 2,
+    "token_estimate": 20
   },
   {
     "id": "f4eea6d2-d2d3-41ad-b290-824445295a15",
@@ -67,7 +72,8 @@ expression: "cli_stdout(&fixture, &[\"list\", \"--json\"])"
     "model": "claude-4.5-sonnet",
     "created_at": "2025-09-04T15:33:20Z",
     "updated_at": "2025-09-04T16:33:20Z",
-    "message_count": 4
+    "message_count": 4,
+    "token_estimate": 41
   },
   {
     "id": "0a1b2c3d-4e5f-4061-8728-394a5b6c7d8e",
@@ -78,6 +84,7 @@ expression: "cli_stdout(&fixture, &[\"list\", \"--json\"])"
     "model": null,
     "created_at": null,
     "updated_at": null,
-    "message_count": 2
+    "message_count": 2,
+    "token_estimate": 14
   }
 ]

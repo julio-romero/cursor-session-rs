@@ -15,45 +15,69 @@ table fitted to the window:
 ```text
 Found 8 session(s)
 
-┌──────────────────────────────────────┬────────┬──────┬──────────────────┬───────────────────┐
-│ ID                                   ┆ SOURCE ┆ MSGS ┆ UPDATED          ┆ TITLE             │
-╞══════════════════════════════════════╪════════╪══════╪══════════════════╪═══════════════════╡
-│ a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027 ┆ agent  ┆ 4    ┆ 2026-10-05 14:12 ┆ Add retry with b… │
-│ e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46 ┆ ide    ┆ 3    ┆ 2026-10-04 16:48 ┆ Speed up the mon… │
-│ 3f9c2a71-8b4e-4d6a-9e15-7c0b2d4f8a63 ┆ agent  ┆ 3    ┆ 2026-10-02 08:31 ┆ Fix flaky timezo… │
-│ 9d2f6b13-47ce-4a85-a0b9-e3c51d7f2864 ┆ ide    ┆ 2    ┆ 2026-09-28 11:09 ┆ Explain the migr… │
-│ 6c0e4b9a-3d21-4f87-9a5c-e1b7d2f04a38 ┆ agent  ┆ 2    ┆ 2026-09-24 15:37 ┆ Backfill custome… │
-│ 4a6d1c88-0f3e-4b52-96d7-c2e8a1b5f309 ┆ ide    ┆ 2    ┆ 2026-09-22 14:05 ┆ Add dark mode to… │
-│ b8e27f40-91c6-4e3d-8f0a-5d6c3b2a1e97 ┆ agent  ┆ 2    ┆ 2026-09-19 09:40 ┆ Cache the Rust w… │
-│ d3c9f7e1-5b84-4a06-b2e9-7f1a6c4d8b20 ┆ ide    ┆ 2    ┆ 2026-09-16 09:02 ┆ Review the OAuth… │
-└──────────────────────────────────────┴────────┴──────┴──────────────────┴───────────────────┘
+┌─────────────────────────┬────────┬──────┬────────┬──────────────────┬────────────────────────┐
+│ ID                      ┆ SOURCE ┆ MSGS ┆ TOKENS ┆ UPDATED          ┆ TITLE                  │
+╞═════════════════════════╪════════╪══════╪════════╪══════════════════╪════════════════════════╡
+│ a71d0e58-2c39-4f7b-b6a4 ┆ agent  ┆ 4    ┆ 175    ┆ 2026-10-05 14:12 ┆ Add retry with backof… │
+│ e5b8c4d2-6a1f-4e93-8d27 ┆ ide    ┆ 3    ┆ 80     ┆ 2026-10-04 16:48 ┆ Speed up the monthly … │
+│ 3f9c2a71-8b4e-4d6a-9e15 ┆ agent  ┆ 3    ┆ 57     ┆ 2026-10-02 08:31 ┆ Fix flaky timezone te… │
+│ 9d2f6b13-47ce-4a85-a0b9 ┆ ide    ┆ 2    ┆ 56     ┆ 2026-09-28 11:09 ┆ Explain the migration… │
+│ 6c0e4b9a-3d21-4f87-9a5c ┆ agent  ┆ 2    ┆ 51     ┆ 2026-09-24 15:37 ┆ Backfill customer reg… │
+│ 4a6d1c88-0f3e-4b52-96d7 ┆ ide    ┆ 2    ┆ 45     ┆ 2026-09-22 14:05 ┆ Add dark mode to the … │
+│ b8e27f40-91c6-4e3d-8f0a ┆ agent  ┆ 2    ┆ 37     ┆ 2026-09-19 09:40 ┆ Cache the Rust worksp… │
+│ d3c9f7e1-5b84-4a06-b2e9 ┆ ide    ┆ 2    ┆ 45     ┆ 2026-09-16 09:02 ┆ Review the OAuth call… │
+└─────────────────────────┴────────┴──────┴────────┴──────────────────┴────────────────────────┘
+IDs shortened to 23 chars; `show` accepts a prefix.
 ```
 
-Long titles are cut to fit. On narrower terminals the IDs are shortened to whole
-UUID groups (8, 13, 18 or 23 characters), with as many groups as it takes to
-tell every ID apart, and a footer says so:
+That is a 100-column terminal. Long titles are cut to fit. On narrower
+terminals the IDs are shortened to whole UUID groups (8, 13, 18 or 23
+characters), with as many groups as it takes to tell every ID apart, and the
+footer says so: 23 characters at 100 columns, 8 at 80.
 
-```text
-IDs shortened to 8 chars; `show` accepts a prefix.
-```
-
-When the output is piped or redirected, `list` prints plain columns with full
-IDs and titles and no color. This layout is stable for `grep`, `awk` and
-scripts:
+`TOKENS` estimates how many tokens the messages `show` prints by default take:
+the characters of the user and assistant messages divided by 4, rounded up.
+Tool calls and results and titles are not counted. It is an estimate, not any
+model's tokenizer count, and it is always the number `show` prints for the same
+session. A terminal table has the column only from 79 columns wide; below that
+it is left out, and the table keeps the columns it had before 0.4.0. In a
+78-column terminal:
 
 ```text
 Found 8 session(s)
 
-ID                                    SOURCE   MSGS  UPDATED           TITLE
+┌───────────────┬────────┬──────┬──────────────────┬────────────────────┐
+│ ID            ┆ SOURCE ┆ MSGS ┆ UPDATED          ┆ TITLE              │
+╞═══════════════╪════════╪══════╪══════════════════╪════════════════════╡
+│ a71d0e58-2c39 ┆ agent  ┆ 4    ┆ 2026-10-05 14:12 ┆ Add retry with ba… │
+│ e5b8c4d2-6a1f ┆ ide    ┆ 3    ┆ 2026-10-04 16:48 ┆ Speed up the mont… │
+│ 3f9c2a71-8b4e ┆ agent  ┆ 3    ┆ 2026-10-02 08:31 ┆ Fix flaky timezon… │
+│ 9d2f6b13-47ce ┆ ide    ┆ 2    ┆ 2026-09-28 11:09 ┆ Explain the migra… │
+│ 6c0e4b9a-3d21 ┆ agent  ┆ 2    ┆ 2026-09-24 15:37 ┆ Backfill customer… │
+│ 4a6d1c88-0f3e ┆ ide    ┆ 2    ┆ 2026-09-22 14:05 ┆ Add dark mode to … │
+│ b8e27f40-91c6 ┆ agent  ┆ 2    ┆ 2026-09-19 09:40 ┆ Cache the Rust wo… │
+│ d3c9f7e1-5b84 ┆ ide    ┆ 2    ┆ 2026-09-16 09:02 ┆ Review the OAuth … │
+└───────────────┴────────┴──────┴──────────────────┴────────────────────┘
+IDs shortened to 13 chars; `show` accepts a prefix.
+```
+
+When the output is piped or redirected, `list` prints plain columns with full
+IDs and titles and no color, `TOKENS` included. This layout is stable for
+`grep`, `awk` and scripts:
+
+```text
+Found 8 session(s)
+
+ID                                    SOURCE   MSGS    TOKENS  UPDATED           TITLE
 ----------------------------------------------------------------------------------------------------
-a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4  2026-10-05 14:12  Add retry with backoff to the webhook sender
-e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46  ide         3  2026-10-04 16:48  Speed up the monthly revenue dashboard query
-3f9c2a71-8b4e-4d6a-9e15-7c0b2d4f8a63  agent       3  2026-10-02 08:31  Fix flaky timezone test in invoice due dates
-9d2f6b13-47ce-4a85-a0b9-e3c51d7f2864  ide         2  2026-09-28 11:09  Explain the migration lock error
-6c0e4b9a-3d21-4f87-9a5c-e1b7d2f04a38  agent       2  2026-09-24 15:37  Backfill customer regions in a migration
-4a6d1c88-0f3e-4b52-96d7-c2e8a1b5f309  ide         2  2026-09-22 14:05  Add dark mode to the settings page
-b8e27f40-91c6-4e3d-8f0a-5d6c3b2a1e97  agent       2  2026-09-19 09:40  Cache the Rust workspace in GitHub Actions
-d3c9f7e1-5b84-4a06-b2e9-7f1a6c4d8b20  ide         2  2026-09-16 09:02  Review the OAuth callback handler for CSRF
+a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4       175  2026-10-05 14:12  Add retry with backoff to the webhook sender
+e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46  ide         3        80  2026-10-04 16:48  Speed up the monthly revenue dashboard query
+3f9c2a71-8b4e-4d6a-9e15-7c0b2d4f8a63  agent       3        57  2026-10-02 08:31  Fix flaky timezone test in invoice due dates
+9d2f6b13-47ce-4a85-a0b9-e3c51d7f2864  ide         2        56  2026-09-28 11:09  Explain the migration lock error
+6c0e4b9a-3d21-4f87-9a5c-e1b7d2f04a38  agent       2        51  2026-09-24 15:37  Backfill customer regions in a migration
+4a6d1c88-0f3e-4b52-96d7-c2e8a1b5f309  ide         2        45  2026-09-22 14:05  Add dark mode to the settings page
+b8e27f40-91c6-4e3d-8f0a-5d6c3b2a1e97  agent       2        37  2026-09-19 09:40  Cache the Rust workspace in GitHub Actions
+d3c9f7e1-5b84-4a06-b2e9-7f1a6c4d8b20  ide         2        45  2026-09-16 09:02  Review the OAuth callback handler for CSRF
 ```
 
 - `UPDATED` is in UTC. A session with no stored update time shows its creation time.
@@ -66,7 +90,7 @@ d3c9f7e1-5b84-4a06-b2e9-7f1a6c4d8b20  ide         2  2026-09-16 09:02  Review th
   Piped output is written as stored, so a title that contains a line break
   spans two lines there; `list --json` is exact for scripts.
 
-## Filter by source and count
+## Filter by source, count and age
 
 ```sh
 cursor-session list --source agent --limit 1
@@ -75,9 +99,9 @@ cursor-session list --source agent --limit 1
 ```text
 Found 1 session(s)
 
-ID                                    SOURCE   MSGS  UPDATED           TITLE
+ID                                    SOURCE   MSGS    TOKENS  UPDATED           TITLE
 ----------------------------------------------------------------------------------------------------
-a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4  2026-10-05 14:12  Add retry with backoff to the webhook sender
+a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4       175  2026-10-05 14:12  Add retry with backoff to the webhook sender
 ```
 
 - `--source agent` or `--source ide` reads only that store. The other one is
@@ -85,6 +109,28 @@ a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4  2026-10-05 14:12  Add retry
   was not found but the other one was, a `warning:` line says so.
 - `--limit N` (N ≥ 1) keeps the N most recently updated sessions. Only their
   messages are read to count them, so it stays quick on a large history.
+- `--since DURATION` keeps the sessions updated within that span of now: a
+  whole number of at least 1 and a unit, `s`, `m`, `h`, `d` or `w` (`45s`,
+  `90m`, `12h`, `30d`, `2w`). The time compared is the one `UPDATED` shows (the
+  update time, else the creation time); sessions with neither are left out. It
+  is applied before `--limit`, and the sessions it leaves out are not read. The
+  same flag works for `search` and `export`. An invalid value, such as `30D`,
+  `1.5h` or `-1d`, exits 2, as does a `--since` without a value: in
+  `--since --json` the flag after it is not taken for its value.
+
+Run on 2026-10-08, `list --since 7d` keeps the sessions updated since
+2026-10-01:
+
+```text
+$ cursor-session list --since 7d
+Found 3 session(s)
+
+ID                                    SOURCE   MSGS    TOKENS  UPDATED           TITLE
+----------------------------------------------------------------------------------------------------
+a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4       175  2026-10-05 14:12  Add retry with backoff to the webhook sender
+e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46  ide         3        80  2026-10-04 16:48  Speed up the monthly revenue dashboard query
+3f9c2a71-8b4e-4d6a-9e15-7c0b2d4f8a63  agent       3        57  2026-10-02 08:31  Fix flaky timezone test in invoice due dates
+```
 
 ## Show a session
 
@@ -101,6 +147,7 @@ model:     claude-4.5-sonnet
 created:   2026-10-05 13:40 UTC
 updated:   2026-10-05 14:12 UTC
 messages:  4
+tokens:    ~175 (estimate)
 
 2 earlier message(s) omitted. Use --limit N or --all to see more.
 
@@ -122,6 +169,247 @@ Done. `WEBHOOK_MAX_ATTEMPTS` (default 5) is read in `Config::from_env`, and the 
   hint says which store was not searched.
 - The time next to a message is local-time text as the Agent CLI stored it,
   or for IDE messages a UTC time such as `2026-10-04 16:21 UTC`.
+- `tokens:` is the estimate `list` shows as `TOKENS`. It and `messages:` are
+  always those of the whole session, whatever `--only`, `--short` or `--limit`
+  print.
+
+## Show only some messages, or shorter
+
+`--only ROLES` prints only the messages of those roles, a comma-separated list
+of `user`, `assistant` and `tool` (the flag can also be repeated). Tool calls
+and their results are read only when `tool` is named; without it they are left
+out, as they always were. `--short` cuts each message to its first 300
+characters followed by `…` (a message of exactly 300 is not cut), and each tool
+call or result to a one-line preview of about 120 characters.
+
+```sh
+cursor-session show a71d --only tool --short
+```
+
+```text
+Add retry with backoff to the webhook sender
+id:        a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027
+source:    agent
+workspace: /Users/dana/src/billing-api
+model:     claude-4.5-sonnet
+created:   2026-10-05 13:40 UTC
+updated:   2026-10-05 14:12 UTC
+messages:  4
+tokens:    ~175 (estimate)
+
+[tool]
+Grep {"pattern":"fn deliver","path":"src/webhooks"}
+
+[tool]
+src/webhooks/sender.rs:58: pub async fn deliver(&self, event: &Event) -> Result<(), SendError> {
+
+[tool]
+Shell {"command":"cargo test webhooks"}
+
+[tool]
+running 9 tests ......... test result: ok. 9 passed; 0 failed; 0 ignored; finished in 0.84s
+```
+
+Without `--short`, a result keeps its lines:
+
+```text
+$ cursor-session show a71d --only tool --limit 2 | tail -n 7
+[tool]
+Shell {"command":"cargo test webhooks"}
+
+[tool]
+running 9 tests
+.........
+test result: ok. 9 passed; 0 failed; 0 ignored; finished in 0.84s
+```
+
+- A tool call prints as its name and its arguments as compact JSON; its result
+  prints as its text. They come from the Agent CLI's `tool_use` and
+  `tool_result` parts and from the IDE's tool data. A result stored as a JSON
+  object shows its output field (such as `output`, `stdout` or `contents`), or
+  the object indented. Images print as `[image]`, other binary parts as
+  `[audio]`, `[document]`, `[file]` or `[blob]`, and base64 data as
+  `[binary data]`. A call that failed or was stopped ends in `(error)` or
+  `(cancelled)`.
+- With `tool` among the roles, text the model wrote around a tool call in one
+  Agent CLI line prints as separate messages around it; `messages:` still
+  counts it as one.
+- Messages of a type this version does not know (role `unknown`) print only
+  without `--only`.
+- `--limit N` and the terminal's default of 20 count only the messages
+  selected, and so does the "earlier message(s) omitted" note. When `--only`
+  selects no message, a line says `No messages match --only <roles>.`
+- The tool output shown is a best reading of formats Cursor does not document,
+  and may need adjusting as they change.
+- `--short` and `--only` work with `--json` too: the messages are filtered and
+  cut in the same JSON shape, and tool messages have the role `"tool"`.
+
+## Search
+
+```sh
+cursor-session search retry timeout
+```
+
+```text
+Found 2 matching session(s)
+
+a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent  2026-10-05 14:12  Add retry with backoff to the webhook sender
+  [assistant] I added `RetryPolicy` to `webhooks/sender.rs`: 5 attempts, backoff from 50…
+
+9d2f6b13-47ce-4a85-a0b9-e3c51d7f2864  ide    2026-09-28 11:09  Explain the migration lock error
+  [assistant] …stomers` while the migration ran `ALTER TABLE`. Set a `lock_timeout` and retry, or run it outside peak hours.
+```
+
+`search` finds the sessions whose messages contain every term of the query.
+
+- Words given as separate arguments are separate terms: `search retry timeout`
+  is two. One argument with spaces in it, as the shell passes `"connection
+  pool"`, is one phrase, and so is a phrase in double quotes inside an argument:
+  `search '"connection pool" timeout'`. A phrase's words match with any
+  whitespace between them. A quote mark always starts or ends a phrase, and an
+  unclosed one runs to the end.
+- Every term is literal text, never a pattern: `a.b`, `c++` and `(x)` match
+  themselves. Put `--` before a query that starts with `-`:
+  `search -- --force-with-lease`.
+- Case is ignored, Unicode-aware (`ÉCOLE` matches `école`, `Σ` matches `σ`),
+  with simple case folding, so `ß` does not match `SS`.
+- Terms can appear in any order and in different messages of the session.
+- The text searched is each message as `show` prints it. Titles, tool calls
+  and results, and images are not searched.
+
+Results are ranked: first the sessions with every term in a single message,
+then those with more matching messages (messages holding at least one term),
+then the most recently updated, then by ID. Each result shows the session's
+ID, source, update time and title, then its best message: the one with the
+most distinct terms, the earliest of any that tie. That message is put on one
+line and cut to `--context` characters (default 60, from 0 to 1000) on each side
+of its first match, with `…` where it was cut. In a terminal the matches are
+shown in bold red, and IDs are shortened as in the `list` table; piped output is
+plain with full IDs.
+
+| Flag                | Effect                                                         |
+| ------------------- | -------------------------------------------------------------- |
+| `-n`, `--limit N`   | Keep the N best matches                                        |
+| `--context N`       | Characters of the best message to show on each side of the match |
+| `--source agent\|ide` | Search one store only                                       |
+| `--since DURATION`  | Search only the sessions updated within that span, as for `list` |
+| `--json`            | Print the matches as JSON; see [JSON output](#json-output)     |
+
+```text
+$ cursor-session search the -n 2 --context 30
+Found 2 matching session(s)
+
+a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent  2026-10-05 14:12  Add retry with backoff to the webhook sender
+  [user] …k deliveries fail for good on the first 503. Add retries with e…
+
+6c0e4b9a-3d21-4f87-9a5c-e1b7d2f04a38  agent  2026-09-24 15:37  Backfill customer regions in a migration
+  [user] …t fills customers.region from the billing address country.
+```
+
+When nothing matches, `search` prints `error: no sessions match` and exits 1,
+with nothing on stdout, also with `--json`. A query with no terms (`search
+""`) or more than 64 terms is a usage error and exits 2. A session whose
+transcript disappears between listing and searching is left out, with a
+warning under `-v`.
+
+## Hand a session off to another agent
+
+When a Cursor session runs out of credits, `handoff` builds a transcript of it
+to paste into another agent and copies it to the clipboard.
+
+```sh
+cursor-session handoff 9d2f --stdout
+```
+
+```text
+The following is a transcript from a Cursor session that ran out of credits. Continue from where it ended; do not summarize it back.
+
+[user]
+What does `could not obtain lock on relation "customers"` mean during deploy?
+
+[assistant]
+Another transaction held a lock on `customers` while the migration ran `ALTER TABLE`. Set a `lock_timeout` and retry, or run it outside peak hours.
+
+[end of transcript: 2 messages, ~110 tokens (estimate)]
+```
+
+The transcript is:
+
+1. A preamble paragraph, the one above unless `--preamble TEXT` replaces it or
+   `--no-preamble` leaves it out.
+2. The session's user and assistant messages, each under a `[user]` or
+   `[assistant]` line, as `show --short --only user,assistant` gives them: cut
+   to 300 characters plus `…`, without tool calls and results.
+3. A trailer with the number of messages and the transcript's token estimate:
+   its characters, trailer included, divided by 4 and rounded up.
+
+| Flag               | Effect                                                         |
+| ------------------ | -------------------------------------------------------------- |
+| `--stdout`         | Print the transcript instead of copying it                     |
+| `--limit N`        | Keep only the last N messages                                  |
+| `--preamble TEXT`  | Start with TEXT instead of the default preamble                |
+| `--no-preamble`    | Start with the first message                                   |
+| `--source agent\|ide` | Look for the session in one store only                     |
+
+```text
+$ cursor-session handoff 9d2f --stdout --limit 1 --no-preamble
+[assistant]
+Another transaction held a lock on `customers` while the migration ran `ALTER TABLE`. Set a `lock_timeout` and retry, or run it outside peak hours.
+
+[end of transcript: 1 message, ~54 tokens (estimate)]
+```
+
+- The ID can be a unique, case-insensitive prefix, as for `show`.
+- Escape sequences and control characters in stored text are removed, so the
+  clipboard and a pipe get the same plain text. Each message is cut after they
+  are removed, so the 300 characters are visible ones; for such text the
+  transcript can differ from what `show --short` prints.
+- A line of a message or the preamble that reads as the transcript's own
+  structure, a `[user]` or `[assistant]` line or one starting
+  `[end of transcript`, gets a leading backslash (`\[assistant]`), so that
+  quoted text cannot fake where a message starts or the transcript ends.
+  Invisible characters are ignored when deciding that, and carriage returns and
+  the Unicode line and paragraph separators count as line breaks.
+- `--preamble` takes text that starts with `-`, such as `'- Continue the
+  refactor'`. A value that is one of handoff's own options, as in `--preamble
+  --stdout`, is taken for a missing text and is a usage error; write
+  `--preamble=--stdout` to use it as text. A preamble is trimmed, and a blank
+  one is a usage error.
+
+### Where the transcript goes
+
+Without `--stdout`, the transcript is copied to the system clipboard and
+`handoff` prints one line, such as `copied 2 messages (~110 tokens) to
+clipboard`.
+
+- **macOS:** through `/usr/bin/pbcopy`, with UTF-8 text. If `pbcopy` does not
+  finish within 5 seconds, the transcript is printed instead.
+- **Windows:** through the system clipboard, which keeps the text after the
+  command ends.
+- **Linux and other Unix systems with X11:** on X11 the program that copied
+  text must keep serving it, so `handoff` starts a copy of itself in the
+  background (the hidden `cursor-session serve-clipboard`), in its own process
+  group. It takes the clipboard once and serves it until something else is
+  copied, the X connection is lost (checked every 10 minutes), or 12 hours
+  pass; a clipboard manager then keeps the text. `handoff` says `copied` only
+  after the background copy confirms it owns the clipboard, and waits at most
+  5 seconds for that. If `handoff` is interrupted in those seconds, it prints
+  nothing, but the background copy may still take the clipboard. Over
+  `ssh -X`, the background copy keeps the X connection open until something
+  else is copied, which can keep the session from closing: use `--stdout`
+  there, or copy something else before logging out.
+- **Wayland without XWayland:** not supported, as only X11 is built in. Pipe the
+  transcript into `wl-copy`: `cursor-session handoff 9d2f --stdout | wl-copy`.
+
+When there is no clipboard (on Linux, `DISPLAY` is not set) or copying fails
+for any reason, the transcript is printed to stdout with one `warning: could
+not copy to the clipboard (<reason>); printing the transcript` line on stderr,
+and `handoff` still exits 0. In a headless or SSH session, use `--stdout`.
+
+A session with no user or assistant messages, only tool calls for example, is
+never copied: `handoff` warns `session <id> has no user or assistant messages;
+nothing to hand off, so the clipboard was left alone`. With `--stdout` it prints
+the transcript of no messages and warns `...; the transcript is empty`.
 
 ## Export
 
@@ -158,11 +446,24 @@ that stops early (`| head`), every file is still written.
   CLI sessions record a workspace. A session whose `meta.json` holds no path is
   still found by its exact path, through that hash.
 - `--source agent|ide` reads only that store, and `--limit N` exports only the
-  N most recently updated of the selected sessions.
+  N most recently updated of the selected sessions. `--since DURATION` exports
+  only the sessions updated within that span (see
+  [`--since`](#filter-by-source-count-and-age)); it is applied before `--limit`
+  and cannot be combined with `--session-id`.
 - An unknown `--session-id` gives `session not found`, a `--workspace` that
   matches nothing gives `no sessions matched workspace` with a way to list the
-  recorded ones, and no sessions at all gives `no sessions to export`. A file or directory that cannot be written gives
+  recorded ones, and no sessions at all gives `no sessions to export`. A
+  `--since` that selects nothing gives `no sessions updated in the last 1h to
+  export`, or with `--workspace`, ``no sessions of workspace `<w>` were updated
+  in the last 1h``. A file or directory that cannot be written gives
   `could not write <path>` or `could not create <dir>` with the reason. All exit 1.
+- An IDE chat that Cursor deletes after the sessions were listed is skipped
+  with `warning: session <id> was deleted while it was being read; it is not
+  exported`, printed also without `-v`, and the other sessions are still
+  written; the export exits 0 unless something else fails. A chat deleted
+  while the sessions are being listed is left out, as `list` leaves it out.
+  With `--session-id`, a chat deleted after its ID was looked up stops the
+  export with `session <id> was deleted while it was being read` and exits 1.
 - Exports contain the stored text unchanged. Times in `json` and `yaml` exports
   are epoch milliseconds; this is not the `--json` format described below.
   Markdown exports show times like `show` does.
@@ -209,8 +510,36 @@ the paths it looked in. A location reads `(incomplete)` when its store loaded bu
 a `warning:` line on stderr says what is missing or may be wrong, such as chats
 or titles in a format this version does not know. It exits 1 when no storage is
 found at all, or when a store that was found fails to load; the report then
-includes the reason and what to do about it. When rows or files were skipped, a
-`load warnings: N` line says so; `-v` lists them.
+includes the reason and what to do about it. When rows, lines or files were
+skipped, a `load warnings: N` line says so; `-v` lists them.
+
+## Shell completions and man pages
+
+`completions` prints a completion script for bash, zsh or fish:
+
+```sh
+# bash
+cursor-session completions bash > ~/.local/share/bash-completion/completions/cursor-session
+# zsh: then add `fpath+=~/.zfunc; autoload -Uz compinit; compinit` to ~/.zshrc
+cursor-session completions zsh > ~/.zfunc/_cursor-session
+# fish
+cursor-session completions fish > ~/.config/fish/completions/cursor-session.fish
+```
+
+Other shells are a usage error. The scripts complete subcommands, flags and
+their values, and directories for `export --out`. They also complete the hidden
+`man` subcommand.
+
+The hidden `man` command prints a man page in roff, for packagers: the overview
+page, or with a command name that command's page.
+
+```sh
+cursor-session man > cursor-session.1 && man ./cursor-session.1
+cursor-session man search > cursor-session-search.1
+```
+
+The same scripts and pages ship in the release archives and the Homebrew
+package; see [install.md](install.md#shell-completions-and-man-pages).
 
 ## Global flags
 
@@ -221,7 +550,7 @@ prints that subcommand's options.
 | Flag                          | Effect                                                                                               |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `--storage <PATH>`            | Read only this location instead of detecting Cursor's data. See [`--storage`](storage.md#--storage). |
-| `-v`, `--verbose`             | Print the storage paths in use and the rows and files that were skipped to stderr.                  |
+| `-v`, `--verbose`             | Print the storage paths in use and the rows, lines and files that were skipped to stderr.            |
 | `--color <auto\|always\|never>` | `auto` (default) colors only a terminal, and only when `NO_COLOR` is unset or empty and `TERM` is not `dumb`. `always` colors even when piped and overrides `NO_COLOR`. `never` prints no color codes. Help and usage errors follow the same rules. |
 | `-h`, `--help`                | `-h` prints a summary with examples. `--help` adds the data sources and exit codes.                  |
 | `-V`, `--version`             | Print the version.                                                                                   |
@@ -238,8 +567,8 @@ NO_COLOR=1 cursor-session list
 
 ## JSON output
 
-`list --json` prints an array of sessions and `show --json` prints one session
-with its messages.
+`list --json` prints an array of sessions, `show --json` prints one session
+with its messages, and `search --json` prints the matching sessions.
 
 - Written to stdout, pretty-printed with two-space indentation and a trailing
   newline. No color is added and nothing is fitted to the terminal.
@@ -262,8 +591,9 @@ with its messages.
 | `model`          | string or null       | Last model used, from the Agent CLI `store.db`. `null` for IDE sessions.                         |
 | `created_at`     | string or null       | RFC 3339 in UTC with whole seconds, such as `"2026-10-05T13:40:12Z"`. Works with jq's `fromdate`. |
 | `updated_at`     | string or null       | Same format as `created_at`. `null` when Cursor stored no update time; the list then uses `created_at`. |
-| `message_count`  | integer              | All messages in the session, even when `show --limit` returns fewer.                             |
-| `messages`       | array (`show` only)  | Objects with `role` (`"user"` or `"assistant"`, or `"unknown"` for an IDE message whose stored type this version does not know), `content` (string) and `timestamp`. |
+| `message_count`  | integer              | All messages in the session, even when `show --limit` or `--only` returns fewer.                 |
+| `token_estimate` | integer              | The estimate `list` shows as `TOKENS`: ceil(characters / 4) of the messages `show` prints by default. Whole session, whatever `show` filters. |
+| `messages`       | array (`show` only)  | Objects with `role` (`"user"` or `"assistant"`, `"tool"` with `--only tool`, or `"unknown"` for an IDE message whose stored type this version does not know), `content` (string) and `timestamp`. |
 
 A message `timestamp` is a string as Cursor stored it, or `null`: free text such
 as `"Friday, Oct 2, 2026, 10:29 AM (UTC+2)"` for Agent CLI messages, and epoch
@@ -281,7 +611,8 @@ $ cursor-session list --json --limit 2
     "model": "claude-4.5-sonnet",
     "created_at": "2026-10-05T13:40:12Z",
     "updated_at": "2026-10-05T14:12:47Z",
-    "message_count": 4
+    "message_count": 4,
+    "token_estimate": 175
   },
   {
     "id": "e5b8c4d2-6a1f-4e93-8d27-5f0a9b3c1e46",
@@ -292,7 +623,8 @@ $ cursor-session list --json --limit 2
     "model": null,
     "created_at": "2026-10-04T16:20:00Z",
     "updated_at": "2026-10-04T16:48:31Z",
-    "message_count": 3
+    "message_count": 3,
+    "token_estimate": 80
   }
 ]
 ```
@@ -309,6 +641,7 @@ $ cursor-session show 3f9c --json --limit 2
   "created_at": "2026-10-02T08:03:55Z",
   "updated_at": "2026-10-02T08:31:09Z",
   "message_count": 3,
+  "token_estimate": 57,
   "messages": [
     {
       "role": "assistant",
@@ -322,6 +655,39 @@ $ cursor-session show 3f9c --json --limit 2
     }
   ]
 }
+```
+
+`search --json` prints an array of the matching sessions, best first, `[]`
+never: no match exits 1 with nothing on stdout. Each item has these keys, in
+this order:
+
+| Key                        | Type           | Notes                                                                 |
+| -------------------------- | -------------- | --------------------------------------------------------------------- |
+| `id`, `title`, `source`, `workspace` | as above |                                                                  |
+| `created_at`, `updated_at` | string or null | As in `list --json`. Ranking uses `updated_at`, or `created_at` when it is `null`. |
+| `matching_messages`        | integer        | Messages holding at least one term                                    |
+| `all_terms_in_one_message` | boolean        | Whether one message holds every term                                  |
+| `snippet`                  | object         | The best message: `role`, `text` (plain, cut with `…`) and `message_index`, its 0-based index among the messages `show --json` lists |
+
+```console
+$ cursor-session search lock_timeout --json
+[
+  {
+    "id": "9d2f6b13-47ce-4a85-a0b9-e3c51d7f2864",
+    "title": "Explain the migration lock error",
+    "source": "ide",
+    "workspace": null,
+    "created_at": "2026-09-28T10:55:12Z",
+    "updated_at": "2026-09-28T11:09:44Z",
+    "matching_messages": 1,
+    "all_terms_in_one_message": true,
+    "snippet": {
+      "role": "assistant",
+      "text": "…n `customers` while the migration ran `ALTER TABLE`. Set a `lock_timeout` and retry, or run it outside peak hours.",
+      "message_index": 1
+    }
+  }
+]
 ```
 
 With [jq](https://jqlang.org):
@@ -346,8 +712,8 @@ $ cursor-session list --json | jq '[.[] | (.updated_at // .created_at) | select(
 | Code | Meaning                                                                                                     |
 | ---- | ----------------------------------------------------------------------------------------------------------- |
 | 0    | Success, including `--help`, `--version`, an empty list, and output cut short by a closed pipe (`cursor-session list \| head`), which prints nothing on stderr |
-| 1    | Runtime error: session not found or ambiguous, unreadable storage, changed storage format, failed healthcheck, nothing to export |
-| 2    | Usage error: unknown command or flag, invalid value (`list --limit 0`, `--source web`, an empty session ID or `--workspace`), `--limit` together with `--all`, missing subcommand |
+| 1    | Runtime error: session not found or ambiguous, session deleted while it was being read, no sessions match (`search`), unreadable storage, changed storage format, failed healthcheck, nothing to export |
+| 2    | Usage error: unknown command or flag, invalid value (`list --limit 0`, `--source web`, `--since 30D`, an empty session ID or `--workspace`, a search query without terms, `--context 1001`), `--limit` together with `--all`, `--since` together with `export --session-id`, one of handoff's options as `--preamble`, missing subcommand |
 
 Errors go to stderr as `error: <message>`, then one `caused by:` line per
 underlying cause, then hints:

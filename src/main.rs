@@ -1,5 +1,7 @@
 mod cli;
+mod clipboard;
 mod commands;
+mod generate;
 mod output;
 
 use std::env;
@@ -44,10 +46,22 @@ fn main() -> ExitCode {
     }
     let mut out = PipeWriter::new(stdout_sink(&opts));
     let mut err = diagnostics(io::stderr().lock());
-    let (paths, result) = match resolve_paths(cli.storage.as_deref()) {
+    let resolved = if cli.command.reads_storage() {
+        resolve_paths(cli.storage.as_deref())
+    } else {
+        Ok(StoragePaths::default())
+    };
+    let (paths, result) = match resolved {
         Ok(paths) => {
-            let result =
-                run(cli, &paths, &opts, &mut out, &mut err).and_then(|()| Ok(out.flush()?));
+            let result = run(
+                cli,
+                &paths,
+                &opts,
+                &mut out,
+                &mut err,
+                &mut clipboard::System,
+            )
+            .and_then(|()| Ok(out.flush()?));
             (paths, result)
         }
         Err(error) => (StoragePaths::default(), Err(error)),
@@ -69,9 +83,20 @@ fn main() -> ExitCode {
 }
 
 fn parse_cli(args: Vec<OsString>) -> Result<Cli, clap::Error> {
+    let args = cli::attach_negative_since(args);
     let mut command = Cli::command();
-    let mut matches = command.try_get_matches_from_mut(args)?;
-    Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.format(&mut command))
+    let mut matches = command.try_get_matches_from_mut(args.iter())?;
+    let cli =
+        Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.format(&mut command))?;
+    // An invalid value clap could not see, reported as clap reports one.
+    if let Err((name, message)) = cli.check().and_then(|()| cli.check_args(&args)) {
+        let kind = clap::error::ErrorKind::ValueValidation;
+        return Err(match command.find_subcommand_mut(name) {
+            Some(subcommand) => subcommand.error(kind, message),
+            None => command.error(kind, message),
+        });
+    }
+    Ok(cli)
 }
 
 /// Prints help, the version or a usage error where clap sends it, colored by
@@ -145,7 +170,11 @@ fn run(
     opts: &OutputOpts,
     out: &mut dyn Write,
     err: &mut dyn Write,
+    clipboard: &mut dyn clipboard::Clipboard,
 ) -> Result<()> {
+    if !cli.command.reads_storage() {
+        return commands::run(cli.command, paths, opts, out, err, clipboard);
+    }
     cursor_session::remove_stale_snapshot_copies();
     if cli.verbose {
         writeln!(err, "chats: {}", shown(paths.chats_dir.as_deref()))?;
@@ -153,7 +182,7 @@ fn run(
         writeln!(err, "ide db: {}", shown(paths.global_storage_db.as_deref()))?;
     }
 
-    commands::run(cli.command, paths, opts, out, err)
+    commands::run(cli.command, paths, opts, out, err, clipboard)
 }
 
 /// A storage path for the verbose lines.
@@ -219,6 +248,15 @@ mod tests {
         let mut buf = Vec::new();
         report(error, paths, &mut buf);
         String::from_utf8(buf).unwrap()
+    }
+
+    /// No test touches the system clipboard.
+    struct NoClipboard;
+
+    impl clipboard::Clipboard for NoClipboard {
+        fn set_text(&mut self, _: &str) -> Result<(), String> {
+            Err("no clipboard in tests".to_string())
+        }
     }
 
     fn args(args: &[&str]) -> Vec<OsString> {
@@ -287,7 +325,7 @@ mod tests {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let cli = parse_cli(argv).unwrap();
         let paths = resolve_paths(cli.storage.as_deref()).unwrap();
-        run(cli, &paths, &opts, &mut out, &mut err).unwrap();
+        run(cli, &paths, &opts, &mut out, &mut err, &mut NoClipboard).unwrap();
         let resolved = StoragePaths::from_custom(&projects, None).unwrap();
         assert_eq!(
             String::from_utf8(err).unwrap(),

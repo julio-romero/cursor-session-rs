@@ -467,7 +467,7 @@ fn every_export_format_round_trips_the_session() {
         assert_eq!(serde_json::to_value(&parsed).unwrap(), expected);
 
         let yaml = exported(session, Format::Yaml);
-        let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Session = serde_norway::from_str(&yaml).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), expected);
 
         let jsonl = exported(session, Format::Jsonl);
@@ -582,6 +582,86 @@ fn agent_problems_are_warnings_and_the_rest_loads() {
 }
 
 #[test]
+fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not() {
+    let fixture = Fixture::new();
+    let line = |value: serde_json::Value| format!("{value}\n");
+    let mid = fixture.write_transcript(
+        "Users-demo-project-x",
+        "mid",
+        Layout::Flat,
+        &[plain_message("user", "first")],
+    );
+    let mut text = fs::read_to_string(&mid).unwrap();
+    // Cut mid-line, a line of an unknown role, then lines that read.
+    text.push_str("{\"role\":\"assistant\",\"message\":{\"content\":\"sec\n");
+    text.push_str(&line(plain_message("bogusrole", "x")));
+    // Lines of the roles never shown are skipped quietly, whatever their
+    // message holds; a line without a role is not.
+    text.push_str(&line(plain_message("system", "rules")));
+    text.push_str(&line(json!({"role": "tool", "message": "plain result"})));
+    text.push_str(&line(json!({"role": "system", "message": ["x"]})));
+    // serde reads an array longer than the message it fills as a syntax
+    // error; such a line is still JSON, and of a role never shown.
+    text.push_str(&line(json!({"role": "system", "message": [1, 2]})));
+    text.push_str(&line(json!({"role": "tool", "message": [
+        {"type": "tool_result", "content": "a"},
+        {"type": "tool_result", "content": "b"},
+    ]})));
+    text.push_str(&line(json!({"message": {"content": "no role"}})));
+    text.push_str(&line(plain_message("user", "third")));
+    write(&mid, &text);
+    // A session still being written, cut in its last line.
+    let tail = fixture.write_transcript(
+        "Users-demo-project-x",
+        "tail",
+        Layout::Flat,
+        &[
+            plain_message("user", "first"),
+            plain_message("assistant", "reply"),
+        ],
+    );
+    let mut text = fs::read_to_string(&tail).unwrap();
+    text.push_str("{\"role\":\"user\",\"mess\n\n");
+    write(&tail, &text);
+
+    let loaded = fixture.load();
+    assert_eq!(contents(get(&loaded.sessions, "mid")), ["first", "third"]);
+    assert_eq!(contents(get(&loaded.sessions, "tail")), ["first", "reply"]);
+    assert_eq!(
+        loaded.warnings,
+        [format!("skipped 3 unreadable lines in {}", mid.display())]
+    );
+
+    // A last line that is JSON of another shape was written whole, also
+    // one whose message is an array serde reads as a syntax error.
+    let shape = fixture.write_transcript(
+        "Users-demo-project-x",
+        "shape",
+        Layout::Flat,
+        &[plain_message("user", "first")],
+    );
+    let mut text = fs::read_to_string(&shape).unwrap();
+    text.push_str(&line(json!({"role": "assistant", "message": 5})));
+    text.push_str(&line(json!({"role": "assistant", "message": ["a", "b"]})));
+    write(&shape, &text);
+    let loaded = fixture.load();
+    let first = mid.clone().min(shape.clone());
+    assert_eq!(
+        loaded.warnings,
+        [format!(
+            "skipped 5 unreadable lines in 2 transcripts (first: {})",
+            first.display()
+        )]
+    );
+    fs::remove_file(&mid).unwrap();
+    let loaded = fixture.load();
+    assert_eq!(
+        loaded.warnings,
+        [format!("skipped 2 unreadable lines in {}", shape.display())]
+    );
+}
+
+#[test]
 fn transcripts_whose_roles_were_renamed_are_an_unrecognized_format() {
     let fixture = Fixture::new();
     for id in ["a", "b"] {
@@ -607,6 +687,41 @@ fn transcripts_whose_roles_were_renamed_are_an_unrecognized_format() {
         err.to_string()
             .contains(": none of its 2 transcripts has a readable message.")
     );
+}
+
+#[test]
+fn transcripts_of_only_system_and_tool_lines_are_no_unrecognized_format() {
+    let fixture = Fixture::new();
+    // Messages that are not objects, as a tool result written as a string,
+    // or arrays, which serde reads as a syntax error when they are longer
+    // than the message they fill.
+    for id in ["a", "b"] {
+        fixture.write_transcript(
+            "Users-demo-project-x",
+            id,
+            Layout::Nested,
+            &[
+                json!({"role": "system", "message": "rules"}),
+                json!({"role": "tool", "message": ["result"]}),
+            ],
+        );
+    }
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        "c",
+        Layout::Nested,
+        &[
+            json!({"role": "system", "message": [1, 2]}),
+            json!({"role": "tool", "message": [
+                {"type": "tool_result", "content": "a"},
+                {"type": "tool_result", "content": "b"},
+            ]}),
+        ],
+    );
+    // Sessions without messages to show, as before; no error, no warning.
+    let loaded = fixture.load_source(Some(Source::Agent)).unwrap();
+    assert!(loaded.summaries.is_empty(), "{:?}", loaded.summaries);
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
 }
 
 #[test]
@@ -732,4 +847,300 @@ fn load_options_default_to_both_stores() {
     let fixture = standard();
     let both = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
     assert_eq!(both.sessions.len(), STANDARD_IDS.len());
+}
+
+#[test]
+fn updated_since_lists_only_recent_sessions_and_keeps_every_id() {
+    let fixture = standard();
+    let load = |updated_since, limit| {
+        load_sessions(
+            &fixture.paths(),
+            &LoadOptions {
+                updated_since,
+                limit,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let listed = |loaded: &cursor_session::Loaded| -> Vec<String> {
+        loaded.sessions.iter().map(|s| s.id.clone()).collect()
+    };
+    // By the time the UPDATED column shows: IDE_UNTITLED_ID was only created.
+    let recent = load(Some(1_757_250_000_000), None);
+    assert_eq!(listed(&recent), [SHARED_ID, IDE_BLOB_ID, IDE_UNTITLED_ID]);
+    assert_eq!(recent.ids, STANDARD_IDS);
+    let counts: Vec<usize> = recent.sessions.iter().map(|s| s.message_count).collect();
+    assert_eq!(counts, [2, 2, 0]);
+    // The limit applies to the sessions kept.
+    let limited = load(Some(1_757_250_000_000), Some(2));
+    assert_eq!(listed(&limited), [SHARED_ID, IDE_BLOB_ID]);
+    assert_eq!(limited.ids, STANDARD_IDS);
+    // A session without any time is never recent.
+    let all = load(Some(i64::MIN), None);
+    assert_eq!(listed(&all), &STANDARD_IDS[..6]);
+    assert!(load(Some(i64::MAX), None).sessions.is_empty());
+}
+
+#[test]
+fn visiting_messages_gives_the_messages_loaded() {
+    let fixture = standard();
+    for session in fixture.load().sessions {
+        let mut visited = Vec::new();
+        cursor_session::visit_messages(&session.summary, &mut |message| visited.push(message))
+            .unwrap();
+        let contents = |messages: &[Message]| -> Vec<(String, String)> {
+            messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect()
+        };
+        assert_eq!(
+            contents(&visited),
+            contents(&session.messages),
+            "{}",
+            session.id
+        );
+    }
+}
+
+#[test]
+fn search_session_scores_the_messages_show_lists() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let query = parse_query("PLAN here").unwrap();
+    let mut found = Vec::new();
+    for session in fixture.load().sessions {
+        let Some(hit) = cursor_session::search_session(&session.summary, &query, 60).unwrap()
+        else {
+            continue;
+        };
+        // The snippet is of the message `show --json` lists at its index.
+        let best = &session.messages[hit.score.best_message];
+        assert_eq!(hit.snippet.role, best.role);
+        found.push((
+            session.id.clone(),
+            hit.score.all_in_one,
+            hit.score.matching_messages,
+            hit.snippet.text,
+        ));
+    }
+    assert_eq!(
+        found,
+        [
+            (
+                IDE_TEXT_ID.to_string(),
+                true,
+                1,
+                "Here is a plan.".to_string()
+            ),
+            (
+                AGENT_ID.to_string(),
+                true,
+                1,
+                "Here is the plan: 1. Model traces as facts. 2. Expose metrics.".to_string()
+            ),
+        ]
+    );
+    // A term in no message: no hit, also where the other terms are.
+    let missing = parse_query("plan nowhere-to-be-found").unwrap();
+    for session in fixture.load().sessions {
+        assert!(
+            cursor_session::search_session(&session.summary, &missing, 60)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn searching_all_sessions_finds_what_searching_each_finds() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let loaded = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    for text in ["PLAN here", "question", "the", "nowhere-to-be-found"] {
+        let query = parse_query(text).unwrap();
+        let mut each: Vec<(String, usize, String)> = loaded
+            .sessions
+            .iter()
+            .filter_map(|summary| cursor_session::search_session(summary, &query, 60).unwrap())
+            .map(|hit| (hit.session.id, hit.score.best_message, hit.snippet.text))
+            .collect();
+        let mut all: Vec<(String, usize, String)> =
+            cursor_session::search_sessions(&loaded.sessions, &query, 60)
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|hit| (hit.session.id, hit.score.best_message, hit.snippet.text))
+                .collect();
+        each.sort();
+        all.sort();
+        assert_eq!(all, each, "{text}");
+    }
+}
+
+#[test]
+fn a_transcript_gone_since_it_was_listed_only_leaves_its_session_out() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let loaded = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    let query = parse_query("plan").unwrap();
+    let before = cursor_session::search_sessions(&loaded.sessions, &query, 60).unwrap();
+    assert!(before.warnings.is_empty(), "{:?}", before.warnings);
+    let found = |hits: &[cursor_session::search::Hit]| {
+        let mut ids: Vec<String> = hits.iter().map(|hit| hit.session.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    assert!(found(&before.hits).contains(&AGENT_ID.to_string()));
+    // Cursor removes the transcript between listing and searching.
+    let agent = loaded
+        .sessions
+        .iter()
+        .find(|session| session.id == AGENT_ID)
+        .unwrap();
+    let MessagesAt::Transcript(path) = &agent.messages_at else {
+        panic!("{:?}", agent.messages_at);
+    };
+    fs::remove_file(path).unwrap();
+    let after = cursor_session::search_sessions(&loaded.sessions, &query, 60).unwrap();
+    let mut expected = found(&before.hits);
+    expected.retain(|id| id != AGENT_ID);
+    assert_eq!(found(&after.hits), expected);
+    assert_eq!(after.warnings.len(), 1, "{:?}", after.warnings);
+    assert!(
+        after.warnings[0].starts_with(&format!(
+            "ignored unreadable transcript {}: ",
+            path.display()
+        )),
+        "{:?}",
+        after.warnings
+    );
+}
+
+#[test]
+fn tool_messages_join_the_others_only_when_asked_for() {
+    use cursor_session::view::{Role, View};
+    use cursor_session::{ReadOptions, load_messages_with};
+
+    let fixture = tools();
+    let full = fixture.load();
+    assert!(full.warnings.is_empty() && full.notices.is_empty());
+    for summary in &full.summaries {
+        let plain = get(&full.sessions, &summary.id);
+        assert!(plain.messages.iter().all(|m| !m.is_tool()));
+        let with = load_messages_with(summary, ReadOptions { tools: true }).unwrap();
+        let tools: Vec<&Message> = with.messages.iter().filter(|m| m.is_tool()).collect();
+        assert!(tools.len() >= 2, "{}", summary.id);
+        // The rest, and what the session counts, is the same.
+        let others: Vec<&str> = with
+            .messages
+            .iter()
+            .filter(|m| !m.is_tool())
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(others, contents(plain));
+        assert_eq!(with.message_count, summary.message_count);
+        assert_eq!(with.content_chars, summary.content_chars);
+        assert_eq!(with.token_estimate(), summary.token_estimate());
+
+        // A view without tool selects what is read without them.
+        let chat = View {
+            only: vec![Role::User, Role::Assistant],
+            short: false,
+        };
+        let selected: Vec<String> = chat
+            .apply(with.messages.clone())
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(selected, contents(plain));
+    }
+    let agent = load_messages_with(
+        full.summaries
+            .iter()
+            .find(|s| s.id == AGENT_TOOLS_ID)
+            .unwrap(),
+        ReadOptions { tools: true },
+    )
+    .unwrap();
+    let roles: Vec<&str> = agent.messages.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(
+        roles,
+        [
+            "user",
+            "assistant",
+            "tool",
+            "tool",
+            "tool",
+            "tool",
+            "assistant"
+        ]
+    );
+}
+
+#[test]
+fn a_transcript_of_only_tools_shows_them_when_asked_for() {
+    use cursor_session::{ReadOptions, load_session, load_session_with};
+
+    const ID: &str = "70015000-aaaa-4bbb-8ccc-000000000009";
+    let fixture = Fixture::new();
+    fixture.write_meta_json(
+        PROJECT_X,
+        ID,
+        &json!({"title": "Only tools", "updatedAtMs": 1_757_500_000_000_i64, "cwd": PROJECT_X}),
+    );
+    let before = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        ID,
+        Layout::Nested,
+        &[
+            assistant(&[tool_use("Shell", &json!({"command": "ls"}))]),
+            tool_line(&[tool_result(&json!("Cargo.toml"))]),
+        ],
+    );
+
+    // What lists, counts and shows it by default is as without the
+    // transcript.
+    let after = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    assert_eq!(
+        format!("{:?}", after.sessions),
+        format!("{:?}", before.sessions)
+    );
+    assert_eq!(after.ids, before.ids);
+    assert!(after.warnings.is_empty() && after.notices.is_empty());
+    let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+    let plain = load_session(
+        &fixture.paths(),
+        &LoadOptions::default(),
+        ID,
+        &mut warnings,
+        &mut notices,
+    )
+    .unwrap();
+    assert!(plain.messages.is_empty());
+    assert_eq!(plain.messages_at, MessagesAt::Nowhere);
+
+    let with = load_session_with(
+        &fixture.paths(),
+        &LoadOptions::default(),
+        ID,
+        ReadOptions { tools: true },
+    );
+    assert!(with.warnings.is_empty() && with.notices.is_empty());
+    let with = with.session.unwrap();
+    let shown: Vec<(&str, &str)> = with
+        .messages
+        .iter()
+        .map(|m| (m.role.as_str(), m.content.as_str()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("tool", r#"Shell {"command":"ls"}"#),
+            ("tool", "Cargo.toml")
+        ]
+    );
+    assert_eq!((with.message_count, with.token_estimate()), (0, 0));
 }

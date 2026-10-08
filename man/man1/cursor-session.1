@@ -1,0 +1,93 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cursor-session 1 "" "cursor-session 0.4.0" "User Commands"
+.SH NAME
+cursor\-session \- List, show, and export Cursor IDE and Agent CLI chat sessions
+.SH SYNOPSIS
+\fBcursor\-session\fR [\fB\-\-storage\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+List, show, and export Cursor IDE and Agent CLI chat sessions.
+.PP
+`search` finds the sessions whose messages hold a set of words, and `handoff`
+copies a session\*(Aqs transcript for another agent to continue it.
+.PP
+Reads two local stores and never writes to them:
+.RS 4
+.nf
+Agent CLI  ~/.cursor/chats plus transcripts in ~/.cursor/projects/*/agent\-transcripts
+IDE        Cursor/User/globalStorage/state.vscdb in Cursor\*(Aqs config directory
+.fi
+.RE
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-\-storage\fR \fI<PATH>\fR
+Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the storage paths in use and the rows, lines and files that were skipped to stderr
+.TP
+\fB\-\-color\fR \fI<WHEN>\fR [default: auto]
+When to use color
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.SH SUBCOMMANDS
+.TP
+cursor\-session\-list(1)
+List sessions, most recently updated first
+.TP
+cursor\-session\-show(1)
+Show messages from a session
+.TP
+cursor\-session\-search(1)
+Find the sessions whose messages hold every word of a query
+.TP
+cursor\-session\-export(1)
+Export sessions to files
+.TP
+cursor\-session\-handoff(1)
+Copy a session\*(Aqs transcript, to continue it with another agent
+.TP
+cursor\-session\-healthcheck(1)
+Check that session stores can be found and loaded
+.TP
+cursor\-session\-completions(1)
+Print a shell completion script
+.SH EXAMPLES
+.RS 4
+.nf
+cursor\-session list
+cursor\-session list \-\-source agent \-\-limit 10
+cursor\-session show f4eea6d2
+cursor\-session show f4eea6d2 \-\-json | jq \-r \*(Aq.messages[].content\*(Aq
+cursor\-session search retry backoff \-\-since 30d
+cursor\-session handoff f4eea6d2
+cursor\-session export \-\-format md \-\-session\-id f4eea6d2
+.fi
+.RE
+.SH "EXIT STATUS"
+.RS 4
+.nf
+0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+1  Error: session not found or deleted while being read, no sessions match (search), unreadable storage, failed healthcheck
+2  Usage error: unknown command or flag, invalid value
+.fi
+.RE
+.SH VERSION
+v0.4.0

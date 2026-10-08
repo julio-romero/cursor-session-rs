@@ -1,0 +1,332 @@
+#compdef cursor-session
+
+autoload -U is-at-least
+
+_cursor-session() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_cursor-session_commands" \
+"*::: :->cursor-session" \
+&& ret=0
+    case $state in
+    (cursor-session)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cursor-session-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
+ide\:"Cursor IDE composer chats (state.vscdb)"))' \
+'--limit=[Keep only the N most recently updated sessions]:N:_default' \
+'--since=[Keep only the sessions updated within this long\: a number and s, m, h, d or w (30d, 12h)]:DURATION:_default' \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'--json[Print a JSON array of session summaries]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
+ide\:"Cursor IDE composer chats (state.vscdb)"))' \
+'(--all)--limit=[Print only the last N messages \[default\: 20 in a terminal, all when piped or with --json\]]:N:_default' \
+'*--only=[Print only messages of these roles, comma-separated; \`tool\` adds the tool calls and results, which are left out otherwise, a call that failed or was stopped marked \`(error)\` or \`(cancelled)\`. --limit counts only the messages printed]:ROLES:((user\:"What the user wrote"
+assistant\:"The model'\''s replies"
+tool\:"Tool calls and their results"))' \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'--all[Print the full transcript]' \
+'--short[Cut each message to its first 300 characters, and tool calls and results to a one-line preview]' \
+'--json[Print the session and its messages as JSON]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session ID, or a unique prefix of one (case-insensitive):_default' \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+'--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
+ide\:"Cursor IDE composer chats (state.vscdb)"))' \
+'-n+[Keep only the N best matching sessions]:N:_default' \
+'--limit=[Keep only the N best matching sessions]:N:_default' \
+'--context=[Characters of the best message to show on each side of its first match, at most 1000]:CHARS:_default' \
+'--since=[Search only the sessions updated within this long\: a number and s, m, h, d or w (30d, 12h)]:DURATION:_default' \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'--json[Print a JSON array of the matching sessions, best first]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'*::query -- Terms that must all appear in a session'\''s messages; a quoted "phrase" is one term (put -- before a term that starts with -):_default' \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+'--format=[Output file format]:FORMAT:(md json jsonl yaml)' \
+'--out=[Directory to write into (created if missing)]:DIR:_files -/' \
+'(--workspace)--session-id=[Export only this session (ID or unique prefix)]:SESSION_ID:_default' \
+'--workspace=[Export the Agent CLI sessions of a workspace\: its path or a directory above it, directory names in its path, or the MD5 hash of its path]:WORKSPACE:_default' \
+'--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
+ide\:"Cursor IDE composer chats (state.vscdb)"))' \
+'(--session-id)--limit=[Export only the N most recently updated of the selected sessions]:N:_default' \
+'(--session-id)--since=[Export only the sessions updated within this long\: a number and s, m, h, d or w (30d, 12h)]:DURATION:_default' \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(handoff)
+_arguments "${_arguments_options[@]}" : \
+'--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
+ide\:"Cursor IDE composer chats (state.vscdb)"))' \
+'--limit=[Keep only the last N messages \[default\: all\]]:N:_default' \
+'(--no-preamble)--preamble=[Start the transcript with TEXT instead of the default preamble (TEXT may start with "-"; one of handoff'\''s options is text only attached, as in --preamble=--stdout)]:TEXT:_default' \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'--stdout[Print the transcript instead of copying it]' \
+'--no-preamble[Start the transcript with the first message]' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session ID, or a unique prefix of one (case-insensitive):_default' \
+&& ret=0
+;;
+(healthcheck)
+_arguments "${_arguments_options[@]}" : \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':shell -- The shell to complete in:(bash zsh fish)' \
+&& ret=0
+;;
+(man)
+_arguments "${_arguments_options[@]}" : \
+'--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
+'--color=[When to use color]:WHEN:(auto always never)' \
+'-v[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'--verbose[Print the storage paths in use and the rows, lines and files that were skipped to stderr]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::command -- Print the page of this command instead of the overview:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_cursor-session__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:cursor-session-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(handoff)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(healthcheck)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(man)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_cursor-session_commands] )) ||
+_cursor-session_commands() {
+    local commands; commands=(
+'list:List sessions, most recently updated first' \
+'show:Show messages from a session' \
+'search:Find the sessions whose messages hold every word of a query' \
+'export:Export sessions to files' \
+'handoff:Copy a session'\''s transcript, to continue it with another agent' \
+'healthcheck:Check that session stores can be found and loaded' \
+'completions:Print a shell completion script' \
+'man:Print a man page in roff format' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cursor-session commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__completions_commands] )) ||
+_cursor-session__subcmd__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session completions commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__export_commands] )) ||
+_cursor-session__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session export commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__handoff_commands] )) ||
+_cursor-session__subcmd__handoff_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session handoff commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__healthcheck_commands] )) ||
+_cursor-session__subcmd__healthcheck_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session healthcheck commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help_commands] )) ||
+_cursor-session__subcmd__help_commands() {
+    local commands; commands=(
+'list:List sessions, most recently updated first' \
+'show:Show messages from a session' \
+'search:Find the sessions whose messages hold every word of a query' \
+'export:Export sessions to files' \
+'handoff:Copy a session'\''s transcript, to continue it with another agent' \
+'healthcheck:Check that session stores can be found and loaded' \
+'completions:Print a shell completion script' \
+'man:Print a man page in roff format' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'cursor-session help commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__completions_commands] )) ||
+_cursor-session__subcmd__help__subcmd__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help completions commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__export_commands] )) ||
+_cursor-session__subcmd__help__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help export commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__handoff_commands] )) ||
+_cursor-session__subcmd__help__subcmd__handoff_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help handoff commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__healthcheck_commands] )) ||
+_cursor-session__subcmd__help__subcmd__healthcheck_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help healthcheck commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__help_commands] )) ||
+_cursor-session__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help help commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__list_commands] )) ||
+_cursor-session__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help list commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__man_commands] )) ||
+_cursor-session__subcmd__help__subcmd__man_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help man commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__search_commands] )) ||
+_cursor-session__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help search commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__help__subcmd__show_commands] )) ||
+_cursor-session__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session help show commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__list_commands] )) ||
+_cursor-session__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session list commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__man_commands] )) ||
+_cursor-session__subcmd__man_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session man commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__search_commands] )) ||
+_cursor-session__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session search commands' commands "$@"
+}
+(( $+functions[_cursor-session__subcmd__show_commands] )) ||
+_cursor-session__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'cursor-session show commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_cursor-session" ]; then
+    _cursor-session "$@"
+else
+    compdef _cursor-session cursor-session
+fi

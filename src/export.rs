@@ -128,7 +128,7 @@ fn export_json(session: &Session, writer: &mut impl Write) -> Result<()> {
 }
 
 fn export_yaml(session: &Session, writer: &mut impl Write) -> Result<()> {
-    let yaml = serde_yaml::to_string(session)?;
+    let yaml = serde_norway::to_string(session)?;
     writer.write_all(yaml.as_bytes()).map_err(Error::Write)?;
     Ok(())
 }

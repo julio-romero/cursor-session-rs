@@ -1,0 +1,21 @@
+---
+source: tests/snapshots.rs
+expression: "cli_stdout(&fixture, &[\"search\", \"MIGRATION\", \"\\\"plan looks\\\"\", \"--json\"])"
+---
+[
+  {
+    "id": "d00dfeed-0000-4000-8000-000000000002",
+    "title": "データパイプラインの再設計レビュー 🚀 — überprüfe den Migrationsplan für Q4 und die Rollback-Strategie (ünïcödé ✓)",
+    "source": "ide",
+    "workspace": null,
+    "created_at": "2025-09-08T02:53:20Z",
+    "updated_at": "2025-09-09T02:53:20Z",
+    "matching_messages": 2,
+    "all_terms_in_one_message": false,
+    "snippet": {
+      "role": "user",
+      "text": "Kannst du die Migration prüfen? 日本語も大丈夫です。",
+      "message_index": 0
+    }
+  }
+]

@@ -1,0 +1,100 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cursor-session-show 1 "" "cursor-session 0.4.0" "User Commands"
+.SH NAME
+cursor\-session\-show \- Show messages from a session
+.SH SYNOPSIS
+\fBcursor\-session show\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-all\fR] [\fB\-\-color\fR] [\fB\-\-only\fR] [\fB\-\-short\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fISESSION_ID\fR> 
+.SH DESCRIPTION
+Show messages from a session
+.PP
+The header\*(Aqs `tokens:` line (`token_estimate` in \-\-json) estimates how many tokens the messages `show` prints by default take: ceil(characters / 4). Tool calls and results are not counted. It is an estimate, not any model\*(Aqs tokenizer count.
+.PP
+The header\*(Aqs `messages:` and `tokens:` lines (`message_count` and `token_estimate` in \-\-json) are always those of the whole session, whatever \-\-only, \-\-short or \-\-limit print.
+.SH OPTIONS
+.TP
+\fB\-\-source\fR \fI<SOURCE>\fR
+Only read this store; the other one is never opened
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+agent: Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)
+.IP \(bu 2
+ide: Cursor IDE composer chats (state.vscdb)
+.RE
+.TP
+\fB\-\-limit\fR \fI<N>\fR
+Print only the last N messages [default: 20 in a terminal, all when piped or with \-\-json]
+.TP
+\fB\-\-all\fR
+Print the full transcript
+.TP
+\fB\-\-only\fR \fI<ROLES>\fR
+Print only messages of these roles, comma\-separated; `tool` adds the tool calls and results, which are left out otherwise, a call that failed or was stopped marked `(error)` or `(cancelled)`. \-\-limit counts only the messages printed
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+user: What the user wrote
+.IP \(bu 2
+assistant: The model\*(Aqs replies
+.IP \(bu 2
+tool: Tool calls and their results
+.RE
+.TP
+\fB\-\-short\fR
+Cut each message to its first 300 characters, and tool calls and results to a one\-line preview
+.TP
+\fB\-\-json\fR
+Print the session and its messages as JSON
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fISESSION_ID\fR>
+Session ID, or a unique prefix of one (case\-insensitive)
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-\-storage\fR \fI<PATH>\fR
+Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the storage paths in use and the rows, lines and files that were skipped to stderr
+.TP
+\fB\-\-color\fR \fI<WHEN>\fR [default: auto]
+When to use color
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.SH EXAMPLES
+.RS 4
+.nf
+cursor\-session show f4eea6d2
+cursor\-session show f4eea6d2 \-\-all
+cursor\-session show f4eea6d2 \-\-json \-\-limit 5
+cursor\-session show f4eea6d2 \-\-only user,assistant \-\-short
+cursor\-session show f4eea6d2 \-\-only tool \-\-limit 10
+.fi
+.RE
+.SH "EXIT STATUS"
+.RS 4
+.nf
+0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+1  Error: session not found or deleted while being read, no sessions match (search), unreadable storage, failed healthcheck
+2  Usage error: unknown command or flag, invalid value
+.fi
+.RE

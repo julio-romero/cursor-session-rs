@@ -14,7 +14,9 @@ with the minimum supported Rust version, 1.88.
 
 `tests/memory.rs` (Linux and macOS) builds about 100 MB of history and fails
 when any command peaks above 32 MB of resident memory: `list` counts messages
-without keeping them, and `show` and `export` read one session at a time.
+without keeping them, `show`, `export` and `handoff` read one session at a
+time, and `search` matches one session at a time and keeps only its hits.
+Every new command gets a line there.
 
 Output rendering is covered by [insta](https://insta.rs) snapshot tests. When
 output changes, `cargo test` fails and writes the new output next to the old
@@ -28,12 +30,46 @@ INSTA_UPDATE=always cargo test --locked   # without cargo-insta: accept all, the
 `INSTA_UPDATE=always` leaves the `.snap.new` files of earlier runs behind.
 Delete them with `find tests/snapshots -name '*.snap.new' -delete`.
 
+## Completions and man pages
+
+`completions/` and `man/man1/` hold the shell completion scripts and man pages
+the binary generates, committed so that release archives and the Homebrew
+package can ship them. `tests/generated.rs` fails when they are stale. After
+any change to the CLI (a command, a flag or help text) and after a version
+bump, since each man page's title carries the version, regenerate them and
+commit the result:
+
+```sh
+CURSOR_SESSION_REGENERATE=1 cargo test --locked --test generated
+git status completions man
+```
+
+## Benchmarks
+
+[`bench/`](../bench) times `list`, `show`, `search` and `handoff` with
+[hyperfine](https://github.com/sharkdp/hyperfine) on generated stores of 50,
+300 and 1000 sessions and records peak memory. Run it on a quiet machine with
+a release build:
+
+```sh
+cargo build --release --locked
+bench/run.sh                                                  # into bench/results
+BENCH_SIZES=50 bench/run.sh target/release/cursor-session /tmp/cs-bench   # quick check
+bench/run.sh target/release/cursor-session bench/results/0.4.0           # a release's baseline
+```
+
+The tables of two versions compare row by row; [bench/README.md](../bench/README.md)
+lists the rows and options. Commit only the Markdown tables of a release's
+baseline.
+
 ## Demo GIF
 
 `demo/demo.gif` is recorded with [VHS](https://github.com/charmbracelet/vhs)
 from invented sessions, never real data. `demo/make-fixture.py` writes them to
 `demo/home` (ignored by git), and the samples in these docs come from the same
-sessions:
+sessions. The tape shows `list`, `search`, `show --only assistant,tool --short`,
+`handoff --stdout` (never the real clipboard) and `export`; it avoids `--since`,
+whose output depends on the day it is recorded:
 
 ```sh
 cargo build --release
@@ -42,41 +78,10 @@ vhs demo/demo.tape
 ```
 
 To run the CLI against them yourself: `HOME="$PWD/demo/home" target/release/cursor-session list`.
+To check a recording, extract a frame per second with
+`ffmpeg -i demo/demo.gif -vf fps=1 /tmp/frame_%03d.png` and look at a few.
 
 ## Releasing
 
-Releases are built by [cargo-dist](https://github.com/axodotdev/cargo-dist)
-when a version tag is pushed. Before the first release, once:
-
-- Create the public repository `julio-romero/homebrew-tap` with at least one
-  commit (a README is enough).
-- Add the secret `HOMEBREW_TAP_TOKEN` to this repository: a fine-grained
-  personal access token with Contents read and write access to the tap only.
-- Add the secret `CARGO_REGISTRY_TOKEN`: a crates.io API token with the
-  publish-new and publish-update scopes, from an account with a verified email.
-- Make this repository public. Until then the Homebrew formula and the shell
-  installer download from private releases and fail with 404.
-
-`gh secret list --repo julio-romero/cursor-session-rs` should then show both
-secrets. Without them a tag push still creates the GitHub Release, and then
-the Homebrew and crates.io jobs fail. For each release:
-
-1. Set `version` in `Cargo.toml`, run `cargo check` to update `Cargo.lock`, then
-   commit and push to `master`.
-2. Wait for CI to pass on that commit. The Release workflow does not run the
-   tests itself.
-3. Check that `dist plan` prints `announcing vX.Y.Z`. Use dist 0.32.0, the
-   version `dist-workspace.toml` pins; a newer dist refuses this configuration.
-   Install it with `cargo install cargo-dist --version 0.32.0 --locked`, or with
-   `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh`.
-4. Push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-
-After changing `dist-workspace.toml`, run `dist generate` with that same
-version to update `.github/workflows/release.yml`. Moving to a newer dist is a
-change of its own: run `dist init` with it and review the regenerated workflow.
-
-The Release workflow builds archives for the five targets, creates the GitHub
-Release with the archives, checksums and the shell installer, pushes the
-formula to [julio-romero/homebrew-tap](https://github.com/julio-romero/homebrew-tap)
-and publishes the crate to crates.io. A pre-release tag such as `v1.0.0-rc.1`
-creates a GitHub pre-release and skips Homebrew and crates.io.
+How a release is cut, and the one-time setup it needs, is in
+[RELEASING.md](../RELEASING.md).

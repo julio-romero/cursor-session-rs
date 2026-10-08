@@ -1,0 +1,13 @@
+---
+source: tests/snapshots.rs
+expression: rendered
+---
+Found 1 session(s)
+
+┌──────────┬────────┬──────┬──────────────────┬──────────┐
+│ ID       ┆ SOURCE ┆ MSGS ┆ UPDATED          ┆ TITLE    │
+╞══════════╪════════╪══════╪══════════════════╪══════════╡
+│ f4eea6d2 ┆ agent  ┆ 3    ┆ 2023-11-14 22:15 ┆ Langfuse │
+│          ┆        ┆      ┆                  ┆ Semant…  │
+└──────────┴────────┴──────┴──────────────────┴──────────┘
+IDs shortened to 8 chars; `show` accepts a prefix.

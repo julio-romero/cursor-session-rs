@@ -1,9 +1,9 @@
 [package]
 name = "cursor-session"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
-description = "List, show, and export Cursor IDE and Agent CLI chat sessions"
+description = "List, show, search, and export Cursor IDE and Agent CLI chat sessions, and hand one off to another agent"
 license = "MIT"
 repository = "https://github.com/julio-romero/cursor-session-rs"
 homepage = "https://github.com/julio-romero/cursor-session-rs"
@@ -24,16 +24,23 @@ path = "src/main.rs"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-comfy-table = "7"
+clap_complete = "4.6"
+clap_mangen = "0.3"
+comfy-table = "8"
 crossterm = "0.29"
 md-5 = "0.10"
 owo-colors = "4"
-rusqlite = { version = "0.32", features = ["bundled"] }
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-serde_yaml = "0.9"
+serde_norway = "0.9"
 thiserror = "2"
 unicode-width = "0.2"
+
+# macOS copies with /usr/bin/pbcopy, so that no command links AppKit.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+arboard = { version = "3.6", default-features = false }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
@@ -42,6 +49,7 @@ libc = "0.2"
 assert_cmd = "2"
 insta = "1"
 predicates = "3"
+proptest = { version = "1", default-features = false, features = ["std"] }
 tempfile = "3"
 
 [target.'cfg(unix)'.dev-dependencies]
@@ -57,3 +65,5 @@ print_stdout = "deny"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = true
+codegen-units = 1

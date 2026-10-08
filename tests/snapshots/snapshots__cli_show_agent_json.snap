@@ -12,6 +12,7 @@ expression: "cli_stdout(&fixture, &[\"show\", \"f4eea6d2\", \"--json\"])"
   "created_at": "2025-09-04T15:33:20Z",
   "updated_at": "2025-09-04T16:33:20Z",
   "message_count": 4,
+  "token_estimate": 41,
   "messages": [
     {
       "role": "user",

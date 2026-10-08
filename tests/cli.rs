@@ -14,7 +14,18 @@ use cursor_session::model::{Message, Session};
 use cursor_session::ui;
 use serde_json::Value;
 
-const SUBCOMMANDS: [&str; 4] = ["list", "show", "export", "healthcheck"];
+const SUBCOMMANDS: [&str; 7] = [
+    "list",
+    "show",
+    "search",
+    "export",
+    "handoff",
+    "healthcheck",
+    "completions",
+];
+
+const DEFAULT_PREAMBLE: &str = "The following is a transcript from a Cursor session that ran out \
+     of credits. Continue from where it ended; do not summarize it back.";
 
 /// The start of a usage line. clap names the program after the file it ran
 /// from, which ends in `.exe` on Windows.
@@ -69,7 +80,7 @@ fn keys(value: &Value) -> Vec<&str> {
         .collect()
 }
 
-const SUMMARY_KEYS: [&str; 9] = [
+const SUMMARY_KEYS: [&str; 10] = [
     "id",
     "title",
     "source",
@@ -79,6 +90,7 @@ const SUMMARY_KEYS: [&str; 9] = [
     "created_at",
     "updated_at",
     "message_count",
+    "token_estimate",
 ];
 
 #[test]
@@ -106,13 +118,15 @@ fn help_describes_every_subcommand() {
         }
         assert!(help.contains("--storage <PATH>"));
         assert!(help.contains("Examples:"));
+        // `man` is for packagers.
+        assert!(!help.contains("\n  man "), "{flag}\n{help}");
     }
     let long = ok(&fixture, &["--help"]);
     assert!(long.contains("Exit codes:"));
     assert!(long.contains("~/.cursor/chats"));
     assert!(long.contains("state.vscdb"));
 
-    for command in SUBCOMMANDS {
+    for command in SUBCOMMANDS.into_iter().chain(["man"]) {
         let help = ok(&fixture, &[command, "--help"]);
         assert!(help.contains(&usage(command)), "{help}");
     }
@@ -120,6 +134,31 @@ fn help_describes_every_subcommand() {
         assert!(ok(&fixture, &["list", "--help"]).contains(flag), "{flag}");
         assert!(ok(&fixture, &["show", "--help"]).contains(flag), "{flag}");
     }
+}
+
+/// Completion scripts and man pages come from the binary alone: no storage
+/// is looked for, so neither a missing one nor `--storage` stops them.
+#[test]
+fn completions_and_man_pages_need_no_storage() {
+    let fixture = Fixture::new();
+    let missing = fixture.home().join("missing");
+    let missing = missing.to_str().unwrap();
+    for (args, starts) in [
+        (&["completions", "bash"][..], "_cursor__session() {\n"),
+        (&["completions", "zsh"], "#compdef cursor-session\n"),
+        (&["completions", "fish"], "# Print an optspec"),
+        (&["man"], ".ie \\n(.g .ds Aq"),
+        (&["man", "export"], ".ie \\n(.g .ds Aq"),
+    ] {
+        let plain = ok(&fixture, args);
+        assert!(plain.starts_with(starts), "{args:?}: {plain}");
+        let mut with_storage = vec!["-v", "--storage", missing, "--color", "always"];
+        with_storage.extend(args);
+        assert_eq!(ok(&fixture, &with_storage), plain, "{args:?}");
+    }
+    let page = ok(&fixture, &["man", "export"]);
+    assert!(page.contains("\n.TH cursor-session-export 1 "), "{page}");
+    assert!(page.contains("\\fB\\-\\-workspace\\fR"), "{page}");
 }
 
 #[test]
@@ -141,6 +180,25 @@ fn usage_errors_exit_2() {
         &["export", "--workspace", ""],
         &["list", "--limit", ""],
         &["--color", "sometimes", "list"],
+        &["completions"],
+        &["completions", "powershell"],
+        &["completions", "bash", "zsh"],
+        &["man", "bogus"],
+        &["man", "man"],
+        &["man", "help"],
+        &["handoff"],
+        &["handoff", AGENT_ID, "--limit", "0"],
+        &[
+            "handoff",
+            AGENT_ID,
+            "--stdout",
+            "--preamble",
+            "Go on.",
+            "--no-preamble",
+        ],
+        &["handoff", AGENT_ID, "--stdout", "--preamble", ""],
+        &["handoff", AGENT_ID, "--stdout", "--preamble"],
+        &["handoff", AGENT_ID, "--stdout", "--only", "tool"],
     ] {
         let output = run(&fixture, args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -249,6 +307,7 @@ fn list_json_has_the_documented_keys() {
         assert_eq!(keys(summary), SUMMARY_KEYS);
         assert!(["agent", "ide"].contains(&summary["source"].as_str().unwrap()));
         assert!(summary["message_count"].is_u64());
+        assert!(summary["token_estimate"].is_u64());
         for time in ["created_at", "updated_at"] {
             let value = &summary[time];
             assert!(
@@ -269,6 +328,8 @@ fn list_json_has_the_documented_keys() {
             "created_at": "2025-09-04T15:33:20Z",
             "updated_at": "2025-09-04T16:33:20Z",
             "message_count": 4,
+            // 162 characters in its four messages, the tool calls left out.
+            "token_estimate": 41,
         })
     );
     // No update time is shown as null, not as the creation time.
@@ -567,6 +628,7 @@ fn a_closed_pipe_ends_the_output_quietly() {
         &["list", "--color", "always"],
         &["show", "00000000", "--all"],
         &["show", "00000000", "--json"],
+        &["handoff", "00000000", "--stdout"],
     ] {
         // Far more than any pipe buffer, so the binary is mid-write when the
         // reader goes away.
@@ -604,6 +666,8 @@ fn a_full_stdout_is_an_error() {
         &["show", AGENT_ID, "--json"],
         &["--help"],
         &["--version"],
+        &["completions", "bash"],
+        &["man"],
     ] {
         let output = fixture
             .command()
@@ -880,7 +944,7 @@ fn export_writes_one_file_per_session_in_every_format() {
                     );
                 }
                 _ => {
-                    let parsed: Session = serde_yaml::from_str(&text).unwrap();
+                    let parsed: Session = serde_norway::from_str(&text).unwrap();
                     assert_eq!(serde_json::to_value(parsed).unwrap(), expected);
                 }
             }
@@ -1348,6 +1412,713 @@ fn piped_json_escapes_controls_a_terminal_would_act_on() {
     assert!(!out.contains(['\u{1b}', '\u{7}', '\u{7f}', '\u{9b}', '\u{9c}', '\u{9d}']));
 }
 
+/// The roles and contents of a `show --json`'s messages.
+fn messages(detail: &Value) -> Vec<(String, String)> {
+    detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            let text = |key: &str| m[key].as_str().unwrap().to_string();
+            (text("role"), text("content"))
+        })
+        .collect()
+}
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(role, content)| (role.to_string(), content.to_string()))
+        .collect()
+}
+
+const LONG_RESULT_PREVIEW: &str = "long line long line long line long line long line long line \
+     long line long line long line long line long line long line…";
+
+#[test]
+fn show_only_selects_roles_and_adds_tool_calls_on_request() {
+    let fixture = tools();
+    let detail = |args: &[&str]| json(&ok(&fixture, &[&["show"][..], args, &["--json"]].concat()));
+    let final_answer = format!(
+        "It is configured in src/config.rs.{}",
+        " Details follow.".repeat(20)
+    );
+    let long_result = "long line ".repeat(40).trim_end().to_string();
+
+    let all = detail(&[AGENT_TOOLS_ID, "--only", "user,assistant,tool"]);
+    assert_eq!(
+        messages(&all),
+        pairs(&[
+            ("user", "Where is langfuse configured?"),
+            ("assistant", "Let me search."),
+            ("tool", r#"Grep {"pattern":"langfuse"}"#),
+            ("tool", "src/config.rs:12: langfuse_host"),
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", &long_result),
+            ("assistant", &final_answer),
+        ])
+    );
+    // The summary stays the whole session's, tools left out.
+    let default = detail(&[AGENT_TOOLS_ID]);
+    assert_eq!(all["message_count"], 3);
+    assert_eq!(all["token_estimate"], default["token_estimate"]);
+    assert_eq!(messages(&default).len(), 3);
+    // Roles in any order and repeated flags select the same messages.
+    for only in [
+        &["--only", "tool,user,assistant"][..],
+        &["--only", "tool", "--only", "user,assistant"],
+    ] {
+        assert_eq!(detail(&[&[AGENT_TOOLS_ID][..], only].concat()), all);
+    }
+    // Without tool, it is what show prints by default.
+    let chat = detail(&[AGENT_TOOLS_ID, "--only", "user,assistant"]);
+    assert_eq!(chat, default);
+
+    let tools_only = detail(&[AGENT_TOOLS_ID, "--only", "tool"]);
+    assert_eq!(messages(&tools_only), messages(&all)[2..6]);
+    assert!(
+        tools_only["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["timestamp"].is_null())
+    );
+
+    let ide = detail(&[IDE_TOOLS_ID, "--only", "assistant,tool"]);
+    assert_eq!(
+        messages(&ide),
+        pairs(&[
+            ("assistant", "Listing them."),
+            ("tool", r#"list_dir {"relative_workspace_path":"."}"#),
+            // A result stored as JSON in a string, indented.
+            (
+                "tool",
+                "{\n  \"files\": [\n    \"Cargo.toml\",\n    \"src\"\n  ]\n}",
+            ),
+            ("assistant", "Two entries."),
+        ])
+    );
+    assert_eq!(ide["message_count"], 3);
+    assert_eq!(
+        messages(&detail(&[IDE_TOOLS_ID, "--only", "user"])),
+        pairs(&[("user", "List the files.")])
+    );
+}
+
+#[test]
+fn show_short_cuts_messages_and_previews_tool_results() {
+    let fixture = tools();
+    let detail = |args: &[&str]| json(&ok(&fixture, &[&["show"][..], args, &["--json"]].concat()));
+    let short = detail(&[AGENT_TOOLS_ID, "--only", "assistant,tool", "--short"]);
+    let final_answer = format!(
+        "It is configured in src/config.rs.{}",
+        " Details follow.".repeat(20)
+    );
+    let cut: String = final_answer.chars().take(300).collect();
+    assert_eq!(
+        messages(&short),
+        pairs(&[
+            ("assistant", "Let me search."),
+            ("tool", r#"Grep {"pattern":"langfuse"}"#),
+            ("tool", "src/config.rs:12: langfuse_host"),
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", LONG_RESULT_PREVIEW),
+            ("assistant", &format!("{cut}…")),
+        ])
+    );
+    assert_eq!(
+        short["token_estimate"],
+        detail(&[AGENT_TOOLS_ID])["token_estimate"]
+    );
+    // --limit counts the messages printed.
+    let last = detail(&[AGENT_TOOLS_ID, "--only", "tool", "--short", "--limit", "2"]);
+    assert_eq!(
+        messages(&last),
+        pairs(&[
+            ("tool", r#"Read {"path":"src/config.rs"}"#),
+            ("tool", LONG_RESULT_PREVIEW),
+        ])
+    );
+    // Short messages are printed whole.
+    let ide = detail(&[IDE_TOOLS_ID, "--short"]);
+    assert_eq!(ide, detail(&[IDE_TOOLS_ID]));
+
+    // The plain layout too, with the omitted messages counted among those
+    // selected.
+    let shown = ok(
+        &fixture,
+        &[
+            "show",
+            AGENT_TOOLS_ID,
+            "--only",
+            "tool",
+            "--short",
+            "--limit",
+            "2",
+        ],
+    );
+    assert!(
+        shown.ends_with(&format!(
+            "messages:  3\ntokens:    ~{} (estimate)\n\n\
+             2 earlier message(s) omitted. Use --limit N or --all to see more.\n\n\
+             [tool]\nRead {{\"path\":\"src/config.rs\"}}\n\n[tool]\n{LONG_RESULT_PREVIEW}\n",
+            short["token_estimate"]
+        )),
+        "{shown}"
+    );
+}
+
+/// Agent CLI session whose tool calls failed, from [`failed_tools`].
+const AGENT_FAILED_ID: &str = "70015000-aaaa-4bbb-8ccc-000000000003";
+/// IDE chat whose tool calls failed, from [`failed_tools`].
+const IDE_FAILED_ID: &str = "70015000-aaaa-4bbb-8ccc-000000000004";
+
+/// One session in each store whose tool calls failed or were stopped, with
+/// results of the shapes that are easy to show wrong.
+fn failed_tools() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write_meta_json(
+        PROJECT_X,
+        AGENT_FAILED_ID,
+        &serde_json::json!({
+            "title": "Agent with failed tools",
+            "createdAtMs": 1_757_500_000_000_i64,
+            "updatedAtMs": 1_757_500_060_000_i64,
+            "cwd": PROJECT_X,
+        }),
+    );
+    let mut failed = tool_result(&serde_json::json!(format!(
+        "No such file: {}",
+        "x".repeat(200)
+    )));
+    failed["is_error"] = Value::Bool(true);
+    let image = serde_json::json!({
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="},
+    });
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        AGENT_FAILED_ID,
+        Layout::Nested,
+        &[
+            user_query("Mon", "Read it."),
+            assistant(&[tool_use("Read", &serde_json::json!({"path": "gone.rs"}))]),
+            tool_line(&[failed]),
+            assistant(&[tool_use("Screenshot", &serde_json::json!({}))]),
+            tool_line(&[image]),
+            assistant(&[text_part("It is gone.")]),
+        ],
+    );
+    let with = |mut bubble: Value, status: &str, result: Option<&str>| {
+        let data = &mut bubble["toolFormerData"];
+        data["status"] = Value::String(status.into());
+        match result {
+            Some(result) => data["result"] = Value::String(result.into()),
+            None => drop(data.as_object_mut().unwrap().remove("result")),
+        }
+        bubble
+    };
+    let args = serde_json::json!({"command": "rm -rf build"});
+    let call = |id: &str| tool_bubble(id, "", "run_terminal_cmd", &args, &Value::Null);
+    fixture.write_ide_db(
+        Journal::Delete,
+        &[
+            composer(
+                IDE_FAILED_ID,
+                &composer_json(
+                    IDE_FAILED_ID,
+                    "IDE with failed tools",
+                    1_757_400_000_000,
+                    1_757_400_060_000,
+                    &[("f1", 1), ("f2", 2), ("f3", 2), ("f4", 2)],
+                ),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_FAILED_ID,
+                "f1",
+                &text_bubble("f1", 1, "Clean up."),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_FAILED_ID,
+                "f2",
+                &with(call("f2"), "error", Some(r#""permission denied""#)),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_FAILED_ID,
+                "f3",
+                &with(call("f3"), "cancelled", None),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_FAILED_ID,
+                "f4",
+                &with(call("f4"), "completed", Some(r#""done""#)),
+                Stored::Text,
+            ),
+        ],
+    );
+    fixture
+}
+
+#[test]
+fn show_marks_failed_tool_calls_and_shows_results_as_text() {
+    let fixture = failed_tools();
+    let detail = |args: &[&str]| json(&ok(&fixture, &[&["show"][..], args, &["--json"]].concat()));
+    let missing = format!("No such file: {}", "x".repeat(200));
+    assert_eq!(
+        messages(&detail(&[AGENT_FAILED_ID, "--only", "tool"])),
+        pairs(&[
+            ("tool", r#"Read {"path":"gone.rs"}"#),
+            ("tool", &format!("{missing} (error)")),
+            ("tool", "Screenshot {}"),
+            // An image placed in a tool line by itself.
+            ("tool", "[image]"),
+        ])
+    );
+    // The marker outlives --short's cut.
+    let preview: String = missing.chars().take(120).collect();
+    assert_eq!(
+        messages(&detail(&[AGENT_FAILED_ID, "--only", "tool", "--short"]))[1],
+        ("tool".to_string(), format!("{preview}… (error)"))
+    );
+    let call = r#"run_terminal_cmd {"command":"rm -rf build"}"#;
+    let ide = pairs(&[
+        ("tool", call),
+        // Results stored as JSON strings, shown without their quotes.
+        ("tool", "permission denied (error)"),
+        ("tool", &format!("{call} (cancelled)")),
+        ("tool", call),
+        ("tool", "done"),
+    ]);
+    assert_eq!(messages(&detail(&[IDE_FAILED_ID, "--only", "tool"])), ide);
+    assert_eq!(
+        messages(&detail(&[IDE_FAILED_ID, "--only", "tool", "--short"])),
+        ide
+    );
+    // Plain text says the same.
+    let shown = ok(&fixture, &["show", IDE_FAILED_ID, "--only", "tool"]);
+    assert!(
+        shown.contains("\n[tool]\npermission denied (error)\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn show_says_when_only_matches_no_message() {
+    let fixture = standard();
+    // A chat of user and assistant messages, without tool calls.
+    let plain = ok(&fixture, &["show", IDE_TEXT_ID]);
+    let header = &plain[..plain.find("\n\n").unwrap() + 1];
+    assert!(
+        plain.contains("\n[user") && !plain.contains("[tool"),
+        "{plain}"
+    );
+    for (only, note) in [
+        ("tool", "No messages match --only tool."),
+        ("tool,tool", "No messages match --only tool,tool."),
+    ] {
+        let shown = ok(&fixture, &["show", IDE_TEXT_ID, "--only", only]);
+        assert_eq!(shown, format!("{header}\n{note}\n"), "{only}");
+        // JSON has no note: its empty list says it.
+        let args = ["show", IDE_TEXT_ID, "--only", only, "--json"];
+        assert_eq!(
+            json(&ok(&fixture, &args))["messages"],
+            serde_json::json!([])
+        );
+    }
+    // Messages that match leave no note.
+    let shown = ok(&fixture, &["show", IDE_TEXT_ID, "--only", "user"]);
+    assert!(!shown.contains("No messages match"), "{shown}");
+    // A session without messages has it only with --only.
+    let empty = ok(&fixture, &["show", IDE_UNTITLED_ID]);
+    assert!(!empty.contains("No messages match"), "{empty}");
+    assert_eq!(
+        ok(&fixture, &["show", IDE_UNTITLED_ID, "--only", "user"]),
+        format!("{empty}\nNo messages match --only user.\n")
+    );
+}
+
+#[test]
+fn show_prints_by_default_what_it_always_has() {
+    for fixture in [standard(), tools()] {
+        for session in fixture.load().sessions {
+            let id = session.id.as_str();
+            let plain = ok(&fixture, &["show", id]);
+            assert_eq!(
+                plain,
+                ui::render_show(&session, &session.messages, None, false)
+            );
+            let detail = ok(&fixture, &["show", id, "--json"]);
+            assert_eq!(
+                json(&detail)["messages"].as_array().unwrap().len(),
+                session.messages.len()
+            );
+            // Messages of an unknown role show only without --only.
+            if session.messages.iter().all(|m| m.role != "unknown") {
+                let selected = ok(&fixture, &["show", id, "--only", "user,assistant"]);
+                // Unless it says why it printed no message.
+                let plain = if session.messages.is_empty() {
+                    format!("{plain}\nNo messages match --only user,assistant.\n")
+                } else {
+                    plain
+                };
+                assert_eq!(selected, plain, "{id}");
+            }
+        }
+    }
+}
+
+#[test]
+fn listed_token_estimates_are_those_show_prints() {
+    for fixture in [standard(), tools()] {
+        let listed = json(&ok(&fixture, &["list", "--json"]));
+        let listed = listed.as_array().unwrap();
+        assert!(listed.iter().any(|s| s["source"] == "agent"));
+        assert!(listed.iter().any(|s| s["source"] == "ide"));
+        for summary in listed {
+            let id = summary["id"].as_str().unwrap();
+            let estimate = &summary["token_estimate"];
+            for extra in [&[][..], &["--only", "tool", "--short", "--limit", "1"]] {
+                let args = [&["show", id, "--json"][..], extra].concat();
+                assert_eq!(
+                    &json(&ok(&fixture, &args))["token_estimate"],
+                    estimate,
+                    "{id}"
+                );
+            }
+            let shown = ok(&fixture, &["show", id]);
+            assert!(
+                shown.contains(&format!("\ntokens:    ~{estimate} (estimate)\n")),
+                "{shown}"
+            );
+            let detail = json(&ok(&fixture, &["show", id, "--json"]));
+            let chars: usize = detail["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["content"].as_str().unwrap().chars().count())
+                .sum();
+            assert_eq!(estimate.as_u64().unwrap(), chars.div_ceil(4) as u64, "{id}");
+        }
+    }
+}
+
+#[test]
+fn show_only_takes_known_roles() {
+    let fixture = standard();
+    for only in ["", "bot", "user,", "user,,assistant", "unknown"] {
+        let output = run(&fixture, &["show", AGENT_ID, "--only", only]);
+        assert_eq!(output.status.code(), Some(2), "{only:?}");
+        assert_eq!(stdout(&output), "");
+        assert!(stderr(&output).starts_with("error: "), "{only:?}");
+    }
+    let output = run(&fixture, &["show", AGENT_ID, "--only"]);
+    assert_eq!(output.status.code(), Some(2));
+    let help = ok(&fixture, &["show", "-h"]);
+    for text in [
+        "--only <ROLES>",
+        "--short",
+        "[possible values: user, assistant, tool]",
+        "show f4eea6d2 --only user,assistant --short",
+    ] {
+        assert!(help.contains(text), "{text}: {help}");
+    }
+    for command in ["list", "show"] {
+        let help = ok(&fixture, &[command, "--help"]);
+        assert!(help.contains("ceil(characters / 4)"), "{help}");
+    }
+}
+
+/// The transcript `handoff` builds from `messages`, as `show --json` gives
+/// them, after `preamble`.
+fn transcript(preamble: Option<&str>, messages: &[(String, String)]) -> String {
+    let mut text = preamble.map_or_else(String::new, |preamble| format!("{preamble}\n\n"));
+    for (role, content) in messages {
+        text.push_str(&format!("[{role}]\n{content}\n\n"));
+    }
+    // The estimate counts the trailer that states it.
+    let trailer = |tokens: usize| {
+        let messages = match messages.len() {
+            1 => "1 message".to_string(),
+            n => format!("{n} messages"),
+        };
+        format!("[end of transcript: {messages}, ~{tokens} tokens (estimate)]\n")
+    };
+    let chars = text.chars().count();
+    let tokens = (chars.div_ceil(4)..)
+        .find(|&tokens| (chars + trailer(tokens).chars().count()).div_ceil(4) == tokens)
+        .unwrap();
+    text + &trailer(tokens)
+}
+
+#[test]
+fn handoff_prints_what_show_short_prints_of_user_and_assistant() {
+    for fixture in [standard(), tools()] {
+        for session in fixture.load().sessions {
+            let id = session.id.as_str();
+            let shown = json(&ok(
+                &fixture,
+                &["show", id, "--json", "--short", "--only", "user,assistant"],
+            ));
+            let shown = messages(&shown);
+            // A session of no such message is printed with a warning.
+            let quietly = |args: &[&str]| {
+                let output = run(&fixture, args);
+                assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+                let warning = if shown.is_empty() {
+                    format!(
+                        "warning: session {id} has no user or assistant messages; \
+                         the transcript is empty\n"
+                    )
+                } else {
+                    String::new()
+                };
+                assert_eq!(stderr(&output), warning, "{args:?}");
+                stdout(&output)
+            };
+            let handoff = quietly(&["handoff", id, "--stdout"]);
+            assert_eq!(handoff, transcript(Some(DEFAULT_PREAMBLE), &shown), "{id}");
+            assert!(!handoff.contains("[tool]") && !handoff.contains("[unknown]"));
+
+            let last = &shown[shown.len().saturating_sub(2)..];
+            assert_eq!(
+                quietly(&["handoff", id, "--stdout", "--no-preamble", "--limit", "2"]),
+                transcript(None, last),
+                "{id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn handoff_cuts_messages_short_and_leaves_tools_out() {
+    let fixture = tools();
+    let out = ok(
+        &fixture,
+        &[
+            "handoff",
+            AGENT_TOOLS_ID,
+            "--stdout",
+            "--preamble",
+            "Go on.",
+        ],
+    );
+    let answer: String = format!(
+        "It is configured in src/config.rs.{}",
+        " Details follow.".repeat(20)
+    )
+    .chars()
+    .take(300)
+    .collect();
+    assert!(
+        out.starts_with(&format!(
+            "Go on.\n\n[user]\nWhere is langfuse configured?\n\n\
+             [assistant]\nLet me search.\n\n[assistant]\n{answer}…\n\n\
+             [end of transcript: 3 messages, ~"
+        )),
+        "{out}"
+    );
+    assert!(!out.contains("Grep") && !out.contains("long line"), "{out}");
+    let tokens = out.chars().count().div_ceil(4);
+    assert!(
+        out.ends_with(&format!(", ~{tokens} tokens (estimate)]\n")),
+        "{out}"
+    );
+}
+
+#[test]
+fn handoff_preambles_may_start_with_a_hyphen() {
+    let fixture = standard();
+    for preamble in ["- Continue the refactor", "--- context ---", "-x"] {
+        let out = ok(
+            &fixture,
+            &["handoff", AGENT_ID, "--stdout", "--preamble", preamble],
+        );
+        assert!(
+            out.starts_with(&format!("{preamble}\n\n[user]\n")),
+            "{preamble}: {out}"
+        );
+        // Before the other options as well.
+        let out = ok(
+            &fixture,
+            &["handoff", "--preamble", preamble, AGENT_ID, "--stdout"],
+        );
+        assert!(
+            out.starts_with(&format!("{preamble}\n\n[user]\n")),
+            "{preamble}: {out}"
+        );
+    }
+    // One of handoff's own options after --preamble is taken for that option
+    // left without its text: a usage error, which says how to pass it as
+    // text. Nothing is printed or copied.
+    for option in ["--stdout", "--no-preamble", "-v", "--limit=3", "--help"] {
+        for args in [
+            &["handoff", AGENT_ID, "--stdout", "--preamble", option][..],
+            &["handoff", "--preamble", option, AGENT_ID, "--stdout"],
+        ] {
+            let output = run(&fixture, args);
+            assert_eq!(output.status.code(), Some(2), "{args:?}");
+            assert_eq!(stdout(&output), "", "{args:?}");
+            let err = stderr(&output);
+            assert!(
+                err.starts_with(&format!(
+                    "error: invalid value '{option}' for '--preamble <TEXT>'"
+                )),
+                "{args:?}: {err}"
+            );
+            assert!(
+                err.contains(&format!("--preamble='{option}'")),
+                "{args:?}: {err}"
+            );
+            assert!(err.contains("try '--help'"), "{args:?}: {err}");
+        }
+        // Attached to the flag, it is the text.
+        let attached = format!("--preamble={option}");
+        let out = ok(&fixture, &["handoff", AGENT_ID, "--stdout", &attached]);
+        assert!(
+            out.starts_with(&format!("{option}\n\n[user]\n")),
+            "{option}: {out}"
+        );
+    }
+}
+
+#[test]
+fn handoff_finds_sessions_as_show_does() {
+    let fixture = standard();
+    assert_eq!(
+        ok(&fixture, &["handoff", "F4EEA6D2", "--stdout"]),
+        ok(&fixture, &["handoff", AGENT_ID, "--stdout"])
+    );
+    assert_eq!(
+        fails(&fixture, &["handoff", "ffff", "--stdout"]),
+        "error: session not found: ffff\nrun `cursor-session list` to see session IDs\n"
+    );
+    let err = fails(
+        &fixture,
+        &["handoff", AGENT_ID, "--stdout", "--source", "ide"],
+    );
+    assert!(
+        err.starts_with(&format!("error: session not found: {AGENT_ID}\n")),
+        "{err}"
+    );
+    let ambiguous = ambiguous_fixture();
+    let err = fails(&ambiguous, &["handoff", "ABCD", "--stdout"]);
+    assert!(
+        err.starts_with("error: session ID prefix \"ABCD\" is ambiguous (2 matches)\n"),
+        "{err}"
+    );
+}
+
+#[test]
+fn handoff_transcripts_hold_no_escape_sequences() {
+    let fixture = escape_fixture();
+    for id in [ESCAPE_A, ESCAPE_B] {
+        let out = ok(
+            &fixture,
+            &["handoff", id, "--stdout", "--preamble", "Go \u{1b}[2Jon."],
+        );
+        assert!(!out.chars().any(|c| c.is_control() && c != '\n'), "{out:?}");
+        assert!(out.starts_with("Go on.\n\n[user]\n"), "{out:?}");
+    }
+    let out = ok(
+        &fixture,
+        &["handoff", ESCAPE_A, "--stdout", "--no-preamble"],
+    );
+    assert!(
+        out.starts_with("[user]\ncopy  bell  clear  done\n\n"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn handoff_help_shows_its_options_but_not_the_clipboard_server() {
+    let fixture = Fixture::new();
+    let help = ok(&fixture, &["handoff", "--help"]);
+    for text in [
+        "--stdout",
+        "--limit <N>",
+        "--preamble <TEXT>",
+        "--no-preamble",
+        "--source <SOURCE>",
+        "ceil(characters / 4)",
+        "DISPLAY",
+        "cursor-session handoff f4eea6d2 --stdout",
+        "Exit codes:",
+    ] {
+        assert!(help.contains(text), "{text}: {help}");
+    }
+    assert!(!ok(&fixture, &["--help"]).contains("serve-clipboard"));
+}
+
+#[test]
+fn handoff_of_no_message_warns() {
+    let fixture = Fixture::new();
+    fixture.write_meta_json(
+        PROJECT_X,
+        AGENT_TOOLS_ID,
+        &serde_json::json!({
+            "title": "Only tools",
+            "createdAtMs": 1_757_500_000_000_i64,
+            "cwd": PROJECT_X,
+        }),
+    );
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        AGENT_TOOLS_ID,
+        Layout::Nested,
+        &[
+            assistant(&[tool_use("Grep", &serde_json::json!({"pattern": "x"}))]),
+            tool_line(&[tool_result(&serde_json::json!("no match"))]),
+        ],
+    );
+    let warning = format!(
+        "warning: session {AGENT_TOOLS_ID} has no user or assistant messages; \
+         the transcript is empty\n"
+    );
+    // Without --stdout the binary would reach for the system clipboard if
+    // this broke, so that case is a unit test with a fake clipboard.
+    let output = run(&fixture, &["handoff", AGENT_TOOLS_ID, "--stdout"]);
+    assert!(output.status.success());
+    assert_eq!(stdout(&output), transcript(Some(DEFAULT_PREAMBLE), &[]));
+    assert_eq!(stderr(&output), warning);
+}
+
+/// Without an X11 display on Linux, `handoff` prints the transcript and
+/// warns, without trying the clipboard; on Wayland the warning names
+/// wl-copy.
+#[cfg(target_os = "linux")]
+#[test]
+fn handoff_without_a_display_prints_the_transcript() {
+    let fixture = standard();
+    let printed = ok(&fixture, &["handoff", AGENT_ID, "--stdout"]);
+    for (wayland, reason) in [
+        ("", "no display: DISPLAY is not set"),
+        (
+            "wayland-0",
+            "no X11 display: DISPLAY is not set; on Wayland, pipe --stdout into wl-copy",
+        ),
+    ] {
+        let output = fixture
+            .cmd()
+            .args(["handoff", AGENT_ID])
+            .env_remove("DISPLAY")
+            .env("WAYLAND_DISPLAY", wayland)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(stdout(&output), printed);
+        assert_eq!(
+            stderr(&output),
+            format!(
+                "warning: could not copy to the clipboard ({reason}); printing the transcript\n"
+            )
+        );
+    }
+}
+
 /// The binary in a pseudo-terminal, through script(1). Windows has no
 /// script(1), and ConPTY would need a new dependency, so these run on Unix.
 #[cfg(unix)]
@@ -1536,5 +2307,415 @@ mod tty {
             &env,
         ));
         assert_eq!(shown["messages"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn terminal_default_counts_only_the_messages_selected() {
+        let fixture = long_session_fixture(25);
+        let session = fixture.load().sessions.remove(0);
+        let answers: Vec<Message> = session
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .cloned()
+            .collect();
+        assert_eq!(answers.len(), 25);
+        let env = [("NO_COLOR", "1")];
+        assert_eq!(
+            run_tty(&fixture, &["show", "long", "--only", "assistant"], &env),
+            ui::render_show(&session, &answers[5..], Some(5), false)
+        );
+    }
+}
+
+/// An agent session `id` in workspace `/w`, updated `updated` (epoch ms), with
+/// a user message for each of `messages`.
+fn write_agent_session(fixture: &Fixture, id: &str, updated: Option<i64>, messages: &[&str]) {
+    let mut meta = serde_json::json!({"title": format!("Title {id}"), "cwd": "/w"});
+    if let Some(updated) = updated {
+        meta["createdAtMs"] = (updated - 1000).into();
+        meta["updatedAtMs"] = updated.into();
+    }
+    fixture.write_meta_json("/w", id, &meta);
+    let lines: Vec<Value> = messages
+        .iter()
+        .enumerate()
+        .map(|(n, text)| plain_message(if n % 2 == 0 { "user" } else { "assistant" }, text))
+        .collect();
+    fixture.write_transcript("w", id, Layout::Nested, &lines);
+}
+
+/// Sessions that match `alpha beta` in every way ranking tells apart.
+fn ranking_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    let day = 86_400_000;
+    let t = 1_757_000_000_000_i64;
+    // Spread out over many messages, and the newest: still last.
+    write_agent_session(
+        &fixture,
+        "spread",
+        Some(t + 9 * day),
+        &[
+            "alpha",
+            "beta",
+            "alpha again",
+            "beta again",
+            "ALPHA",
+            "more Beta",
+        ],
+    );
+    write_agent_session(
+        &fixture,
+        "one-old",
+        Some(t),
+        &["nothing", "Alpha and BETA together"],
+    );
+    write_agent_session(&fixture, "one-new", Some(t + day), &["beta alpha"]);
+    write_agent_session(
+        &fixture,
+        "one-twice",
+        Some(t - day),
+        &["alpha beta", "x", "beta, then alpha"],
+    );
+    write_agent_session(
+        &fixture,
+        "alpha-only",
+        Some(t + 5 * day),
+        &["alpha", "alpha"],
+    );
+    // No time at all: last of its kind.
+    write_agent_session(&fixture, "untimed", None, &["alpha beta"]);
+    fixture
+}
+
+#[test]
+fn search_ranks_every_term_in_one_message_first() {
+    let fixture = ranking_fixture();
+    let out = ok(&fixture, &["search", "alpha", "beta", "--json"]);
+    let hits = json(&out);
+    assert_eq!(
+        ids(&hits),
+        ["one-twice", "one-new", "one-old", "untimed", "spread"]
+    );
+    assert_eq!(
+        keys(&hits[0]),
+        [
+            "id",
+            "title",
+            "source",
+            "workspace",
+            "created_at",
+            "updated_at",
+            "matching_messages",
+            "all_terms_in_one_message",
+            "snippet"
+        ]
+    );
+    assert_eq!(keys(&hits[0]["snippet"]), ["role", "text", "message_index"]);
+    assert_eq!(hits[0]["matching_messages"], 2);
+    assert_eq!(hits[0]["all_terms_in_one_message"], true);
+    assert_eq!(hits[0]["title"], "Title one-twice");
+    assert_eq!(hits[0]["source"], "agent");
+    assert_eq!(hits[0]["workspace"], "/w");
+    assert_eq!(hits[0]["updated_at"], "2025-09-03T15:33:20Z");
+    // The best message is the first with the most terms; its index is the
+    // one `show --json` lists it at.
+    assert_eq!(
+        hits[2]["snippet"],
+        serde_json::json!({"role": "assistant", "text": "Alpha and BETA together", "message_index": 1})
+    );
+    let shown = json(&ok(&fixture, &["show", "one-old", "--json"]));
+    assert_eq!(shown["messages"][1]["content"], "Alpha and BETA together");
+    assert_eq!(hits[3]["updated_at"], Value::Null);
+    assert_eq!(hits[4]["matching_messages"], 6);
+    assert_eq!(hits[4]["all_terms_in_one_message"], false);
+    assert_eq!(hits[4]["snippet"]["message_index"], 0);
+
+    // Any order of the terms and any case; `-n` keeps the best.
+    let best = json(&ok(
+        &fixture,
+        &["search", "BETA", "Alpha", "-n", "2", "--json"],
+    ));
+    assert_eq!(ids(&best), ["one-twice", "one-new"]);
+    // One quoted phrase is one term.
+    let phrase = json(&ok(&fixture, &["search", "\"alpha beta\"", "--json"]));
+    assert_eq!(ids(&phrase), ["one-twice", "untimed"]);
+    let source = json(&ok(
+        &fixture,
+        &["search", "alpha", "--source", "agent", "--json"],
+    ));
+    assert_eq!(ids(&source).len(), 6);
+}
+
+#[test]
+fn search_prints_one_block_per_session() {
+    let fixture = ranking_fixture();
+    let out = ok(&fixture, &["search", "together", "--context", "6"]);
+    assert_eq!(
+        out,
+        "Found 1 matching session(s)\n\
+         \n\
+         one-old  agent  2025-09-04 15:33  Title one-old\n  \
+         [assistant] …BETA together\n"
+    );
+    // Piped output is plain unless color is forced; matches are then bold red.
+    let colored = ok(&fixture, &["search", "together", "--color", "always"]);
+    assert!(
+        colored.contains("\u{1b}[1m\u{1b}[31mtogether\u{1b}[39m\u{1b}[0m"),
+        "{colored:?}"
+    );
+    let output = fixture
+        .cmd()
+        .args(["search", "together", "--color", "auto"])
+        .env("TERM", "xterm-256color")
+        .output()
+        .unwrap();
+    assert!(!stdout(&output).contains('\u{1b}'));
+}
+
+#[test]
+fn search_phrases_are_words_with_spaces_and_match_any_whitespace() {
+    let fixture = Fixture::new();
+    let t = 1_757_000_000_000_i64;
+    write_agent_session(&fixture, "spaced", Some(t), &["big   spaced\tphrase here"]);
+    write_agent_session(&fixture, "apart", Some(t + 1000), &["phrase, spaced -x"]);
+    let found = |args: &[&str]| -> Vec<String> {
+        let args: Vec<&str> = ["search"].iter().chain(args).copied().collect();
+        json(&ok(&fixture, &args))
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| hit["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // The shell passes a quoted phrase as one word with a space in it.
+    assert_eq!(found(&["spaced phrase", "--json"]), ["spaced"]);
+    assert_eq!(found(&["\"big spaced\"", "--json"]), ["spaced"]);
+    assert_eq!(found(&["spaced", "phrase", "--json"]), ["apart", "spaced"]);
+    assert_eq!(found(&["--json", "--", "-x"]), ["apart"]);
+    // The snippet shows the phrase found, on one line.
+    let out = ok(&fixture, &["search", "SPACED PHRASE", "--color", "always"]);
+    assert!(
+        out.contains("big \u{1b}[1m\u{1b}[31mspaced phrase\u{1b}[39m\u{1b}[0m here"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn search_without_matches_exits_1() {
+    let fixture = ranking_fixture();
+    for args in [
+        &["search", "nowhere"][..],
+        &["search", "alpha", "nowhere", "--json"],
+        &["search", "\"beta alpha again\""],
+        &["search", "alpha.beta"],
+    ] {
+        assert_eq!(
+            fails(&fixture, args),
+            "error: no sessions match\n",
+            "{args:?}"
+        );
+    }
+    // Titles are not searched.
+    assert_eq!(
+        fails(&fixture, &["search", "Title"]),
+        "error: no sessions match\n"
+    );
+}
+
+#[test]
+fn search_usage_errors_exit_2() {
+    let fixture = ranking_fixture();
+    let many: Vec<String> = (0..65).map(|n| format!("t{n}")).collect();
+    let many: Vec<&str> = std::iter::once("search")
+        .chain(many.iter().map(String::as_str))
+        .collect();
+    for args in [
+        &["search"][..],
+        &["search", ""],
+        &["search", "  "],
+        &["search", "\"\""],
+        &many,
+        &["search", "x", "--context", "-1"],
+        &["search", "x", "--context", "many"],
+        &["search", "x", "--context", "1001"],
+        &["search", "x", "-n", "0"],
+        &["search", "x", "--since", "0d"],
+        &["search", "x", "--since", "30"],
+        &["search", "x", "--since", "1y"],
+        &["search", "x", "--source", "web"],
+        &["list", "--since", "yesterday"],
+        &["export", "--since", "1d", "--session-id", "one-old"],
+    ] {
+        let output = run(&fixture, args);
+        let err = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {err}");
+        assert_eq!(stdout(&output), "", "{args:?}");
+        assert!(err.starts_with("error: "), "{args:?}: {err}");
+        assert!(err.contains("try '--help'"), "{args:?}: {err}");
+    }
+    // A --since without a value does not take the flag after it, and a
+    // negative span is a value that is not valid.
+    for args in [
+        &["list", "--since", "--json"][..],
+        &["list", "--since", "--limit", "3"],
+        &["export", "--since", "--out", "x"],
+        &["search", "x", "--since", "--source", "agent"],
+    ] {
+        let output = run(&fixture, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let err = stderr(&output);
+        assert!(
+            err.starts_with("error: a value is required for '--since <DURATION>'"),
+            "{args:?}: {err}"
+        );
+    }
+    let output = run(&fixture, &["list", "--since", "-1d"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).starts_with("error: invalid value '-1d' for '--since <DURATION>'"),
+        "{}",
+        stderr(&output)
+    );
+    let output = run(&fixture, &["search", "\"\"", "\" \""]);
+    assert!(
+        stderr(&output).starts_with(&format!(
+            "error: invalid value '\"\" \" \"' for '<QUERY>...': the query has no terms\n\n{}",
+            usage("search [OPTIONS] <QUERY>...")
+        )),
+        "{}",
+        stderr(&output)
+    );
+    let output = run(&fixture, &many);
+    assert!(stderr(&output).contains(": the query has 65 terms; at most 64 are allowed\n"));
+}
+
+/// Sessions updated an hour, ten days and a hundred days ago, and one without
+/// any time.
+fn recent_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    let now = chrono::Utc::now().timestamp_millis();
+    let hour = 3_600_000;
+    write_agent_session(&fixture, "hour", Some(now - hour), &["needle one"]);
+    write_agent_session(&fixture, "days", Some(now - 240 * hour), &["needle ten"]);
+    write_agent_session(
+        &fixture,
+        "months",
+        Some(now - 2400 * hour),
+        &["needle hundred"],
+    );
+    write_agent_session(&fixture, "never", None, &["needle"]);
+    fixture
+}
+
+#[test]
+fn since_keeps_only_recently_updated_sessions() {
+    let fixture = recent_fixture();
+    let listed = |args: &[&str]| ids(&json(&ok(&fixture, args))).join(" ");
+    assert_eq!(listed(&["list", "--json"]), "hour days months never");
+    assert_eq!(listed(&["list", "--json", "--since", "2d"]), "hour");
+    assert_eq!(listed(&["list", "--json", "--since", "30d"]), "hour days");
+    assert_eq!(listed(&["list", "--json", "--since", "720h"]), "hour days");
+    assert_eq!(
+        listed(&["list", "--json", "--since", "1000w"]),
+        "hour days months"
+    );
+    // The limit applies to the sessions kept.
+    assert_eq!(
+        listed(&["list", "--json", "--since", "30d", "--limit", "1"]),
+        "hour"
+    );
+    assert_eq!(ok(&fixture, &["list", "--json", "--since", "1m"]), "[]\n");
+    assert!(ok(&fixture, &["list", "--since", "2d"]).starts_with("Found 1 session(s)\n"));
+
+    assert_eq!(
+        listed(&["search", "needle", "--json", "--since", "30d"]),
+        "hour days"
+    );
+    assert_eq!(
+        listed(&["search", "needle", "--json"]),
+        "hour days months never"
+    );
+    assert_eq!(
+        fails(&fixture, &["search", "needle", "--since", "1m"]),
+        "error: no sessions match\n"
+    );
+
+    let out = ok(&fixture, &["export", "--since", "30d", "--out", "recent"]);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert_eq!(
+        exported_files(&fixture.home().join("recent")),
+        ["days.md", "hour.md"]
+    );
+    let out = ok(
+        &fixture,
+        &["export", "--since", "30d", "--limit", "1", "--out", "one"],
+    );
+    assert_eq!(
+        exported_files(&fixture.home().join("one")),
+        ["hour.md"],
+        "{out}"
+    );
+    assert_eq!(
+        fails(&fixture, &["export", "--since", "1m", "--out", "none"]),
+        "error: no sessions updated in the last 1m to export\n"
+    );
+    assert_eq!(
+        fails(
+            &fixture,
+            &[
+                "export",
+                "--since",
+                "1m",
+                "--workspace",
+                "/w",
+                "--out",
+                "none"
+            ]
+        ),
+        "error: no sessions of workspace `/w` were updated in the last 1m\n"
+    );
+}
+
+#[test]
+fn a_closed_pipe_ends_search_output_quietly() {
+    let fixture = Fixture::new();
+    let mut rows = Vec::new();
+    for n in 0..1500_i64 {
+        let id = format!("{n:08x}-0000-4000-8000-{n:012x}");
+        let text = format!("needle {n} {}", "lorem ipsum ".repeat(40));
+        rows.push(bubble(
+            &id,
+            "b1",
+            &text_bubble("b1", 1, &text),
+            Stored::Text,
+        ));
+        rows.push(composer(
+            &id,
+            &composer_json(
+                &id,
+                "Chat",
+                1_757_000_000_000 + n,
+                1_757_000_000_000 + n,
+                &[("b1", 1)],
+            ),
+            Stored::Text,
+        ));
+    }
+    fixture.write_ide_db(Journal::Delete, &rows);
+    for args in [
+        &["search", "needle", "--context", "200"][..],
+        &["search", "needle", "--json"],
+    ] {
+        let full = run(&fixture, args);
+        assert!(full.status.success(), "{args:?}");
+        assert!(
+            full.stdout.len() > 256 * 1024,
+            "{args:?}: {}",
+            full.stdout.len()
+        );
+        let output = hang_up_early(&fixture, args);
+        assert!(output.status.success(), "{args:?}: {:?}", output.status);
+        assert_eq!(stderr(&output), "", "{args:?}");
     }
 }

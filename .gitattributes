@@ -1,0 +1,5 @@
+# The completion scripts and man pages ship in release archives, Windows ones
+# included, and tests/generated.rs compares them byte for byte with what the
+# binary prints.
+/completions/** text eol=lf
+/man/** text eol=lf

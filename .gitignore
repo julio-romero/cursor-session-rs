@@ -6,3 +6,7 @@ exports/
 *.snap.new
 *.pending-snap
 /demo/home/
+# Scratch bench runs; only the tables of versioned baselines are committed.
+/bench/results/*
+!/bench/results/*/
+/bench/results/*/*.json

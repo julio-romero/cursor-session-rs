@@ -8,9 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::*;
-use cursor_session::Error;
 use cursor_session::ide::load_from_db;
 use cursor_session::model::{Session, Source};
+use cursor_session::{Error, LoadOptions, load_messages, load_sessions};
 use rusqlite::Connection;
 use rusqlite::types::Value as SqlValue;
 use serde_json::json;
@@ -1260,4 +1260,52 @@ fn unreadable_database_is_an_access_error() {
     assert!(agent_only.status.success());
     assert_eq!(healthcheck.status.code(), Some(1));
     assert!(stdout(&healthcheck).contains("state.vscdb (failed)\n"));
+}
+
+/// Two chats of one message each: `keep`, and `gone`.
+fn two_chats(fixture: &Fixture) -> PathBuf {
+    let mut rows = Vec::new();
+    for (id, updated) in [("keep", 2_000), ("gone", 1_000)] {
+        rows.push(composer(
+            id,
+            &composer_json(id, id, 1_000, updated, &[("b1", 1)]),
+            Stored::Text,
+        ));
+        rows.push(bubble(
+            id,
+            "b1",
+            &text_bubble("b1", 1, "hello"),
+            Stored::Text,
+        ));
+    }
+    fixture.write_ide_db(Journal::Delete, &rows)
+}
+
+#[test]
+fn a_chat_deleted_while_it_is_read_is_a_distinct_error() {
+    let fixture = Fixture::new();
+    let db = two_chats(&fixture);
+    let loaded = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    let gone = loaded.sessions.iter().find(|s| s.id == "gone").unwrap();
+    assert_eq!(gone.message_count, 1);
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch("DELETE FROM cursorDiskKV WHERE key LIKE '%gone%'")
+        .unwrap();
+
+    let error = load_messages(gone).unwrap_err();
+    assert!(
+        matches!(&error, Error::SessionGone { id } if id == "gone"),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "session gone was deleted while it was being read"
+    );
+    assert_eq!(
+        error.hints(),
+        ["run `cursor-session list` to see the sessions there now"]
+    );
+    let keep = loaded.sessions.iter().find(|s| s.id == "keep").unwrap();
+    assert_eq!(load_messages(keep).unwrap().messages.len(), 1);
 }
