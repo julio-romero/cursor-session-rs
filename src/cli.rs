@@ -90,7 +90,7 @@ Examples:
 const EXIT_CODES: &str = "\
 Exit codes:
   0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
-  1  Error: session not found, no sessions match (search), unreadable storage, failed healthcheck
+  1  Error: session not found or deleted while being read, no sessions match (search), unreadable storage, failed healthcheck
   2  Usage error: unknown command or flag, invalid value";
 
 const SEARCH_EXIT_CODES: &str = "\
@@ -192,10 +192,10 @@ pub enum Commands {
     Search(SearchArgs),
     /// Export sessions to files
     ///
-    /// Each session's messages are read only to write its file. A session
-    /// deleted after the sessions were listed, as when Cursor deletes an IDE
-    /// chat during the export, is skipped with a warning, and the others are
-    /// still written. With --session-id, such a session is an error instead.
+    /// Each session's messages are read only to write its file. An IDE chat
+    /// that Cursor deletes after the sessions were listed is skipped with a
+    /// warning, and the others are still written. With --session-id, such a
+    /// chat is an error instead.
     #[command(
         after_help = EXPORT_EXAMPLES,
         after_long_help = format!("{EXPORT_EXAMPLES}\n\n{EXIT_CODES}")

@@ -177,12 +177,12 @@ The Agent CLI gets the same treatment. When transcripts hold lines but none of
 them yields a message, for example because their roles are no longer `user` and
 `assistant`, the error reads `unrecognized Cursor Agent CLI storage
 format` and `--source ide` skips those sessions. Lines of a transcript that
-cannot be read are skipped with one `-v` warning per transcript (`skipped 2
-unreadable lines in …`, or `skipped 5 unreadable lines in 3 transcripts
-(first: …)`, naming the first by path). A line cannot be read when it is not
-JSON, has no role, has a role other than `user`, `assistant`, `system` and
-`tool`, or is a `user` or `assistant` line whose JSON has another shape, such
-as a `message` that is not an object. Lines of the roles never shown,
+cannot be read are skipped with one `-v` warning for all transcripts
+(`skipped 2 unreadable lines in …`, or `skipped 5 unreadable lines in 3
+transcripts (first: …)`, naming the first by path). A line cannot be read
+when it is not JSON, has no role, has a role other than `user`, `assistant`,
+`system` and `tool`, or is a `user` or `assistant` line whose JSON has another
+shape, such as a `message` that is not an object. Lines of the roles never shown,
 `system` and `tool`, are skipped quietly whatever they hold. A last line that
 is cut off, not JSON or ending early, as a session still being written can
 leave, is skipped without a warning too. When no `store.db` can be read

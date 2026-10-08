@@ -457,12 +457,13 @@ that stops early (`| head`), every file is still written.
   export`, or with `--workspace`, ``no sessions of workspace `<w>` were updated
   in the last 1h``. A file or directory that cannot be written gives
   `could not write <path>` or `could not create <dir>` with the reason. All exit 1.
-- A session deleted after the sessions were listed, as when Cursor deletes an
-  IDE chat during the export, is skipped with `warning: session <id> was
-  deleted while it was being read; it is not exported`, printed also without
-  `-v`, and the other sessions are still written; the export exits 0 unless
-  something else fails. With `--session-id`, such a session stops the export
-  with `session <id> was deleted while it was being read` and exits 1.
+- An IDE chat that Cursor deletes after the sessions were listed is skipped
+  with `warning: session <id> was deleted while it was being read; it is not
+  exported`, printed also without `-v`, and the other sessions are still
+  written; the export exits 0 unless something else fails. A chat deleted
+  while the sessions are being listed is left out, as `list` leaves it out.
+  With `--session-id`, a chat deleted after its ID was looked up stops the
+  export with `session <id> was deleted while it was being read` and exits 1.
 - Exports contain the stored text unchanged. Times in `json` and `yaml` exports
   are epoch milliseconds; this is not the `--json` format described below.
   Markdown exports show times like `show` does.

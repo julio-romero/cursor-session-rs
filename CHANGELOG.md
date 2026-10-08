@@ -102,17 +102,17 @@ off to another agent when a Cursor session runs out of credits.
   they looked the ID up. An `export` of many sessions skips it with a
   `warning:` line, also without `-v`, and writes the others. Before, it listed
   with 0 messages, and `handoff` copied an empty transcript.
-- Agent CLI transcript lines that cannot be read now give a `-v` warning, one
-  per transcript (`skipped N unreadable lines in …`, or `… in M transcripts
-  (first: …)`), so `healthcheck` counts them under `load warnings`. A line
-  cannot be read when it is not JSON, has no role, has a role other than
-  `user`, `assistant`, `system` and `tool`, or is a `user` or `assistant` line
-  of another shape. `system` and `tool` lines are never reported, whatever
-  they hold, and neither is a last line cut off, as a session still being
-  written leaves.
+- Agent CLI transcript lines that cannot be read now give one `-v` warning
+  (`skipped N unreadable lines in …`, or `… in M transcripts (first: …)`,
+  naming the first by path), so `healthcheck` counts them under `load
+  warnings`. A line cannot be read when it is not JSON, has no role, has a
+  role other than `user`, `assistant`, `system` and `tool`, or is a `user` or
+  `assistant` line of another shape. `system` and `tool` lines are never
+  reported, whatever they hold, and neither is a last line cut off, as a
+  session still being written leaves.
 - A transcript of only `system` and `tool` lines whose `message` is not an
-  object, such as a tool result written as a string, is no longer reported as
-  an unrecognized Agent CLI storage format.
+  object, such as a tool result written as a string or an array of results,
+  is no longer reported as an unrecognized Agent CLI storage format.
 - The `list` table no longer widens the `TITLE` column beyond its content at
   some narrow widths, a comfy-table 7 bug that measured the `…` of a cut title
   in bytes.
