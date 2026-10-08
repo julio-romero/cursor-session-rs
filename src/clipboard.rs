@@ -3,6 +3,7 @@
 //!
 //! - macOS: the text is piped into `/usr/bin/pbcopy`, so that the program
 //!   links none of AppKit, which every command would pay for at start.
+//!   pbcopy gets [`PBCOPY_TIMEOUT`] to finish, and is stopped past it.
 //! - Windows: arboard; the system keeps what is copied.
 //! - X11 (Linux and the BSDs): the program that copied text must serve it to
 //!   every program that pastes it, and the text is gone once it exits. So
@@ -59,8 +60,16 @@ const PBCOPY: &str = "/usr/bin/pbcopy";
 
 #[cfg(target_os = "macos")]
 fn copy(text: &str) -> Result<(), String> {
-    pipe_into(pbcopy(PBCOPY), text)
+    pipe_into(pbcopy(PBCOPY), text, PBCOPY_TIMEOUT)
 }
+
+/// How long pbcopy has to take the text and exit.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+const PBCOPY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often [`pipe_into`] looks whether the command exited.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+const EXIT_POLL: Duration = Duration::from_millis(5);
 
 /// Hands `text` to a `serve-clipboard` process, which keeps serving it.
 #[cfg(all(
@@ -106,10 +115,12 @@ fn pbcopy(program: &str) -> Command {
     command
 }
 
-/// Runs `command` with `text` on its stdin, and waits for it to exit. It
-/// fails if the command cannot be started or exits unsuccessfully.
+/// Runs `command` with `text` on its stdin, and waits for it to exit, at
+/// most `timeout`. It fails if the command cannot be started, exits
+/// unsuccessfully, or is still running at the deadline, when it is stopped.
 #[cfg(any(target_os = "macos", all(test, unix)))]
-fn pipe_into(mut command: Command, text: &str) -> Result<(), String> {
+fn pipe_into(mut command: Command, text: &str, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
         .stdin(Stdio::piped())
@@ -117,22 +128,46 @@ fn pipe_into(mut command: Command, text: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("could not run {program}: {error}"))?;
+    // Written on a thread, so that a program that does not read cannot block
+    // this one past the deadline.
+    let (sender, written) = mpsc::channel();
+    if let Some(mut stdin) = child.stdin.take() {
+        let text = text.to_string();
+        thread::spawn(move || {
+            let _ = sender.send(stdin.write_all(text.as_bytes()));
+        });
+    }
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(EXIT_POLL),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{program} did not finish within {}",
+                    seconds(timeout)
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("could not run {program}: {error}"));
+            }
+        }
+    };
     // A program that exits without reading all of it closes the pipe; its
     // exit status then says more than the write error.
-    let written = child
-        .stdin
-        .take()
-        .map(|mut stdin| stdin.write_all(text.as_bytes()));
-    let status = child
-        .wait()
-        .map_err(|error| format!("could not run {program}: {error}"))?;
     if !status.success() {
         return Err(format!("{program} failed ({status})"));
     }
-    match written {
-        Some(Ok(())) => Ok(()),
-        Some(Err(error)) => Err(format!("could not write to {program}: {error}")),
-        None => Err(format!("could not write to {program}")),
+    // It exited, so the write has ended, unless something it started still
+    // holds the pipe: that is waited for until the deadline too.
+    let left = deadline.saturating_duration_since(Instant::now());
+    match written.recv_timeout(left) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(format!("could not write to {program}: {error}")),
+        Err(_) => Err(format!("could not write to {program}")),
     }
 }
 
@@ -398,25 +433,47 @@ mod tests {
             ),
         ]);
         let text = format!("héllo — 日本\n{}", "line\n".repeat(50_000));
-        pipe_into(command, &text).unwrap();
+        pipe_into(command, &text, LONG).unwrap();
         assert_eq!(std::fs::read(&copied).unwrap(), text.as_bytes());
         // Whatever locale this process has, pbcopy is told UTF-8.
         assert_eq!(std::fs::read_to_string(locale).unwrap(), "UTF-8|unset");
     }
 
+    /// A timeout no test that is meant to finish comes near, however loaded
+    /// the machine: it bounds only a test that would otherwise hang.
+    #[cfg(unix)]
+    const LONG: Duration = Duration::from_secs(60);
+
     #[cfg(unix)]
     #[test]
     fn a_failed_pbcopy_is_an_error() {
-        let reason = pipe_into(shell("cat >/dev/null; exit 3"), "text").unwrap_err();
+        let reason = pipe_into(shell("cat >/dev/null; exit 3"), "text", LONG).unwrap_err();
         assert_eq!(reason, "/bin/sh failed (exit status: 3)");
         // One that stops reading at once fails as well.
-        let reason = pipe_into(shell("exit 1"), &"x".repeat(1 << 20)).unwrap_err();
+        let reason = pipe_into(shell("exit 1"), &"x".repeat(1 << 20), LONG).unwrap_err();
         assert_eq!(reason, "/bin/sh failed (exit status: 1)");
-        let reason = pipe_into(Command::new("/nonexistent/pbcopy"), "text").unwrap_err();
+        let reason = pipe_into(Command::new("/nonexistent/pbcopy"), "text", LONG).unwrap_err();
         assert!(
             reason.starts_with("could not run /nonexistent/pbcopy: "),
             "{reason}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pbcopy_that_does_not_finish_is_stopped_at_the_deadline() {
+        // Neither one that sleeps nor one that never reads what it is given
+        // holds this process past the deadline, which they cannot meet.
+        for (script, text) in [
+            ("exec sleep 30", "text".to_string()),
+            ("exec sleep 30", "x".repeat(1 << 20)),
+        ] {
+            let started = Instant::now();
+            let reason = pipe_into(shell(script), &text, Duration::from_secs(1)).unwrap_err();
+            assert_eq!(reason, "/bin/sh did not finish within 1 second");
+            assert!(started.elapsed() < Duration::from_secs(25));
+        }
+        assert_eq!(PBCOPY_TIMEOUT, HANDOVER_TIMEOUT);
     }
 
     #[cfg(unix)]
@@ -428,7 +485,7 @@ mod tests {
         // timeout.
         let script = format!("cat > '{}'; echo ok; exec sleep 10", copied.display());
         let text = "transcript\n".repeat(20_000);
-        hand_over(shell(&script), &text, Duration::from_secs(5)).unwrap();
+        hand_over(shell(&script), &text, LONG).unwrap();
         assert_eq!(std::fs::read_to_string(copied).unwrap(), text);
     }
 
@@ -436,7 +493,7 @@ mod tests {
     #[test]
     fn a_failed_handover_says_why() {
         let fails = |script: &str, timeout| hand_over(shell(script), "text", timeout).unwrap_err();
-        let long = Duration::from_secs(20);
+        let long = LONG;
         assert_eq!(
             fails(
                 "cat >/dev/null; echo 'error: X11 server connection timed out'",
@@ -454,7 +511,7 @@ mod tests {
             fails("exec sleep 30", Duration::from_secs(1)),
             "the clipboard process did not answer within 1 second"
         );
-        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(started.elapsed() < Duration::from_secs(25));
 
         let missing = Command::new("/nonexistent/serve-clipboard");
         let reason = hand_over(missing, "text", long).unwrap_err();
