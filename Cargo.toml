@@ -57,3 +57,5 @@ print_stdout = "deny"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = true
+codegen-units = 1
