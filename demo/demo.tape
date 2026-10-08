@@ -10,7 +10,7 @@ Output demo/demo.gif
 Set Shell "bash"
 Set FontSize 16
 Set Width 1360
-Set Height 560
+Set Height 720
 Set Padding 20
 Set Theme "Catppuccin Mocha"
 Set WindowBar Colorful
@@ -29,16 +29,22 @@ Enter
 Sleep 4s
 Ctrl+L
 
-Type "cursor-session show a71d"
+Type "cursor-session search retry timeout"
+Sleep 500ms
+Enter
+Sleep 4s
+Ctrl+L
+
+Type "cursor-session show a71d --only assistant,tool --short"
+Sleep 500ms
+Enter
+Sleep 6s
+Ctrl+L
+
+Type "cursor-session handoff a71d --stdout | head -n 20"
 Sleep 500ms
 Enter
 Sleep 5s
-Ctrl+L
-
-Type `cursor-session list --json | jq -r '.[] | select(.source == "ide") | .title'`
-Sleep 500ms
-Enter
-Sleep 3.5s
 Ctrl+L
 
 Type "cursor-session export --session-id 3f9c && head -n 15 exports/*.md"
