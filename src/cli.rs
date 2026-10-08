@@ -286,7 +286,12 @@ pub struct ListArgs {
     )]
     pub limit: Option<usize>,
     /// Keep only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)
-    #[arg(long, value_name = "DURATION", value_parser = parse_since)]
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = parse_since,
+        allow_hyphen_values = true
+    )]
     pub since: Option<Since>,
     /// Print a JSON array of session summaries
     #[arg(long)]
@@ -322,7 +327,12 @@ pub struct SearchArgs {
     )]
     pub context: usize,
     /// Search only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)
-    #[arg(long, value_name = "DURATION", value_parser = parse_since)]
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = parse_since,
+        allow_hyphen_values = true
+    )]
     pub since: Option<Since>,
     /// Print a JSON array of the matching sessions, best first
     #[arg(long)]
@@ -405,6 +415,7 @@ pub struct ExportArgs {
         long,
         value_name = "DURATION",
         value_parser = parse_since,
+        allow_hyphen_values = true,
         conflicts_with = "session_id"
     )]
     pub since: Option<Since>,
@@ -845,6 +856,10 @@ mod tests {
             }
             // Taken for an option, which it is not.
             assert_eq!(parse("-1d").err().unwrap().exit_code(), 2);
+            // A negative span is a span that is not valid, not an unknown option.
+            let err = parse("-1d").err().unwrap();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+            assert!(err.to_string().contains("'--since <DURATION>'"), "{err}");
         }
         let err = Cli::try_parse_from([
             "cursor-session",
