@@ -108,10 +108,14 @@ off to another agent when a Cursor session runs out of credits.
 - `handoff` copies through `pbcopy` on macOS rather than a clipboard crate, so
   no command links AppKit; linking it would have added about 2.5 MB of peak
   memory to every command on macOS.
-- Measured per change against 0.3.0 at 1000 sessions, paired: wall time at
-  most +3.9% (`agent list --json`, from the token estimate) and peak memory at
-  most +5.1% (`search`'s regex dependency). The 0.4.0 tables are recorded with
-  `bench/run.sh` at release.
+- The whole release against 0.3.0, paired, on the same 1000-session store with
+  the dist binaries: wall time within about ±3% (-0.8% to +2.3%), and peak
+  memory up 0.6 to 0.9 MB on every command, +4% to +8% (`agent list --json`
+  11.5 to 12.4 MB, +7.8%; `ide list --json` 14.8 to 15.4 MB, +4.3%). The
+  memory comes from `search`'s regex dependency, the show filters and
+  `handoff`; each adds a little and the costs add up, so no single change
+  accounts for it. At 50 sessions the increase is +5% to +8%. The 0.4.0 tables
+  are recorded with `bench/run.sh` at release.
 - `search` reads every IDE chat of a database in one read transaction, and
   keeps one session's messages in memory at a time; `tests/memory.rs` checks
   `search`, `list --since`, `export --since`, `show --only tool` and
