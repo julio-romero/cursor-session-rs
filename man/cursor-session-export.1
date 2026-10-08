@@ -1,0 +1,93 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cursor-session-export 1  "cursor-session 0.3.0" "User Commands"
+.SH NAME
+cursor\-session\-export \- Export sessions to files
+.SH SYNOPSIS
+\fBcursor\-session export\fR [\fB\-\-format\fR] [\fB\-\-storage\fR] [\fB\-\-out\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-color\fR] [\fB\-\-session\-id\fR] [\fB\-\-workspace\fR] [\fB\-\-source\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Export sessions to files
+.SH OPTIONS
+.TP
+\fB\-\-format\fR \fI<FORMAT>\fR [default: md]
+Output file format
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+md
+.IP \(bu 2
+json
+.IP \(bu 2
+jsonl
+.IP \(bu 2
+yaml
+.RE
+.TP
+\fB\-\-out\fR \fI<DIR>\fR [default: exports]
+Directory to write into (created if missing)
+.TP
+\fB\-\-session\-id\fR \fI<SESSION_ID>\fR
+Export only this session (ID or unique prefix)
+.TP
+\fB\-\-workspace\fR \fI<WORKSPACE>\fR
+Export the Agent CLI sessions of a workspace: its path or a directory above it, directory names in its path, or the MD5 hash of its path
+.TP
+\fB\-\-source\fR \fI<SOURCE>\fR
+Only read this store; the other one is never opened
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+agent: Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)
+.IP \(bu 2
+ide: Cursor IDE composer chats (state.vscdb)
+.RE
+.TP
+\fB\-\-limit\fR \fI<N>\fR
+Export only the N most recently updated of the selected sessions
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-\-storage\fR \fI<PATH>\fR
+Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the storage paths in use and the rows and files that were skipped to stderr
+.TP
+\fB\-\-color\fR \fI<WHEN>\fR [default: auto]
+When to use color
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.SH EXAMPLES
+.RS 4
+.nf
+cursor\-session export
+cursor\-session export \-\-format json \-\-session\-id f4eea6d2 \-\-out sessions
+cursor\-session export \-\-workspace ~/src/billing\-api \-\-limit 5
+.fi
+.RE
+.SH "EXIT STATUS"
+.RS 4
+.nf
+0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+1  Error: session not found, unreadable storage, failed healthcheck
+2  Usage error: unknown command or flag, invalid value
+.fi
+.RE

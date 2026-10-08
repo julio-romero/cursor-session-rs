@@ -1,0 +1,76 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cursor-session-show 1  "cursor-session 0.3.0" "User Commands"
+.SH NAME
+cursor\-session\-show \- Show messages from a session
+.SH SYNOPSIS
+\fBcursor\-session show\fR [\fB\-\-source\fR] [\fB\-\-storage\fR] [\fB\-\-limit\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-all\fR] [\fB\-\-color\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fISESSION_ID\fR> 
+.SH DESCRIPTION
+Show messages from a session
+.SH OPTIONS
+.TP
+\fB\-\-source\fR \fI<SOURCE>\fR
+Only read this store; the other one is never opened
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+agent: Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)
+.IP \(bu 2
+ide: Cursor IDE composer chats (state.vscdb)
+.RE
+.TP
+\fB\-\-limit\fR \fI<N>\fR
+Print only the last N messages [default: 20 in a terminal, all when piped or with \-\-json]
+.TP
+\fB\-\-all\fR
+Print the full transcript
+.TP
+\fB\-\-json\fR
+Print the session and its messages as JSON
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+<\fISESSION_ID\fR>
+Session ID, or a unique prefix of one (case\-insensitive)
+.SH "GLOBAL OPTIONS"
+.TP
+\fB\-\-storage\fR \fI<PATH>\fR
+Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print the storage paths in use and the rows and files that were skipped to stderr
+.TP
+\fB\-\-color\fR \fI<WHEN>\fR [default: auto]
+When to use color
+.br
+
+.br
+\fIPossible values:\fR
+.RS 14
+.IP \(bu 2
+auto
+.IP \(bu 2
+always
+.IP \(bu 2
+never
+.RE
+.SH EXAMPLES
+.RS 4
+.nf
+cursor\-session show f4eea6d2
+cursor\-session show f4eea6d2 \-\-all
+cursor\-session show f4eea6d2 \-\-json \-\-limit 5
+.fi
+.RE
+.SH "EXIT STATUS"
+.RS 4
+.nf
+0  Success, also when output is cut short by a closed pipe (e.g. `| head`)
+1  Error: session not found, unreadable storage, failed healthcheck
+2  Usage error: unknown command or flag, invalid value
+.fi
+.RE
