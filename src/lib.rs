@@ -89,14 +89,10 @@ pub fn load_session(
     warnings: &mut Vec<String>,
     notices: &mut Vec<String>,
 ) -> Result<Session> {
-    read_session(
-        paths,
-        opts,
-        query,
-        ReadOptions::default(),
-        warnings,
-        notices,
-    )
+    let loaded = load_session_with(paths, opts, query, ReadOptions::default());
+    warnings.extend(loaded.warnings);
+    notices.extend(loaded.notices);
+    loaded.session
 }
 
 /// What [`load_session_with`] loaded.
@@ -118,34 +114,26 @@ pub fn load_session_with(
     read: ReadOptions,
 ) -> LoadedSession {
     let (mut warnings, mut notices) = (Vec::new(), Vec::new());
-    let session = read_session(paths, opts, query, read, &mut warnings, &mut notices);
+    let mut load = || -> Result<Session> {
+        let index = Index::new(paths, opts.source, &mut warnings, &mut notices)?;
+        let listed = model::merge_sessions(index.sessions());
+        let id = find_session(&listed, query)?.id.clone();
+        let counted = index.count(&|candidate| candidate == id, &mut warnings, &mut notices)?;
+        let summary = model::merge_sessions(counted)
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::SessionNotFound {
+                query: query.to_string(),
+                unsearched: None,
+            })?;
+        load_messages_with(&summary, read)
+    };
+    let session = load();
     LoadedSession {
         session,
         warnings,
         notices,
     }
-}
-
-fn read_session(
-    paths: &StoragePaths,
-    opts: &LoadOptions,
-    query: &str,
-    read: ReadOptions,
-    warnings: &mut Vec<String>,
-    notices: &mut Vec<String>,
-) -> Result<Session> {
-    let index = Index::new(paths, opts.source, warnings, notices)?;
-    let listed = model::merge_sessions(index.sessions());
-    let id = find_session(&listed, query)?.id.clone();
-    let counted = index.count(&|candidate| candidate == id, warnings, notices)?;
-    let summary = model::merge_sessions(counted)
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::SessionNotFound {
-            query: query.to_string(),
-            unsearched: None,
-        })?;
-    load_messages_with(&summary, read)
 }
 
 /// The session `summary` lists, with its messages read from where the
