@@ -5,3 +5,4 @@ exports/
 *~
 *.snap.new
 *.pending-snap
+/demo/home/
