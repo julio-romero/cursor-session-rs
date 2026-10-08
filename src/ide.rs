@@ -508,9 +508,18 @@ fn count_chats(
         .filter(|session| selected(&session.id))
     {
         let mut session = session.clone();
-        if let MessagesAt::IdeChat { key, blob_key, .. } = &session.messages_at
-            && let Some(composer) = read_composer(conn, &index.db, key, *blob_key)?
-        {
+        let row = match &session.messages_at {
+            MessagesAt::IdeChat { key, blob_key, .. } => {
+                read_composer(conn, &index.db, key, *blob_key)?
+            }
+            _ => ChatRow::Unreadable,
+        };
+        // A chat deleted since the chats were listed is left out, rather than
+        // listed without the messages it had.
+        if let ChatRow::Gone = row {
+            continue;
+        }
+        if let ChatRow::Read(composer) = row {
             let lists = !composer.full_conversation_headers_only.is_empty()
                 || !composer.conversation.is_empty();
             let bubbles = if given.insert(session.id.clone()) {
@@ -679,11 +688,16 @@ fn read_chat<T: ToolData>(
     with_readonly(db_path, |conn| {
         let _snapshot = transaction(conn, db_path)?;
         chat_of_row::<T>(conn, db_path, key, blob_key, id)
+    })?
+    // Deleted since it was listed: it has no messages to show now, and it
+    // was not empty when listed.
+    .ok_or_else(|| Error::Changed {
+        path: db_path.to_path_buf(),
     })
 }
 
 /// Calls `map` with each of `chats`, sessions of the database at `db_path`,
-/// and its messages, the messages [`read_messages`] returns without their
+/// that is still there, and its messages, the messages [`read_messages`] returns without their
 /// tool calls, one chat at a time, so that no more than one chat's messages are held. The chats are
 /// all read in one read of the database, so that it is opened, or copied
 /// when it must be (see [`with_readonly`]), once for all of them. That read
@@ -702,9 +716,12 @@ pub(crate) fn map_chats<T>(
                 MessagesAt::IdeChat { key, blob_key, .. } => {
                     chat_of_row::<IgnoredAny>(conn, db_path, key, *blob_key, &chat.id)?
                 }
-                _ => Vec::new(),
+                _ => Some(Vec::new()),
             };
-            mapped.push(map(chat, messages));
+            // A chat deleted since it was listed is left out.
+            if let Some(messages) = messages {
+                mapped.push(map(chat, messages));
+            }
             #[cfg(test)]
             AFTER_CHAT.with_borrow_mut(|hook| hook.as_mut().map(|hook| hook()));
         }
@@ -714,19 +731,22 @@ pub(crate) fn map_chats<T>(
 
 /// The messages of the chat whose row has `key`, with the messages stored
 /// for chat `id` with their tool calls read as `T`, read in the transaction
-/// open on `conn`.
+/// open on `conn`. `None` when the chat row is gone, as when the chat was
+/// deleted since it was listed.
 fn chat_of_row<T: ToolData>(
     conn: &Connection,
     db_path: &Path,
     key: &str,
     blob_key: bool,
     id: &str,
-) -> Result<Vec<Message>> {
-    let Some(composer) = read_composer(conn, db_path, key, blob_key)? else {
-        return Ok(Vec::new());
+) -> Result<Option<Vec<Message>>> {
+    let composer = match read_composer(conn, db_path, key, blob_key)? {
+        ChatRow::Gone => return Ok(None),
+        ChatRow::Unreadable => return Ok(Some(Vec::new())),
+        ChatRow::Read(composer) => composer,
     };
     let bubbles = chat_bubbles::<T>(conn, db_path, id, &mut Rows::default())?;
-    Ok(chat_messages(composer, bubbles, &mut 0).messages)
+    Ok(Some(chat_messages(composer, bubbles, &mut 0).messages))
 }
 
 fn transaction<'a>(conn: &'a Connection, db_path: &Path) -> Result<rusqlite::Transaction<'a>> {
@@ -738,13 +758,17 @@ fn transaction<'a>(conn: &'a Connection, db_path: &Path) -> Result<rusqlite::Tra
         })
 }
 
-/// The chat row with `key`, if it is still there and readable.
-fn read_composer(
-    conn: &Connection,
-    db_path: &Path,
-    key: &str,
-    blob_key: bool,
-) -> Result<Option<Composer>> {
+/// A chat row read again after the chats were listed.
+enum ChatRow {
+    /// No longer there: the chat was deleted since.
+    Gone,
+    /// There, but not readable as a chat.
+    Unreadable,
+    Read(Composer),
+}
+
+/// The chat row with `key`.
+fn read_composer(conn: &Connection, db_path: &Path, key: &str, blob_key: bool) -> Result<ChatRow> {
     let mut stmt = conn
         .prepare_cached(&format!(
             "SELECT value FROM {KV_TABLE} WHERE key = ?1 AND value IS NOT NULL"
@@ -759,14 +783,16 @@ fn read_composer(
     } else {
         stmt.query_row([key], read)
     };
-    let value = value
-        .optional()
-        .map_err(|source| Error::Database {
-            path: db_path.to_path_buf(),
-            source,
-        })?
-        .flatten();
-    Ok(value.and_then(|value| parse_object(&value)))
+    let value = value.optional().map_err(|source| Error::Database {
+        path: db_path.to_path_buf(),
+        source,
+    })?;
+    Ok(match value {
+        None => ChatRow::Gone,
+        Some(value) => value
+            .and_then(|value| parse_object(&value))
+            .map_or(ChatRow::Unreadable, ChatRow::Read),
+    })
 }
 
 /// The messages stored for chat `id`, its `bubbleId:<id>:<message>` rows, by
@@ -1670,6 +1696,67 @@ mod tests {
         let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["c1"]);
         assert_eq!(load(&path).0.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_chat_deleted_after_listing_is_left_out_not_emptied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        let mut rows = well_formed(false);
+        rows.extend([
+            (
+                "composerData:c2",
+                SqlValue::Text(
+                    r#"{"composerId":"c2","fullConversationHeadersOnly":[{"bubbleId":"b1","type":1}]}"#
+                        .into(),
+                ),
+            ),
+            (
+                "bubbleId:c2:b1",
+                SqlValue::Text(r#"{"bubbleId":"b1","type":1,"text":"needle"}"#.into()),
+            ),
+        ]);
+        create_db(&path, &rows);
+        let index = index(&path, &mut Vec::new()).unwrap().unwrap();
+        let c2 = index
+            .sessions
+            .iter()
+            .find(|s| s.id == "c2")
+            .unwrap()
+            .clone();
+        // Cursor deletes the chat after the chats are listed and before their
+        // messages are read.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "DELETE FROM cursorDiskKV WHERE key IN ('composerData:c2', 'bubbleId:c2:b1')",
+            )
+            .unwrap();
+
+        let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+        let counted = count(&index, &|_| true, &mut warnings, &mut notices).unwrap();
+        let ids: Vec<&str> = counted.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["c1"]);
+        assert_eq!(counted[0].message_count, 2);
+        assert!(
+            warnings.is_empty() && notices.is_empty(),
+            "{warnings:?} {notices:?}"
+        );
+
+        // `show` and `handoff` do not show it as a chat without messages.
+        let MessagesAt::IdeChat { key, blob_key, .. } = &c2.messages_at else {
+            panic!("{:?}", c2.messages_at);
+        };
+        let read = read_messages(&path, key, *blob_key, "c2", ReadOptions::default());
+        assert!(matches!(read, Err(Error::Changed { .. })), "{read:?}");
+
+        // `search` maps only the chats still there.
+        let chats: Vec<&SessionSummary> = index.sessions.iter().collect();
+        let mapped = map_chats(&path, &chats, |chat, messages| {
+            (chat.id.clone(), messages.len())
+        })
+        .unwrap();
+        assert_eq!(mapped, [("c1".to_string(), 2)]);
     }
 
     #[test]
