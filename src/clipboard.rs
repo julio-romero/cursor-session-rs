@@ -11,6 +11,8 @@
 //!   until something else is copied, the X connection is lost, or
 //!   [`MAX_SERVE`] has passed. `handoff` says it copied only once that copy
 //!   owns the clipboard, and waits for that at most [`HANDOVER_TIMEOUT`].
+//!   A clipboard manager that takes the clipboard over at once, to keep
+//!   what was copied, is a success as long as it then holds the same text.
 //!   arboard is built without Wayland support: without an X11 display the
 //!   text is printed, with a warning that names `wl-copy`.
 //!
@@ -279,7 +281,7 @@ fn serve_text(text: String, out: &mut dyn Write) -> Result<()> {
     // holds. Before, it reads what another program holds: if that is
     // already `text`, "copied" is just as true.
     let mut owns = || probe.get_text().is_ok_and(|held| held == text);
-    hold(&mut owns, &done, out, &TIMINGS)
+    hold(&mut owns, &done, out, &TIMINGS, &mut Instant::now)
 }
 
 /// Copies `text` where the system keeps it, and says so.
@@ -291,36 +293,39 @@ fn serve_text(text: String, out: &mut dyn Write) -> Result<()> {
     report(out, copy(&text))
 }
 
-/// Waits until `owns` says this process holds the text on the clipboard,
-/// then prints [`READY`] and waits until `done` hears that the thread
-/// holding it stopped (another program took the clipboard, or the deadline
-/// passed) or `owns` no longer holds, checked every `timings.check`. If it
-/// does not own it within `timings.confirm`, or `done` hears first, it
-/// prints why instead.
+/// Waits until `owns` says the clipboard holds the text, then prints
+/// [`READY`] and waits until `done` hears that the thread holding it
+/// stopped (another program took the clipboard, or the deadline passed) or
+/// `owns` no longer holds, checked every `timings.check`. If it does not
+/// hold the text within `timings.confirm` (as `now` tells the time), it
+/// prints why instead. If `done` hears first, the clipboard is looked at
+/// once more: a clipboard manager that took it over at once to keep it
+/// holds the same text, and that is a success too.
 fn hold(
     owns: &mut dyn FnMut() -> bool,
     done: &Receiver<Result<(), String>>,
     out: &mut dyn Write,
     timings: &Timings,
+    now: &mut dyn FnMut() -> Instant,
 ) -> Result<()> {
-    let start = Instant::now();
+    let start = now();
     loop {
         // The first look comes after the thread had time to take it.
         thread::sleep(timings.poll);
-        match done.try_recv() {
-            Ok(Err(reason)) => return report(out, Err(reason)),
-            Ok(Ok(())) => {
-                return report(out, Err("something else was copied at once".to_string()));
-            }
-            Err(TryRecvError::Disconnected) => {
-                return report(out, Err("the clipboard thread stopped".to_string()));
-            }
-            Err(TryRecvError::Empty) => {}
+        let ended = match done.try_recv() {
+            Ok(Err(reason)) => Some(reason),
+            Ok(Ok(())) => Some("something else was copied at once".to_string()),
+            Err(TryRecvError::Disconnected) => Some("the clipboard thread stopped".to_string()),
+            Err(TryRecvError::Empty) => None,
+        };
+        if let Some(reason) = ended {
+            // Nothing is left to serve; what matters is what was copied.
+            return report(out, if owns() { Ok(()) } else { Err(reason) });
         }
         if owns() {
             break;
         }
-        if start.elapsed() >= timings.confirm {
+        if now().duration_since(start) >= timings.confirm {
             return report(
                 out,
                 Err(format!(
@@ -480,76 +485,114 @@ mod tests {
     const FAST: Timings = Timings {
         confirm: Duration::from_secs(1),
         poll: Duration::from_millis(1),
-        check: Duration::from_millis(5),
+        check: Duration::from_millis(1),
     };
 
-    /// Runs [`hold`] with `owns` answering in turn, and `done` fed by
-    /// `thread`; returns what it printed and whether it succeeded.
-    fn held(
-        owns: &[bool],
-        thread: impl FnOnce(mpsc::Sender<Result<(), String>>) + Send + 'static,
-    ) -> (String, bool, usize) {
+    /// What the thread holding the clipboard tells [`hold`] through `done`.
+    enum Thread {
+        /// Nothing, for as long as the test lasts.
+        Holds,
+        /// It has already ended with this result.
+        Ended(Result<(), String>),
+        /// It has already stopped without a word.
+        Stopped,
+        /// Something else was copied, which it says while `owns` is asked
+        /// for the nth time (from 1).
+        ReplacedAt(usize),
+    }
+
+    /// Runs [`hold`] with `owns` answering in turn (the last answer
+    /// repeats) and `thread` feeding `done`, under a clock that moves on
+    /// [`STEP`] each time it is read; returns what it printed, whether it
+    /// succeeded, and how often `owns` was asked. Nothing depends on how
+    /// fast the test runs: the sender lives until `hold` returns, so it
+    /// returns only for what `thread` and `owns` say, or the fake clock.
+    fn held(owns: &[bool], thread: Thread) -> (String, bool, usize) {
+        const STEP: Duration = Duration::from_millis(100);
         let (sender, done) = mpsc::channel();
-        let handle = thread::spawn(move || thread(sender));
+        let mut sender = Some(sender);
+        let mut replaced_at = None;
+        match thread {
+            Thread::Holds => {}
+            Thread::Ended(result) => sender.as_ref().unwrap().send(result).unwrap(),
+            Thread::Stopped => sender = None,
+            Thread::ReplacedAt(n) => replaced_at = Some(n),
+        }
         let asked = Cell::new(0);
         let mut owns_now = || {
             let i = asked.get();
             asked.set(i + 1);
+            if replaced_at == Some(i + 1) {
+                sender.as_ref().unwrap().send(Ok(())).unwrap();
+            }
             owns.get(i).copied().unwrap_or(*owns.last().unwrap())
         };
+        let mut clock = Instant::now();
+        let mut now = || {
+            clock += STEP;
+            clock
+        };
         let mut out = Vec::new();
-        let result = hold(&mut owns_now, &done, &mut out, &FAST);
-        drop(done);
-        handle.join().unwrap();
+        let result = hold(&mut owns_now, &done, &mut out, &FAST, &mut now);
         (String::from_utf8(out).unwrap(), result.is_ok(), asked.get())
     }
 
     #[test]
     fn it_is_ready_once_it_owns_the_clipboard_then_serves_until_replaced() {
-        // Owned at the third look; replaced 50 ms later.
-        let (out, ok, _) = held(&[false, false, true], |sender| {
-            thread::sleep(Duration::from_millis(50));
-            sender.send(Ok(())).unwrap();
-        });
-        assert_eq!(out, "ok\n");
-        assert!(ok);
-    }
-
-    #[test]
-    fn it_stops_serving_once_it_no_longer_owns_the_clipboard() {
-        // The thread never hears that it lost it, as when the X connection
-        // is gone: the check finds it.
-        let (out, ok, asked) = held(&[true, true, false], |sender| {
-            thread::sleep(Duration::from_millis(300));
-            drop(sender);
-        });
+        // Owned at the third look, replaced while it is confirmed.
+        let (out, ok, asked) = held(&[false, false, true], Thread::ReplacedAt(3));
         assert_eq!(out, "ok\n");
         assert!(ok);
         assert_eq!(asked, 3);
     }
 
     #[test]
+    fn it_stops_serving_once_it_no_longer_owns_the_clipboard() {
+        // The thread never hears that it lost it, as when the X connection
+        // is gone: the check finds it, and is the only way out.
+        let (out, ok, asked) = held(&[true, true, false], Thread::Holds);
+        assert_eq!(out, "ok\n");
+        assert!(ok);
+        assert_eq!(asked, 3);
+    }
+
+    #[test]
+    fn a_clipboard_manager_that_takes_it_at_once_keeps_the_copy() {
+        // The thread hears at once that something else took the clipboard:
+        // a manager that holds the same text is a success...
+        let (out, ok, asked) = held(&[true], Thread::Ended(Ok(())));
+        assert_eq!(out, "ok\n");
+        assert!(ok);
+        assert_eq!(asked, 1);
+        // ...as it is whenever the thread ends while the text is there.
+        let (out, ok, _) = held(&[true], Thread::Ended(Err("clipboard occupied".into())));
+        assert_eq!((out.as_str(), ok), ("ok\n", true));
+        let (out, ok, _) = held(&[true], Thread::Stopped);
+        assert_eq!((out.as_str(), ok), ("ok\n", true));
+    }
+
+    #[test]
     fn it_says_why_it_could_not_own_the_clipboard() {
-        let (out, ok, _) = held(&[false], |sender| {
-            sender.send(Err("clipboard occupied".to_string())).unwrap();
-        });
+        // The thread ended, and the clipboard holds something else or
+        // cannot be read.
+        let (out, ok, asked) = held(&[false], Thread::Ended(Err("clipboard occupied".into())));
         assert_eq!(out, "error: clipboard occupied\n");
         assert!(!ok);
+        assert_eq!(asked, 1);
 
-        let (out, ok, _) = held(&[false], |sender| sender.send(Ok(())).unwrap());
+        let (out, ok, _) = held(&[false], Thread::Ended(Ok(())));
         assert_eq!(out, "error: something else was copied at once\n");
         assert!(!ok);
 
-        let (out, ok, _) = held(&[false], drop);
+        let (out, ok, _) = held(&[false], Thread::Stopped);
         assert_eq!(out, "error: the clipboard thread stopped\n");
         assert!(!ok);
 
-        let (out, ok, asked) = held(&[false], |sender| {
-            thread::sleep(Duration::from_millis(1500));
-            drop(sender);
-        });
+        // The thread holds on, but the clipboard never has the text: the
+        // clock, which moves 100 ms a read, ends it at the tenth look.
+        let (out, ok, asked) = held(&[false], Thread::Holds);
         assert_eq!(out, "error: could not take the clipboard within 1 second\n");
         assert!(!ok);
-        assert!(asked > 1);
+        assert_eq!(asked, 10);
     }
 }
