@@ -129,8 +129,24 @@ fn rss_bytes(max_rss: libc::c_long) -> usize {
     }
 }
 
-/// The peak resident memory of this process, in bytes.
+/// The peak resident memory of this process's own address space, in bytes,
+/// which is what a child it spawns starts out with on Linux. There
+/// `ru_maxrss` also holds the peak this process started out with itself, from
+/// cargo, so the kernel's own record of the address space is read instead.
 fn own_peak_rss() -> usize {
+    if let Ok(status) = fs::read_to_string("/proc/self/status") {
+        let kb = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .unwrap();
+        return kb
+            .trim()
+            .trim_end_matches("kB")
+            .trim()
+            .parse::<usize>()
+            .unwrap()
+            * 1024;
+    }
     let mut usage = MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: `getrusage` fills the struct it is given and reads nothing else.
     let usage = unsafe {
