@@ -681,6 +681,27 @@ fn transcripts_whose_roles_were_renamed_are_an_unrecognized_format() {
 }
 
 #[test]
+fn transcripts_of_only_system_and_tool_lines_are_no_unrecognized_format() {
+    let fixture = Fixture::new();
+    // Messages that are not objects, as a tool result written as a string.
+    for id in ["a", "b"] {
+        fixture.write_transcript(
+            "Users-demo-project-x",
+            id,
+            Layout::Nested,
+            &[
+                json!({"role": "system", "message": "rules"}),
+                json!({"role": "tool", "message": ["result"]}),
+            ],
+        );
+    }
+    // Sessions without messages to show, as before; no error, no warning.
+    let loaded = fixture.load_source(Some(Source::Agent)).unwrap();
+    assert!(loaded.summaries.is_empty(), "{:?}", loaded.summaries);
+    assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+}
+
+#[test]
 fn text_cut_inside_an_emoji_costs_only_that_character() {
     // JavaScript writes a string cut inside an emoji with a lone surrogate.
     let cut = format!("{}ud83d", '\\');
