@@ -304,7 +304,11 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
         &["show", &newest_chat, "--only", "tool", "--all", "--json"],
     ));
     let tools = tools["messages"].as_array().unwrap();
-    assert!(!tools.is_empty() && tools.len() % 2 == 0, "{}", tools.len());
+    assert!(
+        !tools.is_empty() && tools.len().is_multiple_of(2),
+        "{}",
+        tools.len()
+    );
     for pair in tools.chunks(2) {
         assert_eq!(
             pair[0]["content"],
