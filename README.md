@@ -222,8 +222,30 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-Snapshot tests, the demo GIF and releasing are covered in
-[docs/development.md](docs/development.md).
+Snapshot tests and the demo GIF are covered in
+[docs/development.md](docs/development.md), cutting a release in
+[RELEASING.md](RELEASING.md).
+
+[`bench/`](bench) times `list` and `show` with
+[hyperfine](https://github.com/sharkdp/hyperfine) on generated stores of 50,
+300 and 1000 sessions and records their peak memory. Each release's numbers
+are kept in [`bench/results`](bench/results).
+
+## Similar tools
+
+- [iksnae/cursor-session](https://github.com/iksnae/cursor-session) (Go) has
+  the same commands and inspired this one. Its README lists reading Agent CLI
+  sessions as Linux-only; this one reads both the Agent CLI and the IDE store
+  on macOS, Linux and Windows, and opens every database read-only.
+- [S2thend/cursor-history](https://github.com/S2thend/cursor-history) (Node.js)
+  adds search, backup and restore, and migrating sessions between workspaces,
+  which changes Cursor's data; this one is a single binary with no runtime to
+  install, and never writes to Cursor's data, so it is safe to run while
+  Cursor is open.
+- [SpecStory](https://specstory.com) is an editor extension and CLI that saves
+  sessions from Cursor and other coding agents as Markdown in your project;
+  this one installs nothing into Cursor and reads, read-only, the history
+  Cursor already keeps.
 
 ## License
 
