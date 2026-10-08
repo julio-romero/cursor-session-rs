@@ -77,7 +77,8 @@ off to another agent when a Cursor session runs out of credits.
 - `list` tables are one column wider for `TOKENS`, so IDs are shortened
   sooner: to 8 characters at 80 columns (13 before) and 23 at 100 (full IDs
   before). `show` accepts the shortened prefix as before. Below 79 columns the
-  table has no `TOKENS` column and looks as in 0.3.0.
+  table has no `TOKENS` column, and is laid out as in 0.3.0 apart from the
+  comfy-table 8 change below.
 - `list --json` and `show --json` objects gain the `token_estimate` key after
   `message_count`, and the plain `list` layout a `TOKENS` column.
 - The long help mentions `search` and `handoff`, and exit code 1 includes a
@@ -85,8 +86,8 @@ off to another agent when a Cursor session runs out of credits.
 - Replaced the deprecated `serde_yaml` with `serde_norway`; YAML exports are
   unchanged. Updated dependencies, including rusqlite 0.40 (bundled SQLite
   3.53.2) and comfy-table 8. New dependencies: `regex`, `clap_complete`,
-  `clap_mangen`, and `arboard` 3.6 without default features on Linux and
-  Windows only. The minimum Rust version stays 1.88.
+  `clap_mangen`, and `arboard` 3.6 without default features on every
+  platform but macOS. The minimum Rust version stays 1.88.
 - With comfy-table 8, a `list` table with a truncated title can be up to a few
   columns narrower than the terminal (seen at 63 to 65 columns), as the title
   column now fits its content.
@@ -99,23 +100,32 @@ off to another agent when a Cursor session runs out of credits.
 
 ### Performance
 
-- Release binaries are stripped and built with one codegen unit, which alone
-  cut the aarch64-apple-darwin binary from 4,022,224 bytes (0.3.0) to
-  3,271,120 bytes (-18.7%). The new commands then add about 1.7 MB, mostly
-  `search`'s regex dependency (about 1.3 MB; the completion and man page
-  generators add about 235 KB), so the 0.4.0 binary is 4,987,392 bytes, +24%
-  over 0.3.0.
+- Release binaries are stripped and built with one codegen unit. On 0.3.0's
+  code that takes the aarch64-apple-darwin binary from 4,022,224 to 3,271,120
+  bytes (-18.7%); the new commands then more than use that up (`search` with
+  its regex dependency, built with only the Unicode case-folding and Perl-class
+  tables it needs, and the completion and man page generators), so the 0.4.0
+  binary is 4,756,240 bytes, +18% over 0.3.0.
 - `handoff` copies through `pbcopy` on macOS rather than a clipboard crate, so
   no command links AppKit; linking it would have added about 2.5 MB of peak
   memory to every command on macOS.
-- The whole release against 0.3.0, paired, on the same 1000-session store with
-  the dist binaries: wall time within about ±3% (-0.8% to +2.3%), and peak
-  memory up 0.6 to 0.9 MB on every command, +4% to +8% (`agent list --json`
-  11.5 to 12.4 MB, +7.8%; `ide list --json` 14.8 to 15.4 MB, +4.3%). The
-  memory comes from `search`'s regex dependency, the show filters and
-  `handoff`; each adds a little and the costs add up, so no single change
-  accounts for it. At 50 sessions the increase is +5% to +8%. The 0.4.0 tables
-  are recorded with `bench/run.sh` at release.
+- The whole release against 0.3.0 at 1000 sessions, release builds run in
+  turns by hyperfine on the same store (Apple silicon, macOS): wall time from
+  -2.3% to +3.8%, and peak memory about 0.8 MB higher on every command, +5.5%
+  to +8.1%, which tracks the larger binary rather than the data read.
+
+  | Command                  | 0.3.0              | 0.4.0              |
+  | ------------------------ | -----------------: | -----------------: |
+  | `agent list --limit 5`   | 37.5 ms, 10.4 MB   | 37.6 ms, 11.2 MB   |
+  | `agent list --json`      | 311.0 ms, 10.9 MB  | 320.0 ms, 11.8 MB  |
+  | `agent show (1 session)` | 36.7 ms, 10.8 MB   | 37.2 ms, 11.5 MB   |
+  | `ide list --limit 5`     | 15.0 ms, 13.0 MB   | 15.2 ms, 13.7 MB   |
+  | `ide list --json`        | 200.0 ms, 14.0 MB  | 207.6 ms, 14.8 MB  |
+  | `ide show (1 session)`   | 15.3 ms, 13.0 MB   | 15.0 ms, 13.7 MB   |
+
+  New commands on the same store: `search` over every session 807.9 ms
+  (Agent CLI) and 527.1 ms (IDE), at most 16.1 MB; `handoff --stdout` of one
+  session as fast as `show`. Full tables in `bench/results/0.4.0/`.
 - `search` reads every IDE chat of a database in one read transaction, and
   keeps one session's messages in memory at a time; `tests/memory.rs` checks
   `search`, `list --since`, `export --since`, `show --only tool` and

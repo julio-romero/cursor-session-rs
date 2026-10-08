@@ -40,7 +40,7 @@ the characters of the user and assistant messages divided by 4, rounded up.
 Tool calls and results and titles are not counted. It is an estimate, not any
 model's tokenizer count, and it is always the number `show` prints for the same
 session. A terminal table has the column only from 79 columns wide; below that
-it is left out, so narrow tables look as they did before 0.4.0. In a
+it is left out, and the table keeps the columns it had before 0.4.0. In a
 78-column terminal:
 
 ```text
