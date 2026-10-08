@@ -13,7 +13,10 @@ use cursor_session::{
 };
 use serde::Serialize;
 
-use crate::cli::{Commands, ExportArgs, HealthcheckArgs, ListArgs, ShowArgs};
+use crate::cli::{
+    Commands, CompletionsArgs, ExportArgs, HealthcheckArgs, ListArgs, ManArgs, ShowArgs,
+};
+use crate::generate;
 use crate::output::OutputOpts;
 
 /// Runs one subcommand. Normal output goes to `out`, diagnostics such as load
@@ -30,6 +33,8 @@ pub fn run(
         Commands::Show(args) => cmd_show(paths, opts, out, err, &args),
         Commands::Export(args) => cmd_export(paths, out, err, &args),
         Commands::Healthcheck(args) => cmd_healthcheck(paths, out, err, &args),
+        Commands::Completions(args) => cmd_completions(out, &args),
+        Commands::Man(args) => cmd_man(out, &args),
     }
 }
 
@@ -304,6 +309,18 @@ fn write_export(session: &Session, format: Format, path: &Path) -> cursor_sessio
     let mut file = BufWriter::new(fs::File::create(path).map_err(Error::Write)?);
     export::export_session(session, format, &mut file)?;
     file.flush().map_err(Error::Write)
+}
+
+fn cmd_completions(out: &mut dyn Write, args: &CompletionsArgs) -> Result<()> {
+    out.write_all(&generate::completions(args.shell))?;
+    Ok(())
+}
+
+fn cmd_man(out: &mut dyn Write, args: &ManArgs) -> Result<()> {
+    let page =
+        generate::man_page(args.command.as_deref()).context("could not render the man page")?;
+    out.write_all(&page)?;
+    Ok(())
 }
 
 fn cmd_healthcheck(

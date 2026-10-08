@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use cursor_session::export::Format;
 use cursor_session::model::Source;
 
@@ -41,6 +41,17 @@ const HEALTHCHECK_EXAMPLES: &str = "\
 Examples:
   cursor-session healthcheck
   cursor-session -v healthcheck";
+
+const COMPLETIONS_EXAMPLES: &str = "\
+Examples:
+  cursor-session completions bash > ~/.local/share/bash-completion/completions/cursor-session
+  cursor-session completions zsh > ~/.zfunc/_cursor-session
+  cursor-session completions fish > ~/.config/fish/completions/cursor-session.fish";
+
+const MAN_EXAMPLES: &str = "\
+Examples:
+  cursor-session man > cursor-session.1 && man ./cursor-session.1
+  cursor-session man list > cursor-session-list.1";
 
 const EXIT_CODES: &str = "\
 Exit codes:
@@ -115,6 +126,28 @@ pub enum Commands {
         after_long_help = format!("{HEALTHCHECK_EXAMPLES}\n\n{EXIT_CODES}")
     )]
     Healthcheck(HealthcheckArgs),
+    /// Print a shell completion script
+    #[command(
+        after_help = COMPLETIONS_EXAMPLES,
+        after_long_help = format!("{COMPLETIONS_EXAMPLES}\n\n{EXIT_CODES}")
+    )]
+    Completions(CompletionsArgs),
+    /// Print a man page in roff format
+    #[command(
+        hide = true,
+        after_help = MAN_EXAMPLES,
+        after_long_help = format!("{MAN_EXAMPLES}\n\n{EXIT_CODES}")
+    )]
+    Man(ManArgs),
+}
+
+impl Commands {
+    /// Whether the command reads session stores. The others only print what
+    /// the binary knows about itself, so `--storage` and a missing home do
+    /// not concern them.
+    pub fn reads_storage(&self) -> bool {
+        !matches!(self, Self::Completions(_) | Self::Man(_))
+    }
 }
 
 #[derive(Args)]
@@ -170,7 +203,12 @@ pub struct ExportArgs {
     #[arg(long, value_enum, default_value_t = Format::Md)]
     pub format: Format,
     /// Directory to write into (created if missing)
-    #[arg(long, value_name = "DIR", default_value = "exports")]
+    #[arg(
+        long,
+        value_name = "DIR",
+        default_value = "exports",
+        value_hint = ValueHint::DirPath
+    )]
     pub out: PathBuf,
     /// Export only this session (ID or unique prefix)
     #[arg(long, conflicts_with = "workspace", value_parser = not_blank)]
@@ -203,6 +241,45 @@ pub struct HealthcheckArgs {
     pub storage: Option<PathBuf>,
 }
 
+#[derive(Args)]
+pub struct CompletionsArgs {
+    /// The shell to complete in
+    #[arg(value_enum)]
+    pub shell: Shell,
+}
+
+/// The shells `completions` writes scripts for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+}
+
+#[derive(Args)]
+pub struct ManArgs {
+    /// Print the page of this command instead of the overview
+    #[arg(value_name = "COMMAND", value_parser = documented_command)]
+    pub command: Option<String>,
+}
+
+/// The visible subcommands, the ones with a man page of their own.
+pub fn documented_commands() -> Vec<String> {
+    Cli::command()
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+        .map(|sub| sub.get_name().to_string())
+        .collect()
+}
+
+fn documented_command(value: &str) -> Result<String, String> {
+    let names = documented_commands();
+    if names.iter().any(|name| name == value) {
+        return Ok(value.to_string());
+    }
+    Err(format!("expected one of: {}", names.join(", ")))
+}
+
 /// A whole number of at least 1. One too large to store asks for everything.
 fn at_least_one(value: &str) -> Result<usize, String> {
     let invalid = || "expected a whole number of at least 1".to_string();
@@ -226,7 +303,6 @@ fn not_blank(value: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
 
     #[test]
     fn cli_definition_is_valid() {

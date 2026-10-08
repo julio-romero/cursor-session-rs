@@ -24,6 +24,8 @@ path = "src/main.rs"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4.6"
+clap_mangen = "0.3"
 comfy-table = "8"
 crossterm = "0.29"
 md-5 = "0.10"
