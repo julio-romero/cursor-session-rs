@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::detect::{ChatsScope, StoragePaths};
 use crate::json::{self, lenient, lenient_ms};
-use crate::model::{Message, MessagesAt, SessionSummary, Source};
+use crate::model::{Message, MessagesAt, SessionSummary, Source, content_chars};
 use crate::sqlite::with_readonly;
 use crate::{Error, Result};
 
@@ -183,9 +183,9 @@ pub(crate) fn index(
 }
 
 /// The sessions of `index` that `selected` accepts, each with the number of
-/// messages in its transcript and where that is. Of several copies of a
-/// transcript, the one with the most messages is used. Transcripts that
-/// cannot be read are reported in `warnings`.
+/// messages in its transcript, the characters of their content, and where
+/// that is. Of several copies of a transcript, the one with the most messages
+/// is used. Transcripts that cannot be read are reported in `warnings`.
 pub(crate) fn count(
     index: &Index,
     selected: &dyn Fn(&str) -> bool,
@@ -210,6 +210,7 @@ pub(crate) fn count(
                         &mut best,
                         TranscriptCandidate {
                             messages: scan.messages,
+                            chars: scan.chars,
                             modified: file.modified,
                             path: file.path.clone(),
                         },
@@ -220,6 +221,7 @@ pub(crate) fn count(
             }
             if let Some(best) = best {
                 session.message_count = best.messages;
+                session.content_chars = best.chars;
                 session.messages_at = MessagesAt::Transcript(best.path);
             }
             session
@@ -588,6 +590,8 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 
 struct TranscriptCandidate {
     messages: usize,
+    /// The characters of their content.
+    chars: usize,
     modified: Option<SystemTime>,
     path: PathBuf,
 }
@@ -724,6 +728,8 @@ pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
 #[derive(Debug, Default)]
 struct Scan {
     messages: usize,
+    /// The characters of their content, as reading them builds it.
+    chars: usize,
     /// Lines that should hold a message: the user's, the assistant's, and
     /// those this version cannot read, such as lines of an unknown role.
     expected: usize,
@@ -740,7 +746,8 @@ impl Scan {
 
 /// Reads the transcript at `path` line by line, keeping no more than one line
 /// in memory. Its messages go to `keep` when given; otherwise they are only
-/// counted. With `until_first`, reading stops at the first message.
+/// counted, with the characters of their content. With `until_first`,
+/// reading stops at the first message.
 fn scan_transcript(
     path: &Path,
     mut keep: Option<&mut Vec<Message>>,
@@ -763,9 +770,10 @@ fn scan_transcript(
         match read_line(line, keep.is_some()) {
             Line::Nothing => {}
             Line::NoMessage => scan.expected += 1,
-            Line::Message(message) => {
+            Line::Message { message, chars } => {
                 scan.expected += 1;
                 scan.messages += 1;
+                scan.chars += chars;
                 if let (Some(keep), Some(message)) = (keep.as_deref_mut(), message) {
                     keep.push(message);
                 }
@@ -786,8 +794,12 @@ enum Line {
     /// A line that should hold a message but holds none this version can
     /// show: unreadable, of an unknown role, or without text.
     NoMessage,
-    /// A message, built when asked for.
-    Message(Option<Message>),
+    /// A message, built when asked for, and the characters of the content it
+    /// shows.
+    Message {
+        message: Option<Message>,
+        chars: usize,
+    },
 }
 
 fn read_line(line: &str, build: bool) -> Line {
@@ -808,10 +820,12 @@ fn read_line(line: &str, build: bool) -> Line {
         return Line::NoMessage;
     }
     if !build {
-        return if has_text(&role, &content) {
-            Line::Message(None)
-        } else {
-            Line::NoMessage
+        return match shown_chars(&role, &content) {
+            0 => Line::NoMessage,
+            chars => Line::Message {
+                message: None,
+                chars,
+            },
         };
     }
     let raw_content = extract_content(&content);
@@ -824,26 +838,58 @@ fn read_line(line: &str, build: bool) -> Line {
     if content.is_empty() {
         return Line::NoMessage;
     }
-    Line::Message(Some(Message {
-        role,
-        content,
-        timestamp,
-    }))
+    Line::Message {
+        chars: content_chars(&content),
+        message: Some(Message {
+            role,
+            content,
+            timestamp,
+        }),
+    }
 }
 
-/// Whether a message of `role` with `content` has text to show, as
-/// [`read_line`] decides when it builds the message.
-fn has_text(role: &str, content: &TranscriptContent) -> bool {
+/// The characters of the content [`read_line`] builds for a message of
+/// `role` with `content`, counted without building it where that is cheaper:
+/// 0 when it has no text to show.
+fn shown_chars(role: &str, content: &TranscriptContent) -> usize {
     if role == "user" {
-        return !clean_user_text(&extract_content(content)).is_empty();
+        return content_chars(&clean_user_text(&extract_content(content)));
     }
-    // Joined with blank lines and trimmed, the parts have text when one does.
-    let visible = |text: &str| !text.trim().is_empty();
     match content {
-        TranscriptContent::Text(text) => visible(text),
-        TranscriptContent::Parts(parts) => text_parts(parts).any(visible),
-        TranscriptContent::Other(_) => false,
+        TranscriptContent::Text(text) => content_chars(text.trim()),
+        TranscriptContent::Parts(parts) => joined_trimmed_chars(text_parts(parts)),
+        TranscriptContent::Other(_) => 0,
     }
+}
+
+/// The characters of `texts` joined with blank lines, as [`extract_content`]
+/// joins them, and then trimmed, without joining them.
+fn joined_trimmed_chars<'a>(texts: impl Iterator<Item = &'a str>) -> usize {
+    // Characters up to the last one that is not whitespace, and the
+    // whitespace after it, which counts only when more text follows.
+    let (mut shown, mut trailing) = (0, 0);
+    let mut started = false;
+    for text in texts {
+        let text = if started {
+            // The blank line before it.
+            trailing += 2;
+            text
+        } else {
+            text.trim_start()
+        };
+        let visible = text.trim_end();
+        if visible.is_empty() {
+            trailing += content_chars(text);
+            continue;
+        }
+        if started {
+            shown += trailing;
+        }
+        shown += content_chars(visible);
+        trailing = content_chars(&text[visible.len()..]);
+        started = true;
+    }
+    shown
 }
 
 /// Content parts that are never shown.
@@ -951,6 +997,7 @@ mod tests {
     fn candidate(count: usize, modified: Option<u64>, path: &str) -> TranscriptCandidate {
         TranscriptCandidate {
             messages: count,
+            chars: 0,
             modified: modified
                 .map(|seconds| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
             path: path.into(),
@@ -989,7 +1036,7 @@ mod tests {
     }
 
     /// Counting a transcript gives the number of messages reading it gives,
-    /// whatever its lines hold.
+    /// and the characters of their content, whatever its lines hold.
     #[test]
     fn counted_messages_are_the_messages_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -1006,6 +1053,8 @@ mod tests {
             r#"{"role":"assistant","message":{"content":null}}"#,
             r#"{"role":"assistant","message":{"content":"   "}}"#,
             r#"{"role":"assistant","message":{"content":"\u00a0plain\ud83d"}}"#,
+            r#"{"role":"assistant","message":{"content":[{"text":" \n"},{"text":"  ünï "},{"type":"tool_use","name":"Read"},{"text":"\t"},{"text":"日本\u3000"},{"text":" "}]}}"#,
+            r#"{"role":"assistant","message":{"content":[{"text":"👨‍👩‍👧 one"},{"type":"image"}]}}"#,
             r#"{"role":"system","message":{"content":"setup"}}"#,
             r#"{"role":"human","message":{"content":"hello"}}"#,
             r#"["user",{"content":"by position"}]"#,
@@ -1015,9 +1064,35 @@ mod tests {
         let read = read_jsonl(&path).unwrap();
         let counted = scan_transcript(&path, None, false).unwrap();
         assert_eq!(counted.messages, read.len());
-        assert_eq!(read.len(), 4, "{read:?}");
+        assert_eq!(read.len(), 6, "{read:?}");
+        let chars: usize = read.iter().map(|m| content_chars(&m.content)).sum();
+        assert_eq!(counted.chars, chars);
+        assert_eq!(read[3].content, "ünï \n\n\t\n\n日本", "{read:?}");
         let first = scan_transcript(&path, None, true).unwrap();
         assert_eq!((first.messages, first.expected), (1, 1));
+    }
+
+    #[test]
+    fn joined_text_is_counted_as_joining_and_trimming_counts_it() {
+        let texts: [&[&str]; 9] = [
+            &[],
+            &[""],
+            &["  ", "\n"],
+            &["a"],
+            &[" a ", " b "],
+            &["", "a", "", "b", ""],
+            &["\u{a0}x", " \u{3000}", "y\u{2028}"],
+            &["  ", "é", "  "],
+            &["日本語", "\t\n", "👨‍👩‍👧"],
+        ];
+        for parts in texts {
+            let joined = parts.join("\n\n");
+            assert_eq!(
+                joined_trimmed_chars(parts.iter().copied()),
+                joined.trim().chars().count(),
+                "{parts:?}"
+            );
+        }
     }
 
     fn write(path: &Path, contents: &str) {

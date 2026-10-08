@@ -8,6 +8,7 @@ source:    ide
 created:   2025-09-06 23:06 UTC
 updated:   2025-09-07 00:06 UTC
 messages:  3
+tokens:    ~32 (estimate)
 
 [user (2025-09-06 23:06 UTC)]
 Replace this view with a dynamic table.

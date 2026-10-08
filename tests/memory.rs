@@ -222,21 +222,35 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
         );
     }
 
-    // Counted without holding the messages, the counts are the messages.
+    // Counted without holding the messages, the counts are the messages,
+    // and the token estimates theirs.
     let listed = json(&ok(&fixture, &["list", "--json"]));
-    let show = json(&ok(&fixture, &["show", &newest_chat, "--json"]));
-    let count = listed
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|session| session["id"] == newest_chat.as_str())
-        .unwrap()["message_count"]
-        .clone();
-    assert_eq!(count, show["message_count"]);
-    assert_eq!(
-        show["messages"].as_array().unwrap().len() as u64,
-        count.as_u64().unwrap()
-    );
+    for id in [&newest_chat, &newest_agent] {
+        let show = json(&ok(&fixture, &["show", id, "--json"]));
+        let summary = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["id"] == id.as_str())
+            .unwrap();
+        let count = summary["message_count"].clone();
+        assert_eq!(count, show["message_count"]);
+        assert_eq!(
+            show["messages"].as_array().unwrap().len() as u64,
+            count.as_u64().unwrap()
+        );
+        let chars: usize = show["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["content"].as_str().unwrap().chars().count())
+            .sum();
+        assert_eq!(summary["token_estimate"], show["token_estimate"]);
+        assert_eq!(
+            summary["token_estimate"].as_u64().unwrap(),
+            chars.div_ceil(4) as u64
+        );
+    }
 }
 
 fn ok(fixture: &Fixture, args: &[&str]) -> String {

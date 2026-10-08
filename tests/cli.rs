@@ -69,7 +69,7 @@ fn keys(value: &Value) -> Vec<&str> {
         .collect()
 }
 
-const SUMMARY_KEYS: [&str; 9] = [
+const SUMMARY_KEYS: [&str; 10] = [
     "id",
     "title",
     "source",
@@ -79,6 +79,7 @@ const SUMMARY_KEYS: [&str; 9] = [
     "created_at",
     "updated_at",
     "message_count",
+    "token_estimate",
 ];
 
 #[test]
@@ -249,6 +250,7 @@ fn list_json_has_the_documented_keys() {
         assert_eq!(keys(summary), SUMMARY_KEYS);
         assert!(["agent", "ide"].contains(&summary["source"].as_str().unwrap()));
         assert!(summary["message_count"].is_u64());
+        assert!(summary["token_estimate"].is_u64());
         for time in ["created_at", "updated_at"] {
             let value = &summary[time];
             assert!(
@@ -269,6 +271,8 @@ fn list_json_has_the_documented_keys() {
             "created_at": "2025-09-04T15:33:20Z",
             "updated_at": "2025-09-04T16:33:20Z",
             "message_count": 4,
+            // 162 characters in its four messages, the tool calls left out.
+            "token_estimate": 41,
         })
     );
     // No update time is shown as null, not as the creation time.
@@ -1350,6 +1354,41 @@ fn piped_json_escapes_controls_a_terminal_would_act_on() {
 
 /// The binary in a pseudo-terminal, through script(1). Windows has no
 /// script(1), and ConPTY would need a new dependency, so these run on Unix.
+#[test]
+fn listed_token_estimates_are_those_show_prints() {
+    for fixture in [standard()] {
+        let listed = json(&ok(&fixture, &["list", "--json"]));
+        let listed = listed.as_array().unwrap();
+        assert!(listed.iter().any(|s| s["source"] == "agent"));
+        assert!(listed.iter().any(|s| s["source"] == "ide"));
+        for summary in listed {
+            let id = summary["id"].as_str().unwrap();
+            let estimate = &summary["token_estimate"];
+            for extra in [&[][..], &["--limit", "1"]] {
+                let args = [&["show", id, "--json"][..], extra].concat();
+                assert_eq!(
+                    &json(&ok(&fixture, &args))["token_estimate"],
+                    estimate,
+                    "{id}"
+                );
+            }
+            let shown = ok(&fixture, &["show", id]);
+            assert!(
+                shown.contains(&format!("\ntokens:    ~{estimate} (estimate)\n")),
+                "{shown}"
+            );
+            let detail = json(&ok(&fixture, &["show", id, "--json"]));
+            let chars: usize = detail["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["content"].as_str().unwrap().chars().count())
+                .sum();
+            assert_eq!(estimate.as_u64().unwrap(), chars.div_ceil(4) as u64, "{id}");
+        }
+    }
+}
+
 #[cfg(unix)]
 mod tty {
     use std::sync::mpsc;

@@ -301,7 +301,7 @@ pub fn load_full(paths: &StoragePaths, opts: &LoadOptions) -> cursor_session::Re
 }
 
 /// Loads the messages of each of `summaries`, checking that they number what
-/// the summary counted.
+/// the summary counted, with as many characters.
 pub fn with_messages(summaries: &[SessionSummary]) -> cursor_session::Result<Vec<Session>> {
     summaries
         .iter()
@@ -311,6 +311,11 @@ pub fn with_messages(summaries: &[SessionSummary]) -> cursor_session::Result<Vec
                 session.messages.len(),
                 summary.message_count,
                 "messages of {} differ from the count",
+                summary.id
+            );
+            assert_eq!(
+                session.content_chars, summary.content_chars,
+                "characters of {} differ from the count",
                 summary.id
             );
             Ok(session)

@@ -92,12 +92,21 @@ pub enum ColorChoice {
 #[derive(Subcommand)]
 pub enum Commands {
     /// List sessions, most recently updated first
+    ///
+    /// TOKENS (`token_estimate` in --json) estimates how many tokens the
+    /// messages `show` prints by default take: ceil(characters / 4). It is an
+    /// estimate, not any model's tokenizer count.
     #[command(
         after_help = LIST_EXAMPLES,
         after_long_help = format!("{LIST_EXAMPLES}\n\n{EXIT_CODES}")
     )]
     List(ListArgs),
     /// Show messages from a session
+    ///
+    /// The header's `tokens:` line (`token_estimate` in --json) estimates how
+    /// many tokens the session's messages take: ceil(characters / 4), for the
+    /// whole session whatever --limit prints. It is an estimate, not any
+    /// model's tokenizer count.
     #[command(
         after_help = SHOW_EXAMPLES,
         after_long_help = format!("{SHOW_EXAMPLES}\n\n{EXIT_CODES}")

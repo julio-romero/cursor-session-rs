@@ -10,6 +10,7 @@ model:     claude-4.5-sonnet
 created:   [2m2025-09-04 15:33 UTC[0m
 updated:   [2m2025-09-04 16:33 UTC[0m
 messages:  4
+tokens:    ~41 (estimate)
 
 [2m2 earlier message(s) omitted. Use --limit N or --all to see more.[0m
 

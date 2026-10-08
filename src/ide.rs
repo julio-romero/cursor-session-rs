@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::detect::StoragePaths;
 use crate::json::{self, lenient, lenient_ms};
-use crate::model::{Message, MessagesAt, SessionSummary, Source};
+use crate::model::{Message, MessagesAt, SessionSummary, Source, content_chars};
 use crate::sqlite::with_readonly;
 use crate::{Error, Result};
 
@@ -399,6 +399,11 @@ fn count_chats(
             }
             stats.messages += chat.messages.len();
             session.message_count = chat.messages.len();
+            session.content_chars = chat
+                .messages
+                .iter()
+                .map(|message| content_chars(&message.content))
+                .sum();
         }
         counted.push(session);
     }
@@ -1230,6 +1235,7 @@ mod tests {
                         "{}",
                         summary.id
                     );
+                    assert_eq!(session.content_chars, summary.content_chars);
                     Ok(session)
                 })
                 .collect()

@@ -689,7 +689,8 @@ mod tests {
         let terminal = OutputOpts {
             tty: true,
             color: false,
-            width: Some(98),
+            // Wide enough for the full IDs beside TOKENS and a title.
+            width: Some(106),
         };
         let table = |argv: &[&str]| {
             let cli =
