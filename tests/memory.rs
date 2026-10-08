@@ -195,13 +195,15 @@ fn listing_a_large_history_stays_under_a_fixed_peak_memory() {
 
     let newest_agent = agent_id(AGENT_SESSIONS - 1);
     let newest_chat = chat_id(IDE_CHATS - 1);
-    let commands: [&[&str]; 6] = [
+    let commands: [&[&str]; 8] = [
         &["list"],
         &["list", "--json"],
         &["list", "--limit", "5"],
         &["show", &newest_agent, "--json"],
         &["show", &newest_chat],
         &["healthcheck"],
+        &["completions", "bash"],
+        &["man"],
     ];
     // A child starts out with this peak on Linux, so it must leave room.
     let own = own_peak_rss();

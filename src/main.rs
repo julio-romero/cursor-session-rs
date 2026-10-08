@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod generate;
 mod output;
 
 use std::env;
@@ -44,7 +45,12 @@ fn main() -> ExitCode {
     }
     let mut out = PipeWriter::new(stdout_sink(&opts));
     let mut err = diagnostics(io::stderr().lock());
-    let (paths, result) = match resolve_paths(cli.storage.as_deref()) {
+    let resolved = if cli.command.reads_storage() {
+        resolve_paths(cli.storage.as_deref())
+    } else {
+        Ok(StoragePaths::default())
+    };
+    let (paths, result) = match resolved {
         Ok(paths) => {
             let result =
                 run(cli, &paths, &opts, &mut out, &mut err).and_then(|()| Ok(out.flush()?));
@@ -146,6 +152,9 @@ fn run(
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Result<()> {
+    if !cli.command.reads_storage() {
+        return commands::run(cli.command, paths, opts, out, err);
+    }
     cursor_session::remove_stale_snapshot_copies();
     if cli.verbose {
         writeln!(err, "chats: {}", shown(paths.chats_dir.as_deref()))?;

@@ -14,7 +14,7 @@ use cursor_session::model::{Message, Session};
 use cursor_session::ui;
 use serde_json::Value;
 
-const SUBCOMMANDS: [&str; 4] = ["list", "show", "export", "healthcheck"];
+const SUBCOMMANDS: [&str; 5] = ["list", "show", "export", "healthcheck", "completions"];
 
 /// The start of a usage line. clap names the program after the file it ran
 /// from, which ends in `.exe` on Windows.
@@ -106,13 +106,15 @@ fn help_describes_every_subcommand() {
         }
         assert!(help.contains("--storage <PATH>"));
         assert!(help.contains("Examples:"));
+        // `man` is for packagers.
+        assert!(!help.contains("\n  man "), "{flag}\n{help}");
     }
     let long = ok(&fixture, &["--help"]);
     assert!(long.contains("Exit codes:"));
     assert!(long.contains("~/.cursor/chats"));
     assert!(long.contains("state.vscdb"));
 
-    for command in SUBCOMMANDS {
+    for command in SUBCOMMANDS.into_iter().chain(["man"]) {
         let help = ok(&fixture, &[command, "--help"]);
         assert!(help.contains(&usage(command)), "{help}");
     }
@@ -120,6 +122,31 @@ fn help_describes_every_subcommand() {
         assert!(ok(&fixture, &["list", "--help"]).contains(flag), "{flag}");
         assert!(ok(&fixture, &["show", "--help"]).contains(flag), "{flag}");
     }
+}
+
+/// Completion scripts and man pages come from the binary alone: no storage
+/// is looked for, so neither a missing one nor `--storage` stops them.
+#[test]
+fn completions_and_man_pages_need_no_storage() {
+    let fixture = Fixture::new();
+    let missing = fixture.home().join("missing");
+    let missing = missing.to_str().unwrap();
+    for (args, starts) in [
+        (&["completions", "bash"][..], "_cursor__session() {\n"),
+        (&["completions", "zsh"], "#compdef cursor-session\n"),
+        (&["completions", "fish"], "# Print an optspec"),
+        (&["man"], ".ie \\n(.g .ds Aq"),
+        (&["man", "export"], ".ie \\n(.g .ds Aq"),
+    ] {
+        let plain = ok(&fixture, args);
+        assert!(plain.starts_with(starts), "{args:?}: {plain}");
+        let mut with_storage = vec!["-v", "--storage", missing, "--color", "always"];
+        with_storage.extend(args);
+        assert_eq!(ok(&fixture, &with_storage), plain, "{args:?}");
+    }
+    let page = ok(&fixture, &["man", "export"]);
+    assert!(page.contains("\n.TH cursor-session-export 1 "), "{page}");
+    assert!(page.contains("\\fB\\-\\-workspace\\fR"), "{page}");
 }
 
 #[test]
@@ -141,6 +168,12 @@ fn usage_errors_exit_2() {
         &["export", "--workspace", ""],
         &["list", "--limit", ""],
         &["--color", "sometimes", "list"],
+        &["completions"],
+        &["completions", "powershell"],
+        &["completions", "bash", "zsh"],
+        &["man", "bogus"],
+        &["man", "man"],
+        &["man", "help"],
     ] {
         let output = run(&fixture, args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -604,6 +637,8 @@ fn a_full_stdout_is_an_error() {
         &["show", AGENT_ID, "--json"],
         &["--help"],
         &["--version"],
+        &["completions", "bash"],
+        &["man"],
     ] {
         let output = fixture
             .command()
