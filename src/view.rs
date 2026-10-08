@@ -6,7 +6,7 @@ use std::borrow::Cow;
 
 use crate::ReadOptions;
 use crate::model::{Message, TOOL_ROLE};
-use crate::ui;
+use crate::{tools, ui};
 
 /// Characters (Unicode scalar values) of a message that `--short` keeps.
 pub const SHORT_CHARS: usize = 300;
@@ -63,6 +63,12 @@ impl View {
         self.only.iter().any(|wanted| wanted.as_str() == role)
     }
 
+    /// The roles of `only` as `--only` takes them, such as `user,tool`.
+    pub fn only_list(&self) -> String {
+        let roles: Vec<&str> = self.only.iter().map(|role| role.as_str()).collect();
+        roles.join(",")
+    }
+
     /// The messages this view prints, in order, cut short if it says so.
     pub fn apply(&self, messages: Vec<Message>) -> Vec<Message> {
         messages
@@ -81,10 +87,19 @@ impl View {
 
 /// `message` cut short: its first [`SHORT_CHARS`] characters, then `…` when
 /// there were more; a tool message as a one-line preview (see
-/// [`preview`]).
+/// [`preview`]) that keeps the marker of a call that failed, such as
+/// `(error)`, however much it cuts.
 pub fn shorten(mut message: Message) -> Message {
     let short = if message.role == TOOL_ROLE {
-        Cow::Owned(preview(&message.content))
+        let (text, marker) = tools::split_marker(&message.content);
+        let mut line = preview(text);
+        if let Some(marker) = marker {
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(marker);
+        }
+        Cow::Owned(line)
     } else {
         cut(&message.content, SHORT_CHARS)
     };
@@ -165,6 +180,8 @@ mod tests {
             roles(&view(&[Role::User, Role::Assistant, Role::Tool]).apply(conversation())),
             ["user", "assistant", "tool", "tool", "assistant"]
         );
+        assert_eq!(view(&[Role::Tool, Role::User]).only_list(), "tool,user");
+        assert_eq!(View::default().only_list(), "");
         assert!(view(&[Role::Tool]).read_options().tools);
         assert!(!view(&[Role::User, Role::Assistant]).read_options().tools);
         assert!(!View::default().read_options().tools);
@@ -203,6 +220,17 @@ mod tests {
         // A cut does not leave a space before the ellipsis.
         let words = "word ".repeat(30);
         assert_eq!(tool(&words), format!("{}…", "word ".repeat(24).trim_end()));
+        // The marker of a failed call stays, however much is cut.
+        assert_eq!(tool("not\nfound (error)"), "not found (error)");
+        assert_eq!(
+            tool(&format!("{} (error)", "x".repeat(500))),
+            format!("{}… (error)", "x".repeat(TOOL_PREVIEW_CHARS))
+        );
+        assert_eq!(tool("(cancelled)"), "(cancelled)");
+        assert_eq!(
+            tool(r#"Shell {"command":"ls"} (cancelled)"#),
+            r#"Shell {"command":"ls"} (cancelled)"#
+        );
     }
 
     #[test]

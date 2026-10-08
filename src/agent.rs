@@ -1042,7 +1042,10 @@ fn tool_line(content: &Value) -> Vec<Message> {
             for part in parts {
                 let text = match part_kind(part) {
                     "text" => part.get("text").and_then(tools::result),
-                    _ => tool_part(part),
+                    "tool_use" | "tool_result" => tool_part(part),
+                    // Any other part, such as an image, as a result's part
+                    // is shown: by its text, or a placeholder.
+                    _ => tool_part(part).or_else(|| tools::result(part)),
                 };
                 messages.extend(text.and_then(tools::message));
             }
@@ -1066,7 +1069,8 @@ fn part_kind(part: &Value) -> &str {
     }
 }
 
-/// A `tool_use` part as a call, and any other part as what a tool returned.
+/// A `tool_use` part as a call, and any other part as what a tool returned,
+/// marked `(error)` when it says it is an error (`is_error`).
 fn tool_part(part: &Value) -> Option<String> {
     if part_kind(part) == "tool_use" {
         let name = part.get("name").and_then(Value::as_str);
@@ -1075,9 +1079,13 @@ fn tool_part(part: &Value) -> Option<String> {
             .find_map(|key| part.get(*key));
         return Some(tools::call(name, args));
     }
-    ["content", "result", "output", "text"]
+    let text = ["content", "result", "output", "text"]
         .iter()
-        .find_map(|key| part.get(*key).and_then(tools::result))
+        .find_map(|key| part.get(*key).and_then(tools::result));
+    match part.get("is_error") {
+        Some(Value::Bool(true)) => Some(tools::marked(text, "error")),
+        _ => text,
+    }
 }
 
 /// Content parts that are never shown.
@@ -1375,6 +1383,40 @@ mod tests {
             r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}"#,
         ]);
         assert_eq!(pairs(&read), [("tool", "Read")]);
+    }
+
+    #[test]
+    fn failed_tool_results_are_marked() {
+        let read = tool_messages(&[
+            r#"{"role":"tool","message":{"content":[{"type":"tool_result","is_error":true,"content":"No such file\n"},{"type":"tool_result","is_error":true},{"type":"tool_result","is_error":false,"content":"fine"}]}}"#,
+            r#"{"role":"user","message":{"content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"denied"}]},{"type":"text","text":"why?"}]}}"#,
+        ]);
+        assert_eq!(
+            pairs(&read),
+            [
+                ("tool", "No such file (error)"),
+                ("tool", "(error)"),
+                ("tool", "fine"),
+                ("tool", "denied (error)"),
+                ("user", "why?"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parts_of_a_tool_line_without_text_are_placeholders() {
+        let image = r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}"#;
+        let read = tool_messages(&[
+            &format!(r#"{{"role":"tool","message":{{"content":[{image}]}}}}"#),
+            &format!(
+                r#"{{"role":"tool","message":{{"content":[{{"type":"tool_result","content":[{image}]}}]}}}}"#
+            ),
+            r#"{"role":"tool","message":{"content":[{"type":"output","output":"ran"}]}}"#,
+        ]);
+        assert_eq!(
+            pairs(&read),
+            [("tool", "[image]"), ("tool", "[image]"), ("tool", "ran")]
+        );
     }
 
     #[test]

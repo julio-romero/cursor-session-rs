@@ -121,9 +121,13 @@ pub enum Commands {
     /// Show messages from a session
     ///
     /// The header's `tokens:` line (`token_estimate` in --json) estimates how
-    /// many tokens the session's messages take: ceil(characters / 4), for the
-    /// whole session whatever --only, --short or --limit print. It is an
-    /// estimate, not any model's tokenizer count.
+    /// many tokens the messages `show` prints by default take: ceil(characters
+    /// / 4). Tool calls and results are not counted. It is an estimate, not
+    /// any model's tokenizer count.
+    ///
+    /// The header's `messages:` and `tokens:` lines (`message_count` and
+    /// `token_estimate` in --json) are always those of the whole session,
+    /// whatever --only, --short or --limit print.
     #[command(
         after_help = SHOW_EXAMPLES,
         after_long_help = format!("{SHOW_EXAMPLES}\n\n{EXIT_CODES}")
@@ -216,7 +220,8 @@ pub struct ShowArgs {
     #[arg(long)]
     pub all: bool,
     /// Print only messages of these roles, comma-separated; `tool` adds the
-    /// tool calls and results, which are left out otherwise. --limit counts
+    /// tool calls and results, which are left out otherwise, a call that
+    /// failed or was stopped marked `(error)` or `(cancelled)`. --limit counts
     /// only the messages printed
     #[arg(long, value_name = "ROLES", value_enum, value_delimiter = ',')]
     pub only: Vec<Role>,
