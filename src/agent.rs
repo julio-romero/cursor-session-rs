@@ -958,9 +958,8 @@ enum Line {
 }
 
 fn read_line(line: &str, build: bool) -> Line {
-    let entry = match json::from_str::<TranscriptLine>(line) {
-        Ok(entry) => entry,
-        Err(err) => return misshapen_line(line, &err),
+    let Ok(entry) = json::from_str::<TranscriptLine>(line) else {
+        return misshapen_line(line);
     };
     let Some(role) = entry.role else {
         return Line::Unreadable { json: true };
@@ -996,26 +995,27 @@ fn read_line(line: &str, build: bool) -> Line {
     }
 }
 
-/// What a line that `err` says is not a transcript line is: a line of a
-/// role never shown (system, tool) whatever its message holds, as such a
-/// line reads; otherwise unreadable, and JSON unless `err` is a syntax error
-/// or the line ends early. Only lines that fail to read come here, so
+/// What a line that is not a transcript line is: a line of a role never
+/// shown (system, tool) whatever its message holds, as such a line reads;
+/// otherwise unreadable, and JSON when it is JSON at all, so that only a line
+/// that is not JSON (as one cut off) counts as not JSON. serde reports some
+/// shapes (an array longer than the struct it fills) as syntax errors, so
+/// the error does not tell. Only lines that fail to read come here, so
 /// reading them again costs nothing on lines that read.
-fn misshapen_line(line: &str, err: &serde_json::Error) -> Line {
+fn misshapen_line(line: &str) -> Line {
     #[derive(Deserialize)]
     struct RoleOnly {
         #[serde(default, deserialize_with = "lenient")]
         role: Option<String>,
     }
-    if !err.is_data() {
-        return Line::Unreadable { json: false };
-    }
     let role = json::from_str::<RoleOnly>(line)
         .ok()
         .and_then(|line| line.role);
-    match role.as_deref() {
-        Some("system" | "tool") => Line::Nothing,
-        _ => Line::Unreadable { json: true },
+    if matches!(role.as_deref(), Some("system" | "tool")) {
+        return Line::Nothing;
+    }
+    Line::Unreadable {
+        json: json::from_str::<IgnoredAny>(line).is_ok(),
     }
 }
 

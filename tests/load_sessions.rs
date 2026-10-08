@@ -600,6 +600,13 @@ fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not
     text.push_str(&line(plain_message("system", "rules")));
     text.push_str(&line(json!({"role": "tool", "message": "plain result"})));
     text.push_str(&line(json!({"role": "system", "message": ["x"]})));
+    // serde reads an array longer than the message it fills as a syntax
+    // error; such a line is still JSON, and of a role never shown.
+    text.push_str(&line(json!({"role": "system", "message": [1, 2]})));
+    text.push_str(&line(json!({"role": "tool", "message": [
+        {"type": "tool_result", "content": "a"},
+        {"type": "tool_result", "content": "b"},
+    ]})));
     text.push_str(&line(json!({"message": {"content": "no role"}})));
     text.push_str(&line(plain_message("user", "third")));
     write(&mid, &text);
@@ -625,7 +632,8 @@ fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not
         [format!("skipped 3 unreadable lines in {}", mid.display())]
     );
 
-    // A last line that is JSON of another shape was written whole.
+    // A last line that is JSON of another shape was written whole, also
+    // one whose message is an array serde reads as a syntax error.
     let shape = fixture.write_transcript(
         "Users-demo-project-x",
         "shape",
@@ -634,13 +642,14 @@ fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not
     );
     let mut text = fs::read_to_string(&shape).unwrap();
     text.push_str(&line(json!({"role": "assistant", "message": 5})));
+    text.push_str(&line(json!({"role": "assistant", "message": ["a", "b"]})));
     write(&shape, &text);
     let loaded = fixture.load();
     let first = mid.clone().min(shape.clone());
     assert_eq!(
         loaded.warnings,
         [format!(
-            "skipped 4 unreadable lines in 2 transcripts (first: {})",
+            "skipped 5 unreadable lines in 2 transcripts (first: {})",
             first.display()
         )]
     );
@@ -648,7 +657,7 @@ fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not
     let loaded = fixture.load();
     assert_eq!(
         loaded.warnings,
-        [format!("skipped 1 unreadable line in {}", shape.display())]
+        [format!("skipped 2 unreadable lines in {}", shape.display())]
     );
 }
 
@@ -683,7 +692,9 @@ fn transcripts_whose_roles_were_renamed_are_an_unrecognized_format() {
 #[test]
 fn transcripts_of_only_system_and_tool_lines_are_no_unrecognized_format() {
     let fixture = Fixture::new();
-    // Messages that are not objects, as a tool result written as a string.
+    // Messages that are not objects, as a tool result written as a string,
+    // or arrays, which serde reads as a syntax error when they are longer
+    // than the message they fill.
     for id in ["a", "b"] {
         fixture.write_transcript(
             "Users-demo-project-x",
@@ -695,6 +706,18 @@ fn transcripts_of_only_system_and_tool_lines_are_no_unrecognized_format() {
             ],
         );
     }
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        "c",
+        Layout::Nested,
+        &[
+            json!({"role": "system", "message": [1, 2]}),
+            json!({"role": "tool", "message": [
+                {"type": "tool_result", "content": "a"},
+                {"type": "tool_result", "content": "b"},
+            ]}),
+        ],
+    );
     // Sessions without messages to show, as before; no error, no warning.
     let loaded = fixture.load_source(Some(Source::Agent)).unwrap();
     assert!(loaded.summaries.is_empty(), "{:?}", loaded.summaries);
