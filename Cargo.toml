@@ -1,9 +1,9 @@
 [package]
 name = "cursor-session"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
-description = "List, show, and export Cursor IDE and Agent CLI chat sessions"
+description = "List, show, search, and export Cursor IDE and Agent CLI chat sessions, and hand one off to another agent"
 license = "MIT"
 repository = "https://github.com/julio-romero/cursor-session-rs"
 homepage = "https://github.com/julio-romero/cursor-session-rs"
