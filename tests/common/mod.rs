@@ -450,6 +450,116 @@ pub fn tool_use(name: &str, input: &Value) -> Value {
     json!({"type": "tool_use", "name": name, "input": input})
 }
 
+/// What a tool returned, as a `tool_result` content part.
+pub fn tool_result(content: &Value) -> Value {
+    json!({"type": "tool_result", "tool_use_id": "call-1", "content": content})
+}
+
+/// A transcript line of the role `tool`.
+pub fn tool_line(parts: &[Value]) -> Value {
+    json!({"role": "tool", "message": {"content": parts}})
+}
+
+/// An IDE message that makes a tool call, with what it returned, as Cursor
+/// keeps them in `toolFormerData`: the arguments and the result as JSON in
+/// strings.
+pub fn tool_bubble(id: &str, text: &str, name: &str, args: &Value, result: &Value) -> Value {
+    json!({
+        "bubbleId": id,
+        "type": 2,
+        "text": text,
+        "toolFormerData": {
+            "tool": 5,
+            "toolCallId": format!("call-{id}"),
+            "name": name,
+            "rawArgs": args.to_string(),
+            "params": args.to_string(),
+            "result": result.to_string(),
+            "status": "completed",
+        },
+    })
+}
+
+/// Agent CLI session with tool calls and results, from [`tools`].
+pub const AGENT_TOOLS_ID: &str = "70015000-aaaa-4bbb-8ccc-000000000001";
+/// IDE chat with tool calls, from [`tools`].
+pub const IDE_TOOLS_ID: &str = "70015000-aaaa-4bbb-8ccc-000000000002";
+
+/// One session in each store whose messages make tool calls.
+pub fn tools() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.write_meta_json(
+        PROJECT_X,
+        AGENT_TOOLS_ID,
+        &json!({
+            "title": "Agent with tools",
+            "createdAtMs": 1_757_500_000_000_i64,
+            "updatedAtMs": 1_757_500_060_000_i64,
+            "cwd": PROJECT_X,
+        }),
+    );
+    fixture.write_transcript(
+        "Users-demo-project-x",
+        AGENT_TOOLS_ID,
+        Layout::Nested,
+        &[
+            user_query("Mon", "Where is langfuse configured?"),
+            assistant(&[
+                text_part("Let me search."),
+                tool_use("Grep", &json!({"pattern": "langfuse"})),
+            ]),
+            tool_line(&[tool_result(&json!("src/config.rs:12: langfuse_host"))]),
+            assistant(&[tool_use("Read", &json!({"path": "src/config.rs"}))]),
+            tool_line(&[tool_result(&json!([text_part(&"long line ".repeat(40))]))]),
+            assistant(&[text_part(&format!(
+                "It is configured in src/config.rs.{}",
+                " Details follow.".repeat(20)
+            ))]),
+        ],
+    );
+    fixture.write_ide_db(
+        Journal::Delete,
+        &[
+            composer(
+                IDE_TOOLS_ID,
+                &composer_json(
+                    IDE_TOOLS_ID,
+                    "IDE with tools",
+                    1_757_400_000_000,
+                    1_757_400_060_000,
+                    &[("t1", 1), ("t2", 2), ("t3", 2)],
+                ),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_TOOLS_ID,
+                "t1",
+                &text_bubble("t1", 1, "List the files."),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_TOOLS_ID,
+                "t2",
+                &tool_bubble(
+                    "t2",
+                    "Listing them.",
+                    "list_dir",
+                    &json!({"relative_workspace_path": "."}),
+                    &json!({"files": ["Cargo.toml", "src"]}),
+                ),
+                Stored::Text,
+            ),
+            bubble(
+                IDE_TOOLS_ID,
+                "t3",
+                &text_bubble("t3", 2, "Two entries."),
+                Stored::Text,
+            ),
+        ],
+    );
+    fixture
+}
+
 /// Seven sessions covering both stores, every storage variant and missing
 /// fields, with fixed times (see the `*_ID` constants).
 pub fn standard() -> Fixture {

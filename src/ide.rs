@@ -13,7 +13,7 @@ use crate::detect::StoragePaths;
 use crate::json::{self, lenient, lenient_ms};
 use crate::model::{Message, MessagesAt, SessionSummary, Source, content_chars};
 use crate::sqlite::with_readonly;
-use crate::{Error, Result};
+use crate::{Error, ReadOptions, Result, tools};
 
 const KV_TABLE: &str = "cursorDiskKV";
 
@@ -53,9 +53,11 @@ struct ConversationHeader {
     kind: Option<Kind>,
 }
 
+/// A message. Its tool call, `toolFormerData`, is read as a `T`: skipped
+/// unread ([`IgnoredAny`]) unless tool messages are asked for ([`ToolCall`]).
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Bubble {
+#[serde(rename_all = "camelCase", bound(deserialize = "T: Deserialize<'de>"))]
+struct Bubble<T = IgnoredAny> {
     #[serde(default, deserialize_with = "lenient")]
     bubble_id: Option<String>,
     #[serde(default, deserialize_with = "lenient")]
@@ -68,19 +70,75 @@ struct Bubble {
     kind: Option<Kind>,
     #[serde(default, deserialize_with = "lenient")]
     code_blocks: Vec<CodeBlock>,
-    /// A tool call, which is never shown.
+    /// A tool call, shown only when asked for.
     #[serde(default)]
-    tool_former_data: Option<IgnoredAny>,
+    tool_former_data: Option<T>,
     /// Images, which are never shown.
     #[serde(default, deserialize_with = "lenient")]
     images: Vec<Value>,
 }
 
-impl Bubble {
+impl<T> Bubble<T> {
     /// Whether it holds something that is never shown, such as a tool call or
     /// an image, so that having no text to show is no sign of a new format.
     fn has_hidden_content(&self) -> bool {
         self.tool_former_data.is_some() || !self.images.is_empty() || !self.code_blocks.is_empty()
+    }
+}
+
+/// What a message's `toolFormerData` is read as.
+trait ToolData: DeserializeOwned {
+    /// The tool messages it makes, in order.
+    fn messages(self) -> impl Iterator<Item = Message>;
+}
+
+impl ToolData for IgnoredAny {
+    fn messages(self) -> impl Iterator<Item = Message> {
+        std::iter::empty()
+    }
+}
+
+/// A tool call and what it returned, from a message's `toolFormerData`. It
+/// is read leniently: a value of another shape makes no tool message, and
+/// costs neither the message nor its chat.
+#[derive(Debug, Default)]
+struct ToolCall {
+    name: Option<String>,
+    /// `rawArgs`, else `params`: usually JSON in a string.
+    args: Option<Value>,
+    /// Usually JSON in a string.
+    result: Option<Value>,
+}
+
+impl<'de> Deserialize<'de> for ToolCall {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let Value::Object(mut fields) = Value::deserialize(deserializer)? else {
+            return Ok(Self::default());
+        };
+        let given = |value: &Value| match value {
+            Value::Null => false,
+            Value::String(text) => !text.trim().is_empty(),
+            _ => true,
+        };
+        let name = match fields.remove("name") {
+            Some(Value::String(name)) => Some(name),
+            _ => None,
+        };
+        let args = ["rawArgs", "params"]
+            .iter()
+            .find_map(|key| fields.remove(*key).filter(given));
+        let result = fields.remove("result").filter(given);
+        Ok(Self { name, args, result })
+    }
+}
+
+impl ToolData for ToolCall {
+    /// The call, unless nothing names it or its arguments, then the result.
+    fn messages(self) -> impl Iterator<Item = Message> {
+        let call = (self.name.is_some() || self.args.is_some())
+            .then(|| tools::call(self.name.as_deref(), self.args.as_ref()));
+        let result = self.result.as_ref().and_then(tools::result);
+        call.into_iter().chain(result).filter_map(tools::message)
     }
 }
 
@@ -388,7 +446,7 @@ fn count_chats(
                 None
             };
             let has_stored = bubbles.is_some();
-            let chat = chat_messages(composer, bubbles, &mut stats.untyped);
+            let chat = chat_messages::<IgnoredAny>(composer, bubbles, &mut stats.untyped);
             if has_stored {
                 stats.stored += 1;
                 stats.unlinked += usize::from(!chat.linked);
@@ -523,8 +581,23 @@ fn report(
 }
 
 /// The messages of the chat whose row has `key` (a BLOB when `blob_key` is
-/// set), with the messages stored for chat `id`.
+/// set), with the messages stored for chat `id`, and their tool calls and
+/// results when `read.tools` is set.
 pub(crate) fn read_messages(
+    db_path: &Path,
+    key: &str,
+    blob_key: bool,
+    id: &str,
+    read: ReadOptions,
+) -> Result<Vec<Message>> {
+    if read.tools {
+        read_chat::<ToolCall>(db_path, key, blob_key, id)
+    } else {
+        read_chat::<IgnoredAny>(db_path, key, blob_key, id)
+    }
+}
+
+fn read_chat<T: ToolData>(
     db_path: &Path,
     key: &str,
     blob_key: bool,
@@ -535,7 +608,7 @@ pub(crate) fn read_messages(
         let Some(composer) = read_composer(conn, db_path, key, blob_key)? else {
             return Ok(Vec::new());
         };
-        let bubbles = chat_bubbles(conn, db_path, id, &mut Rows::default())?;
+        let bubbles = chat_bubbles::<T>(conn, db_path, id, &mut Rows::default())?;
         Ok(chat_messages(composer, bubbles, &mut 0).messages)
     })
 }
@@ -583,12 +656,12 @@ fn read_composer(
 /// The messages stored for chat `id`, its `bubbleId:<id>:<message>` rows, by
 /// message ID; `None` when none of them could be read. Rows are counted in
 /// `rows`.
-fn chat_bubbles(
+fn chat_bubbles<T: DeserializeOwned>(
     conn: &Connection,
     db_path: &Path,
     id: &str,
     rows: &mut Rows,
-) -> Result<Option<HashMap<String, Bubble>>> {
+) -> Result<Option<HashMap<String, Bubble<T>>>> {
     let mut bubbles = HashMap::new();
     for_chat_rows(
         conn,
@@ -611,11 +684,11 @@ const BUBBLE_PREFIX: &[u8] = b"bubbleId:";
 /// Calls `visit` with the message ID from the key and the message of each
 /// non-NULL `bubbleId:<chat>:<message>` row of `chat`; `None` for a row that
 /// cannot be read.
-fn for_chat_rows(
+fn for_chat_rows<T: DeserializeOwned>(
     conn: &Connection,
     db_path: &Path,
     chat: &[u8],
-    mut visit: impl FnMut(String, Option<Bubble>),
+    mut visit: impl FnMut(String, Option<Bubble<T>>),
 ) -> Result<()> {
     let bound = |end: u8| [BUBBLE_PREFIX, chat, &[end]].concat();
     scan_rows(conn, db_path, &bound(b':'), &bound(b';'), |row| {
@@ -626,7 +699,7 @@ fn for_chat_rows(
         }
         let message = row.text.and_then(|(key, value)| {
             let message_id = key.split_once(':')?.1.split_once(':')?.1;
-            Some((message_id.to_string(), parse_object::<Bubble>(value)?))
+            Some((message_id.to_string(), parse_object::<Bubble<T>>(value)?))
         });
         match message {
             Some((message_id, bubble)) => visit(message_id, Some(bubble)),
@@ -1047,10 +1120,11 @@ struct ChatMessages {
 /// The messages of `composer`, from `bubbles`, its stored messages, or those
 /// kept inline, as older Cursor versions did for composers without
 /// conversation headers. Messages without a known type are counted in
-/// `untyped`.
-fn chat_messages(
+/// `untyped`. Each message is followed by the tool messages of its tool call,
+/// which only a `T` other than [`IgnoredAny`] makes.
+fn chat_messages<T: ToolData>(
     composer: Composer,
-    mut bubbles: Option<HashMap<String, Bubble>>,
+    mut bubbles: Option<HashMap<String, Bubble<T>>>,
     untyped: &mut usize,
 ) -> ChatMessages {
     let mut messages = Vec::new();
@@ -1062,23 +1136,27 @@ fn chat_messages(
             .bubble_id
             .as_ref()
             .and_then(|bubble_id| bubbles.as_mut()?.remove(bubble_id));
-        let Some(bubble) = bubble else {
+        let Some(mut bubble) = bubble else {
             all_hidden = false;
             continue;
         };
         linked = true;
         all_hidden &= bubble.has_hidden_content();
+        let tool = bubble.tool_former_data.take();
         messages.extend(message(header.kind.or(bubble.kind), bubble, untyped));
+        messages.extend(tool.into_iter().flat_map(ToolData::messages));
     }
     if composer.full_conversation_headers_only.is_empty() {
         for value in composer.conversation {
-            let Ok(bubble) = serde_json::from_value::<Bubble>(value) else {
+            let Ok(mut bubble) = serde_json::from_value::<Bubble<T>>(value) else {
                 all_hidden = false;
                 continue;
             };
             linked = true;
             all_hidden &= bubble.has_hidden_content();
+            let tool = bubble.tool_former_data.take();
             messages.extend(message(bubble.kind, bubble, untyped));
+            messages.extend(tool.into_iter().flat_map(ToolData::messages));
         }
     }
     let only_hidden = messages.is_empty() && linked && all_hidden;
@@ -1092,7 +1170,7 @@ fn chat_messages(
 /// A message from `bubble`, unless it has no text or code. One without a
 /// known `kind` is counted in `untyped` and goes on with the role `unknown`,
 /// rather than a guess that may be wrong.
-fn message(kind: Option<Kind>, mut bubble: Bubble, untyped: &mut usize) -> Option<Message> {
+fn message<T>(kind: Option<Kind>, mut bubble: Bubble<T>, untyped: &mut usize) -> Option<Message> {
     let timestamp = bubble.timestamp.take();
     let content = extract_bubble_text(bubble);
     if content.is_empty() {
@@ -1113,7 +1191,7 @@ fn message(kind: Option<Kind>, mut bubble: Bubble, untyped: &mut usize) -> Optio
     })
 }
 
-fn extract_bubble_text(bubble: Bubble) -> String {
+fn extract_bubble_text<T>(bubble: Bubble<T>) -> String {
     let mut parts = Vec::new();
     if let Some(text) = bubble.text {
         let trimmed = text.trim();
@@ -1262,6 +1340,76 @@ mod tests {
         assert_eq!(sessions[0].title, "Plan");
         let contents: Vec<_> = sessions[0].messages.iter().map(|m| &m.content).collect();
         assert_eq!(contents, ["question", "answer"]);
+    }
+
+    #[test]
+    fn tool_calls_are_read_only_when_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.vscdb");
+        let headers: Vec<String> = (1..=8)
+            .map(|n| format!(r#"{{"bubbleId":"b{n}","type":{}}}"#, 2 - n % 2))
+            .collect();
+        let composer = format!(
+            r#"{{"composerId":"c1","name":"Tools","fullConversationHeadersOnly":[{}]}}"#,
+            headers.join(",")
+        );
+        let bubbles = [
+            r#"{"type":1,"text":"question"}"#,
+            // Text, then the call it makes and what that returned.
+            r#"{"type":2,"text":"Let me look.","toolFormerData":{"tool":5,"name":"read_file","rawArgs":"{\"target_file\": \"a.rs\"}","params":"{}","result":"{\"contents\":\"fn main() {}\"}","status":"completed"}}"#,
+            r#"{"type":2,"text":"","toolFormerData":{"name":"run_terminal_cmd","params":{"command":"ls"},"status":"cancelled"}}"#,
+            // Shapes this version does not know cost only the tool message.
+            r#"{"type":1,"text":"","toolFormerData":"not an object"}"#,
+            r#"{"type":2,"text":"","toolFormerData":{"name":7,"result":["a",{"text":"b"}]}}"#,
+            r#"{"type":1,"text":"","toolFormerData":{}}"#,
+            r#"{"type":2,"text":"","toolFormerData":null}"#,
+            r#"{"type":2,"text":"answer"}"#,
+        ];
+        let mut rows = vec![("composerData:c1".to_string(), SqlValue::Text(composer))];
+        for (n, bubble) in bubbles.iter().enumerate() {
+            let key = format!("bubbleId:c1:b{}", n + 1);
+            rows.push((key, SqlValue::Text((*bubble).to_string())));
+        }
+        let rows: Vec<(&str, SqlValue)> = rows
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect();
+        create_db(&path, &rows);
+
+        let (sessions, warnings) = load(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let session = &sessions.unwrap()[0];
+        let shown = |messages: &[Message]| -> Vec<(String, String)> {
+            messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect()
+        };
+        assert_eq!(session.message_count, 3);
+        let key = "composerData:c1";
+        let with = read_messages(&path, key, false, "c1", ReadOptions { tools: true }).unwrap();
+        let expected = [
+            ("user", "question"),
+            ("assistant", "Let me look."),
+            ("tool", r#"read_file {"target_file":"a.rs"}"#),
+            ("tool", r#"{"contents":"fn main() {}"}"#),
+            ("tool", r#"run_terminal_cmd {"command":"ls"}"#),
+            ("tool", "a\n\nb"),
+            ("assistant", "answer"),
+        ];
+        let expected: Vec<(String, String)> = expected
+            .iter()
+            .map(|(role, content)| (role.to_string(), content.to_string()))
+            .collect();
+        assert_eq!(shown(&with), expected);
+        // The other messages are those read without the tools.
+        let others: Vec<Message> = with.iter().filter(|m| !m.is_tool()).cloned().collect();
+        assert_eq!(shown(&others), shown(&session.messages));
+        let with = Session::new(session.summary.clone(), with);
+        assert_eq!(
+            (with.message_count, with.content_chars),
+            (session.message_count, session.content_chars)
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod ide;
 mod json;
 pub mod model;
 mod sqlite;
+mod tools;
 pub mod ui;
 
 pub use crate::error::{Error, Result};
@@ -23,6 +24,17 @@ pub struct LoadOptions {
     /// Count the messages of only this many sessions, the most recently
     /// updated; `None` counts them all.
     pub limit: Option<usize>,
+}
+
+/// What reading a session's messages builds besides the messages `show`
+/// prints by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadOptions {
+    /// Also build the tool calls and results, as messages of the role
+    /// [`model::TOOL_ROLE`] among the others. They are no part of the
+    /// session's `message_count` or `content_chars`, and the other messages
+    /// are the same with or without them.
+    pub tools: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,6 +88,25 @@ pub fn load_session(
     warnings: &mut Vec<String>,
     notices: &mut Vec<String>,
 ) -> Result<Session> {
+    load_session_with(
+        paths,
+        opts,
+        query,
+        ReadOptions::default(),
+        warnings,
+        notices,
+    )
+}
+
+/// [`load_session`], with its messages read as `read` says.
+pub fn load_session_with(
+    paths: &StoragePaths,
+    opts: &LoadOptions,
+    query: &str,
+    read: ReadOptions,
+    warnings: &mut Vec<String>,
+    notices: &mut Vec<String>,
+) -> Result<Session> {
     let index = Index::new(paths, opts.source, warnings, notices)?;
     let listed = model::merge_sessions(index.sessions());
     let id = find_session(&listed, query)?.id.clone();
@@ -87,17 +118,22 @@ pub fn load_session(
             query: query.to_string(),
             unsearched: None,
         })?;
-    load_messages(&summary)
+    load_messages_with(&summary, read)
 }
 
 /// The session `summary` lists, with its messages read from where the
 /// summary says they are.
 pub fn load_messages(summary: &SessionSummary) -> Result<Session> {
+    load_messages_with(summary, ReadOptions::default())
+}
+
+/// [`load_messages`], with the messages read as `read` says.
+pub fn load_messages_with(summary: &SessionSummary, read: ReadOptions) -> Result<Session> {
     let messages = match &summary.messages_at {
         MessagesAt::Nowhere => Vec::new(),
-        MessagesAt::Transcript(path) => agent::read_jsonl(path)?,
+        MessagesAt::Transcript(path) => agent::read_jsonl_with(path, read)?,
         MessagesAt::IdeChat { db, key, blob_key } => {
-            ide::read_messages(db, key, *blob_key, &summary.id)?
+            ide::read_messages(db, key, *blob_key, &summary.id, read)?
         }
     };
     Ok(Session::new(summary.clone(), messages))

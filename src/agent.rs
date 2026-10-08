@@ -12,9 +12,9 @@ use serde_json::Value;
 
 use crate::detect::{ChatsScope, StoragePaths};
 use crate::json::{self, lenient, lenient_ms};
-use crate::model::{Message, MessagesAt, SessionSummary, Source, content_chars};
+use crate::model::{Message, MessagesAt, SessionSummary, Source, TOOL_ROLE, content_chars};
 use crate::sqlite::with_readonly;
-use crate::{Error, Result};
+use crate::{Error, ReadOptions, Result, tools};
 
 /// A session's `meta.json`. Each field is read leniently, so that one value of
 /// an unexpected type costs that value, not the others.
@@ -719,9 +719,26 @@ fn transcript_path(dir: &Path, id: &str, warnings: &mut Vec<String>) -> Option<P
 
 /// The messages of the transcript at `path`.
 pub fn read_jsonl(path: &Path) -> Result<Vec<Message>> {
+    read_jsonl_with(path, ReadOptions::default())
+}
+
+/// The messages of the transcript at `path`, with its tool calls and results
+/// among them when `read.tools` is set (see [`with_tools`]).
+pub fn read_jsonl_with(path: &Path, read: ReadOptions) -> Result<Vec<Message>> {
     let mut messages = Vec::new();
-    scan_transcript(path, Some(&mut messages), false)?;
+    let keep = Keep {
+        messages: &mut messages,
+        tools: read.tools,
+    };
+    scan_transcript(path, Some(keep), false)?;
     Ok(messages)
+}
+
+/// Where [`scan_transcript`] keeps the messages it reads.
+struct Keep<'a> {
+    messages: &'a mut Vec<Message>,
+    /// Whether tool calls and results are kept too.
+    tools: bool,
 }
 
 /// What a transcript holds, as far as it was read.
@@ -748,11 +765,7 @@ impl Scan {
 /// in memory. Its messages go to `keep` when given; otherwise they are only
 /// counted, with the characters of their content. With `until_first`,
 /// reading stops at the first message.
-fn scan_transcript(
-    path: &Path,
-    mut keep: Option<&mut Vec<Message>>,
-    until_first: bool,
-) -> Result<Scan> {
+fn scan_transcript(path: &Path, mut keep: Option<Keep<'_>>, until_first: bool) -> Result<Scan> {
     let io_err = |source| Error::Io {
         path: path.to_path_buf(),
         source,
@@ -767,6 +780,7 @@ fn scan_transcript(
         if line.is_empty() {
             continue;
         }
+        let mut built = None;
         match read_line(line, keep.is_some()) {
             Line::Nothing => {}
             Line::NoMessage => scan.expected += 1,
@@ -774,13 +788,16 @@ fn scan_transcript(
                 scan.expected += 1;
                 scan.messages += 1;
                 scan.chars += chars;
-                if let (Some(keep), Some(message)) = (keep.as_deref_mut(), message) {
-                    keep.push(message);
-                }
-                if until_first {
-                    break;
-                }
+                built = message;
             }
+        }
+        match &mut keep {
+            Some(keep) if keep.tools => keep.messages.extend(with_tools(line, built)),
+            Some(keep) => keep.messages.extend(built),
+            None => {}
+        }
+        if until_first && scan.messages > 0 {
+            break;
         }
     }
     Ok(scan)
@@ -890,6 +907,100 @@ fn joined_trimmed_chars<'a>(texts: impl Iterator<Item = &'a str>) -> usize {
         started = true;
     }
     shown
+}
+
+/// A transcript line as read for its tool calls and results.
+#[derive(Debug, Deserialize)]
+struct ToolLine {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    message: Option<ToolLineMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolLineMessage {
+    #[serde(default)]
+    content: Value,
+}
+
+/// The messages of a transcript line with its tool calls and results:
+/// `message`, the one [`read_line`] built from it, and a tool message for
+/// each `tool_use` and `tool_result` part, in the order of the parts. Its
+/// text parts make one message, as without the tools, which goes where the
+/// first of them with text is. A line of the role `tool` is all tool
+/// messages.
+fn with_tools(line: &str, message: Option<Message>) -> Vec<Message> {
+    let Ok(entry) = json::from_str::<ToolLine>(line) else {
+        return message.into_iter().collect();
+    };
+    let role = entry.role.unwrap_or_default();
+    let content = entry.message.map(|m| m.content).unwrap_or_default();
+    // System lines are never shown, tools or not.
+    if role == "system" {
+        return message.into_iter().collect();
+    }
+    let mut messages = Vec::new();
+    if role == TOOL_ROLE {
+        match &content {
+            Value::Array(parts) => {
+                for part in parts {
+                    let text = match part_kind(part) {
+                        "text" => part.get("text").and_then(tools::result),
+                        _ => tool_part(part),
+                    };
+                    messages.extend(text.and_then(tools::message));
+                }
+            }
+            other => messages.extend(tools::result(other).and_then(tools::message)),
+        }
+        messages.extend(message);
+        return messages;
+    }
+    let mut message = message;
+    if let Value::Array(parts) = &content {
+        for part in parts {
+            match part_kind(part) {
+                "tool_use" | "tool_result" => {
+                    messages.extend(tool_part(part).and_then(tools::message));
+                }
+                "text"
+                    if part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.trim().is_empty()) =>
+                {
+                    messages.extend(message.take());
+                }
+                _ => {}
+            }
+        }
+    }
+    messages.extend(message);
+    messages
+}
+
+/// The `type` of a content part; a part without one is text.
+fn part_kind(part: &Value) -> &str {
+    match part.get("type") {
+        Some(Value::String(kind)) => kind,
+        Some(_) => "",
+        None => "text",
+    }
+}
+
+/// A `tool_use` part as a call, and any other part as what a tool returned.
+fn tool_part(part: &Value) -> Option<String> {
+    if part_kind(part) == "tool_use" {
+        let name = part.get("name").and_then(Value::as_str);
+        let args = ["input", "arguments", "args"]
+            .iter()
+            .find_map(|key| part.get(*key));
+        return Some(tools::call(name, args));
+    }
+    ["content", "result", "output", "text"]
+        .iter()
+        .find_map(|key| part.get(*key).and_then(tools::result))
 }
 
 /// Content parts that are never shown.
@@ -1093,6 +1204,83 @@ mod tests {
                 "{parts:?}"
             );
         }
+    }
+
+    fn tool_messages(lines: &[&str]) -> Vec<(String, String)> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        fs::write(&path, lines.join("\n")).unwrap();
+        let with = read_jsonl_with(&path, ReadOptions { tools: true }).unwrap();
+        // The other messages are those read without the tools.
+        let without: Vec<String> = read_jsonl(&path)
+            .unwrap()
+            .into_iter()
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect();
+        let others: Vec<String> = with
+            .iter()
+            .filter(|m| !m.is_tool())
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect();
+        assert_eq!(others, without);
+        with.into_iter().map(|m| (m.role, m.content)).collect()
+    }
+
+    #[test]
+    fn tool_calls_and_results_are_read_in_order_when_asked_for() {
+        let read = tool_messages(&[
+            r#"{"role":"user","message":{"content":"<user_query>find it</user_query>"}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Looking."},{"type":"tool_use","name":"Grep","input":{"pattern":"langfuse","path":"src"}},{"type":"tool_use","name":"Read","input":{"path":"a.rs"}}]}}"#,
+            r#"{"role":"tool","message":{"content":[{"type":"tool_result","tool_use_id":"1","content":"src/a.rs:3: langfuse"},{"type":"tool_result","content":[{"type":"text","text":"fn main() {}"}]}]}}"#,
+            r#"{"role":"tool","message":{"content":"plain output"}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"ls"}},{"type":"text","text":"Then "},{"type":"tool_use","name":"Read"},{"type":"text","text":"done."}]}}"#,
+            r#"{"role":"user","message":{"content":[{"type":"tool_result","content":"ok"},{"type":"text","text":"thanks"}]}}"#,
+            r#"{"role":"tool","message":{"content":[{"type":"tool_result","content":"  "},{"type":"text","text":"note"}]}}"#,
+            r#"{"role":"system","message":{"content":[{"type":"tool_use","name":"Setup"}]}}"#,
+            r#"{"role":"tool","message":{"content":{"odd":true}}}"#,
+            "{not json",
+        ]);
+        let expected = [
+            ("user", "find it"),
+            ("assistant", "Looking."),
+            ("tool", r#"Grep {"pattern":"langfuse","path":"src"}"#),
+            ("tool", r#"Read {"path":"a.rs"}"#),
+            ("tool", "src/a.rs:3: langfuse"),
+            ("tool", "fn main() {}"),
+            ("tool", "plain output"),
+            ("tool", r#"Shell {"command":"ls"}"#),
+            // The text of a line stays one message, where its text starts.
+            ("assistant", "Then \n\ndone."),
+            ("tool", "Read"),
+            ("tool", "ok"),
+            ("user", "thanks"),
+            ("tool", "note"),
+            ("tool", r#"{"odd":true}"#),
+        ];
+        let read: Vec<(&str, &str)> = read
+            .iter()
+            .map(|(role, content)| (role.as_str(), content.as_str()))
+            .collect();
+        assert_eq!(read, expected);
+    }
+
+    #[test]
+    fn tool_lines_still_count_for_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let lines = [
+            r#"{"role":"user","message":{"content":"hi"}}"#,
+            r#"{"role":"tool","message":{"content":"ran"}}"#,
+            r#"{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let counted = scan_transcript(&path, None, false).unwrap();
+        assert_eq!((counted.messages, counted.chars), (1, 2));
+        let with = read_jsonl_with(&path, ReadOptions { tools: true }).unwrap();
+        assert_eq!(with.len(), 3);
+        let session =
+            crate::model::Session::new(SessionSummary::new("t", "t", Source::Agent), with);
+        assert_eq!((session.message_count, session.content_chars), (1, 2));
     }
 
     fn write(path: &Path, contents: &str) {
