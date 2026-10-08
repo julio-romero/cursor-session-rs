@@ -1395,6 +1395,7 @@ mod tests {
         let found = |sessions: &[SessionSummary]| -> Vec<String> {
             crate::search_sessions(sessions, &query, 60)
                 .unwrap()
+                .hits
                 .into_iter()
                 .map(|hit| hit.session.id)
                 .collect()

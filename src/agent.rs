@@ -330,6 +330,19 @@ fn subdirs(dir: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
     })
 }
 
+/// The warning that `list` gives for transcripts it could not read, for the
+/// transcripts of `failed`, each with the error reading it gave; none when
+/// `failed` is empty.
+pub(crate) fn unreadable_transcripts(failed: &[(PathBuf, Error)]) -> Vec<String> {
+    let mut unreadable = Unreadable::new("transcript");
+    for (path, err) in failed {
+        unreadable.add(path, reason(err));
+    }
+    let mut warnings = Vec::new();
+    unreadable.report(&mut warnings);
+    warnings
+}
+
 /// The underlying cause of `err`, for warnings that already name the file.
 fn reason(err: &Error) -> String {
     if let Error::Snapshot { source, .. } = err {

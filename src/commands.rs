@@ -212,8 +212,10 @@ fn cmd_search(
     };
     let loaded = load(paths, &load_opts, args.verbose, err)?;
     // One session's messages at a time; each match keeps only its snippet.
-    let hits = search_sessions(&loaded.sessions, &query, args.context)
+    let searched = search_sessions(&loaded.sessions, &query, args.context)
         .context("could not search the sessions")?;
+    print_warnings(&searched.warnings, args.verbose, err)?;
+    let hits = searched.hits;
     if hits.is_empty() {
         bail!("no sessions match");
     }

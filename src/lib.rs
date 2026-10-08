@@ -145,17 +145,33 @@ pub fn search_session(
     })
 }
 
+/// What [`search_sessions`] found.
+#[derive(Debug, Default)]
+pub struct Searched {
+    /// The sessions that match, in no particular order.
+    pub hits: Vec<Hit>,
+    /// Sessions that were skipped, such as one whose transcript could no
+    /// longer be read; the binary prints them with `-v`, as it prints what
+    /// [`load_sessions`] skipped.
+    pub warnings: Vec<String>,
+}
+
 /// The sessions of `sessions` that match `query`, as [`search_session`]
-/// finds each, in no particular order. Sessions are searched one after
-/// another, and only one session's messages are held at a time. The chats of
-/// an IDE database are all read in one read of it, which opens it, or copies
-/// it when it must be read from a copy, once.
+/// finds each. Sessions are searched one after another, and only one
+/// session's messages are held at a time. The chats of an IDE database are
+/// all read in one read of it, which opens it, or copies it when it must be
+/// read from a copy, once.
+///
+/// A transcript that cannot be read, as when Cursor removed or rotated it
+/// since it was listed, only leaves its session out, with a warning. An IDE
+/// database that cannot be read is an error, as it is for `list`.
 pub fn search_sessions(
     sessions: &[SessionSummary],
     query: &Query,
     context: usize,
-) -> Result<Vec<Hit>> {
+) -> Result<Searched> {
     let mut hits = Vec::new();
+    let mut unreadable = Vec::new();
     let mut chats: Vec<(&std::path::Path, Vec<&SessionSummary>)> = Vec::new();
     for summary in sessions {
         match &summary.messages_at {
@@ -165,7 +181,11 @@ pub fn search_sessions(
                     None => chats.push((db.as_path(), vec![summary])),
                 }
             }
-            _ => hits.extend(search_session(summary, query, context)?),
+            MessagesAt::Transcript(path) => match search_session(summary, query, context) {
+                Ok(hit) => hits.extend(hit),
+                Err(err) => unreadable.push((path.clone(), err)),
+            },
+            MessagesAt::Nowhere => hits.extend(search_session(summary, query, context)?),
         }
     }
     for (db, of_db) in chats {
@@ -179,7 +199,10 @@ pub fn search_sessions(
             hits.extend(hit?);
         }
     }
-    Ok(hits)
+    Ok(Searched {
+        hits,
+        warnings: agent::unreadable_transcripts(&unreadable),
+    })
 }
 
 /// Searches the messages that `read` gives the visitor it is passed, those

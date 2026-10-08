@@ -854,6 +854,7 @@ fn searching_all_sessions_finds_what_searching_each_finds() {
         let mut all: Vec<(String, usize, String)> =
             cursor_session::search_sessions(&loaded.sessions, &query, 60)
                 .unwrap()
+                .hits
                 .into_iter()
                 .map(|hit| (hit.session.id, hit.score.best_message, hit.snippet.text))
                 .collect();
@@ -861,4 +862,43 @@ fn searching_all_sessions_finds_what_searching_each_finds() {
         all.sort();
         assert_eq!(all, each, "{text}");
     }
+}
+
+#[test]
+fn a_transcript_gone_since_it_was_listed_only_leaves_its_session_out() {
+    use cursor_session::search::parse_query;
+    let fixture = standard();
+    let loaded = load_sessions(&fixture.paths(), &LoadOptions::default()).unwrap();
+    let query = parse_query("plan").unwrap();
+    let before = cursor_session::search_sessions(&loaded.sessions, &query, 60).unwrap();
+    assert!(before.warnings.is_empty(), "{:?}", before.warnings);
+    let found = |hits: &[cursor_session::search::Hit]| {
+        let mut ids: Vec<String> = hits.iter().map(|hit| hit.session.id.clone()).collect();
+        ids.sort();
+        ids
+    };
+    assert!(found(&before.hits).contains(&AGENT_ID.to_string()));
+    // Cursor removes the transcript between listing and searching.
+    let agent = loaded
+        .sessions
+        .iter()
+        .find(|session| session.id == AGENT_ID)
+        .unwrap();
+    let MessagesAt::Transcript(path) = &agent.messages_at else {
+        panic!("{:?}", agent.messages_at);
+    };
+    fs::remove_file(path).unwrap();
+    let after = cursor_session::search_sessions(&loaded.sessions, &query, 60).unwrap();
+    let mut expected = found(&before.hits);
+    expected.retain(|id| id != AGENT_ID);
+    assert_eq!(found(&after.hits), expected);
+    assert_eq!(after.warnings.len(), 1, "{:?}", after.warnings);
+    assert!(
+        after.warnings[0].starts_with(&format!(
+            "ignored unreadable transcript {}: ",
+            path.display()
+        )),
+        "{:?}",
+        after.warnings
+    );
 }
