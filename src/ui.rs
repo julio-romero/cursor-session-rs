@@ -586,7 +586,7 @@ fn render_list_table(
     let width = u16::try_from(term_width).unwrap_or(u16::MAX);
     let term_width = usize::from(width);
     let mut table = Table::new();
-    table.load_preset(presets::UTF8_FULL_CONDENSED);
+    table.load_style(presets::UTF8_FULL_CONDENSED);
     table.set_content_arrangement(ContentArrangement::Dynamic);
     // Styling follows `use_color`, never comfy-table's own stdout check.
     table.force_no_tty();

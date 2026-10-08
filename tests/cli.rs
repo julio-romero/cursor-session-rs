@@ -880,7 +880,7 @@ fn export_writes_one_file_per_session_in_every_format() {
                     );
                 }
                 _ => {
-                    let parsed: Session = serde_yaml::from_str(&text).unwrap();
+                    let parsed: Session = serde_norway::from_str(&text).unwrap();
                     assert_eq!(serde_json::to_value(parsed).unwrap(), expected);
                 }
             }

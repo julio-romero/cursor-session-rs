@@ -1,0 +1,24 @@
+---
+source: tests/snapshots.rs
+expression: rendered
+---
+Found 7 session(s)
+
+┌──────────┬────────┬──────┬────────────┬──────────────────┐
+│ ID       ┆ SOURCE ┆ MSGS ┆ UPDATED    ┆ TITLE            │
+╞══════════╪════════╪══════╪════════════╪══════════════════╡
+│ 5ba7ed00 ┆ agent  ┆ 2    ┆ 2025-09-09 ┆ Shared session … │
+│          ┆        ┆      ┆ 06:42      ┆                  │
+│ d00dfeed ┆ ide    ┆ 2    ┆ 2025-09-09 ┆ データパイプラ…  │
+│          ┆        ┆      ┆ 02:53      ┆                  │
+│ e1e10000 ┆ ide    ┆ 0    ┆ 2025-09-07 ┆ Untitled         │
+│          ┆        ┆      ┆ 13:00      ┆                  │
+│ c0ffee00 ┆ ide    ┆ 3    ┆ 2025-09-07 ┆ Dynamic table p… │
+│          ┆        ┆      ┆ 00:06      ┆                  │
+│ 7b1e0c55 ┆ agent  ┆ 2    ┆ 2025-09-05 ┆ Fix flaky CI on… │
+│          ┆        ┆      ┆ 19:20      ┆                  │
+│ f4eea6d2 ┆ agent  ┆ 4    ┆ 2025-09-04 ┆ Langfuse Semant… │
+│          ┆        ┆      ┆ 16:33      ┆                  │
+│ 0a1b2c3d ┆ agent  ┆ 2    ┆ —          ┆ 0a1b2c3d-4e5f-4… │
+└──────────┴────────┴──────┴────────────┴──────────────────┘
+IDs shortened to 8 chars; `show` accepts a prefix.

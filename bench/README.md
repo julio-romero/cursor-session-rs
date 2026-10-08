@@ -14,3 +14,5 @@ BENCH_DATA=/tmp/cs-bench bench/run.sh          # reuse generated data between ru
 ```
 
 Needs hyperfine 2.0+ (older versions do not record memory) and `python3`. Baselines live in `results/<version>/`.
+Only their Markdown tables are committed: git ignores the hyperfine JSON and
+anything written straight into `results/`.

@@ -467,7 +467,7 @@ fn every_export_format_round_trips_the_session() {
         assert_eq!(serde_json::to_value(&parsed).unwrap(), expected);
 
         let yaml = exported(session, Format::Yaml);
-        let parsed: Session = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: Session = serde_norway::from_str(&yaml).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), expected);
 
         let jsonl = exported(session, Format::Jsonl);

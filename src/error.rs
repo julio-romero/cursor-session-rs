@@ -62,7 +62,7 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 
     #[error(transparent)]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] serde_norway::Error),
 
     /// Writing exported output failed; the writer has no path of its own.
     #[error(transparent)]
