@@ -148,3 +148,74 @@ fn pages_are_the_same_on_every_run() {
         "no date"
     );
 }
+
+/// What Bash offers for the words of `line` up to its end, as
+/// `cursor-session <TAB>` would, with the script the binary prints sourced.
+/// (The committed one is the same, which the test above checks.)
+#[cfg(unix)]
+fn bash_completes(fixture: &Fixture, line: &str) -> Vec<String> {
+    let script = fixture.tmp().join("cursor-session.bash");
+    fs::write(&script, generate(fixture, &["completions", "bash"])).unwrap();
+    let words: Vec<&str> = line.split(' ').collect();
+    let current = words.len() - 1;
+    let prev = if current > 0 { words[current - 1] } else { "" };
+    let program = format!(
+        "source \"$1\"\n\
+         COMP_WORDS=({})\n\
+         COMP_CWORD={current}\n\
+         _cursor__session cursor-session \"${{COMP_WORDS[COMP_CWORD]}}\" '{prev}'\n\
+         printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
+        words
+            .iter()
+            .map(|word| format!("'{word}'"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    let output = std::process::Command::new("bash")
+        .args(["--norc", "--noprofile", "-c", &program, "bash"])
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{line}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut offered: Vec<String> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|word| !word.is_empty())
+        .map(String::from)
+        .collect();
+    offered.sort();
+    offered
+}
+
+/// Bash completes subcommands' options and values, not only the top level,
+/// which clap_complete's own script fails to do for a name with a `-`.
+#[cfg(unix)]
+#[test]
+fn bash_completes_after_a_subcommand() {
+    let fixture = Fixture::new();
+    let bash_completes = |line| bash_completes(&fixture, line);
+    let offered = bash_completes("cursor-session ");
+    for word in ["list", "show", "completions", "--storage"] {
+        assert!(offered.iter().any(|offered| offered == word), "{offered:?}");
+    }
+    let offered = bash_completes("cursor-session completions ");
+    for word in ["bash", "zsh", "fish"] {
+        assert!(offered.iter().any(|offered| offered == word), "{offered:?}");
+    }
+    assert_eq!(
+        bash_completes("cursor-session list --s"),
+        ["--source", "--storage"]
+    );
+    assert_eq!(
+        bash_completes("cursor-session list --source "),
+        ["agent", "ide"]
+    );
+    assert_eq!(
+        bash_completes("cursor-session --verbose export --format j"),
+        ["json", "jsonl"]
+    );
+}

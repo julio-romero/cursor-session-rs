@@ -24,9 +24,30 @@ pub fn completions(shell: Shell) -> Vec<u8> {
     };
     // clap_complete panics when its writer fails, which a Vec never does. A
     // closed stdout is then reported like any other output's.
+    // The hidden `man` subcommand is offered too: clap_complete completes
+    // every subcommand, and dropping one from its output would be fragile.
     let mut script = Vec::new();
     clap_complete::generate(shell, &mut Cli::command(), NAME, &mut script);
+    if shell == clap_complete::Shell::Bash {
+        script = fix_bash_case_labels(&script);
+    }
     script
+}
+
+/// Makes the case labels of a Bash script match the commands they complete.
+///
+/// clap_complete 4.6 (up to at least 4.6.11) names a subcommand's state after
+/// the program's name with each `-` replaced by `__`, e.g.
+/// `cursor__session__subcmd__list`, but labels its branch with each `-`
+/// replaced by `__subcmd__`, e.g. `cursor__subcmd__session__subcmd__list)`.
+/// No branch then matches, and nothing after a subcommand would complete.
+/// See `subcommand_details` in clap_complete's `src/aot/shells/bash.rs`.
+fn fix_bash_case_labels(script: &[u8]) -> Vec<u8> {
+    let wrong = format!("{}__subcmd__", NAME.replace('-', "__subcmd__"));
+    let right = format!("{}__subcmd__", NAME.replace('-', "__"));
+    String::from_utf8_lossy(script)
+        .replace(&wrong, &right)
+        .into_bytes()
 }
 
 /// The man page of `command`, a visible subcommand, or with `None` the page
@@ -170,6 +191,38 @@ mod tests {
             }
             assert!(script.contains("storage"), "{shell:?}");
         }
+    }
+
+    #[test]
+    fn every_bash_state_has_a_branch() {
+        let script = String::from_utf8(completions(Shell::Bash)).unwrap();
+        let states: Vec<&str> = script
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("cmd=\""))
+            .filter_map(|rest| rest.strip_suffix('"'))
+            .filter(|state| !state.is_empty())
+            .collect();
+        assert!(
+            states.contains(&"cursor__session__subcmd__list"),
+            "{script}"
+        );
+        for state in states {
+            assert!(
+                script.contains(&format!("\n        {state})\n")),
+                "no branch for {state}: {script}"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_labels_are_fixed_only_where_clap_complete_got_them_wrong() {
+        let script = b"        cursor__subcmd__session__subcmd__list)\n\
+                       cmd=\"cursor__session__subcmd__list\"\n";
+        assert_eq!(
+            String::from_utf8(fix_bash_case_labels(script)).unwrap(),
+            "        cursor__session__subcmd__list)\n\
+             cmd=\"cursor__session__subcmd__list\"\n"
+        );
     }
 
     #[test]

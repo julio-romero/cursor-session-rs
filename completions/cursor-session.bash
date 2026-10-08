@@ -86,7 +86,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__completions)
+        cursor__session__subcmd__completions)
             opts="-v -h --storage --verbose --color --help bash zsh fish"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -108,7 +108,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__export)
+        cursor__session__subcmd__export)
             opts="-v -h --format --out --session-id --workspace --source --limit --storage --verbose --color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -157,7 +157,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__healthcheck)
+        cursor__session__subcmd__healthcheck)
             opts="-v -h --storage --verbose --color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -179,7 +179,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__help)
+        cursor__session__subcmd__help)
             opts="list show export healthcheck completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -193,7 +193,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__help__subcmd__completions)
+        cursor__session__subcmd__help__subcmd__completions)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -207,7 +207,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__help__subcmd__export)
+        cursor__session__subcmd__help__subcmd__export)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -221,7 +221,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__help__subcmd__healthcheck)
+        cursor__session__subcmd__help__subcmd__healthcheck)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -235,7 +235,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__help__subcmd__help)
+        cursor__session__subcmd__help__subcmd__help)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -249,7 +249,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__help__subcmd__list)
+        cursor__session__subcmd__help__subcmd__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -263,7 +263,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__help__subcmd__man)
+        cursor__session__subcmd__help__subcmd__man)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -277,7 +277,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__help__subcmd__show)
+        cursor__session__subcmd__help__subcmd__show)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -291,7 +291,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__list)
+        cursor__session__subcmd__list)
             opts="-v -h --source --limit --json --storage --verbose --color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -321,7 +321,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__man)
+        cursor__session__subcmd__man)
             opts="-v -h --storage --verbose --color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -343,7 +343,7 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__subcmd__session__subcmd__show)
+        cursor__session__subcmd__show)
             opts="-v -h --source --limit --all --json --storage --verbose --color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
