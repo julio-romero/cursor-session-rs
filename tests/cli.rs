@@ -1615,6 +1615,7 @@ fn search_ranks_every_term_in_one_message_first() {
             "title",
             "source",
             "workspace",
+            "created_at",
             "updated_at",
             "matching_messages",
             "all_terms_in_one_message",
@@ -1684,6 +1685,34 @@ fn search_prints_one_block_per_session() {
 }
 
 #[test]
+fn search_phrases_are_words_with_spaces_and_match_any_whitespace() {
+    let fixture = Fixture::new();
+    let t = 1_757_000_000_000_i64;
+    write_agent_session(&fixture, "spaced", Some(t), &["big   spaced\tphrase here"]);
+    write_agent_session(&fixture, "apart", Some(t + 1000), &["phrase, spaced -x"]);
+    let found = |args: &[&str]| -> Vec<String> {
+        let args: Vec<&str> = ["search"].iter().chain(args).copied().collect();
+        json(&ok(&fixture, &args))
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| hit["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // The shell passes a quoted phrase as one word with a space in it.
+    assert_eq!(found(&["spaced phrase", "--json"]), ["spaced"]);
+    assert_eq!(found(&["\"big spaced\"", "--json"]), ["spaced"]);
+    assert_eq!(found(&["spaced", "phrase", "--json"]), ["apart", "spaced"]);
+    assert_eq!(found(&["--json", "--", "-x"]), ["apart"]);
+    // The snippet shows the phrase found, on one line.
+    let out = ok(&fixture, &["search", "SPACED PHRASE", "--color", "always"]);
+    assert!(
+        out.contains("big \u{1b}[1m\u{1b}[31mspaced phrase\u{1b}[39m\u{1b}[0m here"),
+        "{out:?}"
+    );
+}
+
+#[test]
 fn search_without_matches_exits_1() {
     let fixture = ranking_fixture();
     for args in [
@@ -1720,6 +1749,7 @@ fn search_usage_errors_exit_2() {
         &many,
         &["search", "x", "--context", "-1"],
         &["search", "x", "--context", "many"],
+        &["search", "x", "--context", "1001"],
         &["search", "x", "-n", "0"],
         &["search", "x", "--since", "0d"],
         &["search", "x", "--since", "30"],

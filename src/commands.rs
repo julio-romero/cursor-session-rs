@@ -201,7 +201,7 @@ fn cmd_search(
     err: &mut dyn Write,
     args: &SearchArgs,
 ) -> Result<()> {
-    let query = search::parse_query(&args.query.join(" "))?;
+    let query = search::parse_query(&search::query_text(&args.query))?;
     if paths.is_empty() {
         return Err(Error::NoStorage.into());
     }

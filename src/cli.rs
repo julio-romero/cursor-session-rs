@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cursor_session::export::Format;
 use cursor_session::model::Source;
-use cursor_session::search::{self, DEFAULT_CONTEXT};
+use cursor_session::search::{self, DEFAULT_CONTEXT, MAX_CONTEXT};
 use cursor_session::since::{Since, parse_since};
 
 const LONG_ABOUT: &str = "\
@@ -38,9 +38,10 @@ Examples:
 const SEARCH_EXAMPLES: &str = "\
 Examples:
   cursor-session search retry backoff
-  cursor-session search '\"connection pool\"' timeout --since 30d
+  cursor-session search \"connection pool\" timeout --since 30d
   cursor-session search migration --source ide -n 5 --context 120
-  cursor-session search flaky ci --json | jq -r '.[].id'";
+  cursor-session search flaky ci --json | jq -r '.[].id'
+  cursor-session search -- --force-with-lease";
 
 const EXPORT_EXAMPLES: &str = "\
 Examples:
@@ -70,8 +71,11 @@ const SEARCH_ABOUT: &str = "\
 Find the sessions whose messages hold every word of a query.
 
 Every term must appear somewhere in a session's messages, in any order and
-any case (Unicode-aware); \"double-quoted phrases\" are one term, and every term
-is matched as written, never as a pattern. Titles are not searched.
+any case (Unicode-aware). A word with spaces in it, as the shell passes
+\"connection pool\", and a phrase in double quotes inside the query, as in
+'\"connection pool\" timeout', are one term, whose words match with any
+whitespace between them. Every term is matched as written, never as a
+pattern. Titles are not searched. Put -- before a query that starts with -.
 
 Sessions with every term in one message come first, then those with more
 matching messages, then the most recently updated. Each result shows the
@@ -179,7 +183,7 @@ pub struct ListArgs {
 
 #[derive(Args)]
 pub struct SearchArgs {
-    /// Terms that must all appear in a session's messages; quote a "phrase" (inside shell quotes) to make it one term
+    /// Terms that must all appear in a session's messages; a quoted "phrase" is one term (put -- before a term that starts with -)
     #[arg(required = true, value_name = "QUERY")]
     pub query: Vec<String>,
     /// Only read this store; the other one is never opened
@@ -194,11 +198,11 @@ pub struct SearchArgs {
         allow_negative_numbers = true
     )]
     pub limit: Option<usize>,
-    /// Characters of the best message to show on each side of its first match
+    /// Characters of the best message to show on each side of its first match, at most 1000
     #[arg(
         long,
         value_name = "CHARS",
-        value_parser = whole_number,
+        value_parser = context_chars,
         allow_negative_numbers = true,
         default_value_t = DEFAULT_CONTEXT
     )]
@@ -300,12 +304,16 @@ fn at_least_one(value: &str) -> Result<usize, String> {
     }
 }
 
-/// A whole number, 0 included. One too large to store asks for everything.
-fn whole_number(value: &str) -> Result<usize, String> {
+/// A whole number from 0 to [`MAX_CONTEXT`].
+fn context_chars(value: &str) -> Result<usize, String> {
+    let invalid = || format!("expected a whole number from 0 to {MAX_CONTEXT}");
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err("expected a whole number".to_string());
+        return Err(invalid());
     }
-    Ok(value.parse::<usize>().unwrap_or(usize::MAX))
+    match value.parse::<usize>() {
+        Ok(n) if n <= MAX_CONTEXT => Ok(n),
+        _ => Err(invalid()),
+    }
 }
 
 impl Cli {
@@ -315,7 +323,7 @@ impl Cli {
     /// usage error's message.
     pub fn check(&self) -> Result<(), (&'static str, String)> {
         if let Commands::Search(args) = &self.command {
-            let query = args.query.join(" ");
+            let query = search::query_text(&args.query);
             if let Err(error) = search::parse_query(&query) {
                 let message = format!("invalid value '{query}' for '<QUERY>...': {error}");
                 return Err(("search", message));
@@ -422,6 +430,8 @@ mod tests {
             &["--context", "-1"][..],
             &["--context", ""],
             &["--context", "1.5"],
+            &["--context", "1001"],
+            &["--context", "99999999999999999999999"],
         ] {
             let err = parse(argv).err().unwrap();
             assert_eq!(
@@ -430,7 +440,8 @@ mod tests {
                 "{argv:?}"
             );
             assert!(
-                err.to_string().contains(": expected a whole number"),
+                err.to_string()
+                    .contains(": expected a whole number from 0 to 1000"),
                 "{err}"
             );
         }
@@ -440,10 +451,7 @@ mod tests {
         };
         assert_eq!(context(&[]), (60, None));
         assert_eq!(context(&["--context", "0", "-n", "3"]), (0, Some(3)));
-        assert_eq!(
-            context(&["--context", "99999999999999999999999"]),
-            (usize::MAX, None)
-        );
+        assert_eq!(context(&["--context", "1000"]), (1000, None));
     }
 
     #[test]
@@ -454,8 +462,26 @@ mod tests {
         let Commands::Search(args) = cli.command else {
             panic!("expected search");
         };
-        let query = search::parse_query(&args.query.join(" ")).unwrap();
+        let query = search::parse_query(&search::query_text(&args.query)).unwrap();
         assert_eq!(query.terms(), ["two words", "more"]);
+
+        // A word with spaces in it, as the shell passes a quoted phrase, is
+        // one; one with quote marks is parsed as written.
+        let terms = |words: &[&str]| {
+            let words: Vec<String> = words.iter().map(|word| word.to_string()).collect();
+            search::parse_query(&search::query_text(&words))
+                .unwrap()
+                .terms()
+                .to_vec()
+        };
+        assert_eq!(terms(&["connection pool", "x"]), ["connection pool", "x"]);
+        assert_eq!(terms(&["a\"b c\" d"]), ["a", "b c", "d"]);
+        assert_eq!(terms(&["-x"]), ["-x"]);
+        let dashed = Cli::try_parse_from(["cursor-session", "search", "--", "-x"]).unwrap();
+        let Commands::Search(args) = dashed.command else {
+            panic!("expected search");
+        };
+        assert_eq!(args.query, ["-x"]);
 
         // Clap requires a word; the check, that the words make a term.
         assert!(Cli::try_parse_from(["cursor-session", "search"]).is_err());

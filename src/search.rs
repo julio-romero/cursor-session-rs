@@ -18,10 +18,16 @@ pub const MAX_TERMS: usize = 64;
 /// Characters of a message shown on each side of its first match.
 pub const DEFAULT_CONTEXT: usize = 60;
 
+/// The most characters of context a snippet may have on each side, so that
+/// the snippets kept until the results are ranked stay small.
+pub const MAX_CONTEXT: usize = 1000;
+
 /// Width of the source in a result's first line, the longest source name.
 const SOURCE_WIDTH: usize = 5;
 /// Width of the updated time in a result's first line.
 const UPDATED_WIDTH: usize = 16;
+/// Fewest columns of a title shown in a terminal too narrow for the rest.
+const TITLE_MIN_WIDTH: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum QueryError {
@@ -84,9 +90,27 @@ pub fn parse_terms(text: &str) -> Vec<String> {
     terms
 }
 
+/// The query the words of a command line make: the words joined by spaces,
+/// a word with whitespace in it and no quote mark, as the shell passes
+/// `"connection pool"`, made a phrase.
+pub fn query_text(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|word| {
+            if word.contains(char::is_whitespace) && !word.contains('"') {
+                format!("\"{word}\"")
+            } else {
+                word.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Parses a query (see [`parse_terms`]) and builds its matchers: one
-/// [`RegexSet`] of the escaped terms, case-insensitive. A query must have
-/// from 1 to [`MAX_TERMS`] terms.
+/// [`RegexSet`] of the escaped terms, case-insensitive. The words of a
+/// phrase match with any run of whitespace between them, as a snippet shows
+/// them. A query must have from 1 to [`MAX_TERMS`] terms.
 pub fn parse_query(text: &str) -> Result<Query, QueryError> {
     let terms = parse_terms(text);
     if terms.is_empty() {
@@ -95,7 +119,15 @@ pub fn parse_query(text: &str) -> Result<Query, QueryError> {
     if terms.len() > MAX_TERMS {
         return Err(QueryError::TooManyTerms(terms.len()));
     }
-    let patterns: Vec<String> = terms.iter().map(|term| regex::escape(term)).collect();
+    let patterns: Vec<String> = terms
+        .iter()
+        .map(|term| {
+            term.split_whitespace()
+                .map(regex::escape)
+                .collect::<Vec<_>>()
+                .join(r"\s+")
+        })
+        .collect();
     let set = RegexSetBuilder::new(&patterns)
         .case_insensitive(true)
         .build()
@@ -251,12 +283,14 @@ pub struct Snippet {
 
 /// The snippet of `message`: its content on one line, with runs of
 /// whitespace made one space, cut to `context` characters on each side of
-/// the first match, and the matches in it.
+/// the first match (at most [`MAX_CONTEXT`]), and the matches in it.
 pub fn snippet(query: &Query, message: &Message, context: usize) -> Snippet {
+    let context = context.min(MAX_CONTEXT);
     let line = collapse_whitespace(&ui::one_line(&message.content));
     let first = query.any.find(&line).map(|found| found.range());
-    // Without a match on the line, as for a phrase with a tab in it, the
-    // snippet is the start of the message.
+    // Without a match on the line, as for a term found only inside an
+    // escape sequence that the line leaves out, the snippet is the start of
+    // the message.
     let (start, end) = match &first {
         Some(found) => (
             chars_before(&line, found.start, context),
@@ -370,11 +404,19 @@ pub fn render(hits: &[Hit], among: &[&str], use_color: bool, term_width: Option<
             session.updated_display(),
             width = UPDATED_WIDTH
         );
+        let title = ui::one_line(&session.title);
+        // In a terminal, the first line fits on one row, as `list`'s rows do.
+        let title = match term_width {
+            Some(width) => {
+                let before = id.chars().count() + SOURCE_WIDTH + UPDATED_WIDTH + 6;
+                ui::truncate_width(&title, width.saturating_sub(before).max(TITLE_MIN_WIDTH))
+            }
+            None => title.into_owned(),
+        };
         out.push_str(&format!(
-            "\n{id}  {}{pad}  {}  {}\n",
+            "\n{id}  {}{pad}  {}  {title}\n",
             ui::paint_source(session.source, use_color),
             ui::paint_dim(&updated, use_color),
-            ui::one_line(&session.title),
         ));
         out.push_str(&format!(
             "  [{}] {}\n",
@@ -419,6 +461,7 @@ impl Hit {
             title: summary.title,
             source: summary.source,
             workspace: summary.workspace,
+            created_at: summary.created_at,
             updated_at: summary.updated_at,
             matching_messages: self.score.matching_messages,
             all_terms_in_one_message: self.score.all_in_one,
@@ -438,7 +481,9 @@ pub struct HitJson<'a> {
     pub title: &'a str,
     pub source: Source,
     pub workspace: Option<&'a str>,
-    /// RFC 3339 UTC, whole seconds, as `list --json` gives it.
+    /// RFC 3339 UTC, whole seconds, as `list --json` gives it. Ranking uses
+    /// `updated_at`, or `created_at` when that is null.
+    pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub matching_messages: usize,
     pub all_terms_in_one_message: bool,
@@ -538,7 +583,12 @@ mod tests {
         assert_eq!(mask("a b", "A B"), 0b11);
         assert_eq!(mask("absent present", "present"), 0b10);
         assert_eq!(mask("\"two words\"", "TWO WORDS"), 1);
-        assert_eq!(mask("\"two words\"", "two  words"), 0);
+        // A phrase's words match with any whitespace between them.
+        assert_eq!(mask("\"two words\"", "two  words"), 1);
+        assert_eq!(mask("\"two words\"", "two\n\twords"), 1);
+        assert_eq!(mask("\"two words\"", "twowords"), 0);
+        assert_eq!(mask("\"a.b c\"", "a.b   C"), 1);
+        assert_eq!(mask("\"a.b c\"", "axb c"), 0);
     }
 
     #[test]
@@ -634,8 +684,17 @@ mod tests {
         assert_eq!(longest.highlights.len(), 1);
         assert_eq!(longest.highlights[0], 2..8);
 
-        // A match the one line loses, as of a phrase with a tab, shows the start.
-        let lost = super::snippet(&query("\"a\tb\""), &message("user", "xyz a\tb"), 1);
+        // A phrase with a tab in it is found on the one line.
+        let tab = super::snippet(&query("\"a\tb\""), &message("user", "xyz a\tb"), 1);
+        assert_eq!(tab.text, "…a b");
+        assert_eq!(&tab.text[tab.highlights[0].clone()], "a b");
+        // A match the one line loses, inside an escape sequence, shows the
+        // start.
+        let lost = super::snippet(
+            &query("pwned"),
+            &message("user", "xyz \u{1b}]0;pwned\u{7} and more"),
+            1,
+        );
         assert_eq!(lost.text, "xy…");
         assert!(lost.highlights.is_empty());
     }
@@ -735,6 +794,13 @@ mod tests {
         // In a terminal, IDs are shortened as `list` shortens them.
         let narrow = render(&hits, &among, false, Some(60));
         assert!(narrow.contains("\nf4eea6d2  agent  "), "{narrow}");
+        // The first line of a result fits the terminal, its title cut.
+        assert!(
+            narrow.contains("\nc0ffee00  ide    —                 title of c0ffee00-0000-4…\n"),
+            "{narrow}"
+        );
+        let tiny = render(&hits, &among, false, Some(20));
+        assert!(tiny.contains("  title of …\n"), "{tiny}");
         assert!(
             narrow.ends_with("\nIDs shortened to 8 chars; `show` accepts a prefix.\n"),
             "{narrow}"
@@ -776,6 +842,7 @@ mod tests {
                 "title",
                 "source",
                 "workspace",
+                "created_at",
                 "updated_at",
                 "matching_messages",
                 "all_terms_in_one_message",
