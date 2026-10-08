@@ -5,6 +5,7 @@ pub mod export;
 pub mod ide;
 mod json;
 pub mod model;
+pub mod since;
 mod sqlite;
 pub mod ui;
 
@@ -23,15 +24,20 @@ pub struct LoadOptions {
     /// Count the messages of only this many sessions, the most recently
     /// updated; `None` counts them all.
     pub limit: Option<usize>,
+    /// Only the sessions updated at or after this time, in epoch
+    /// milliseconds, by the time `list` shows (see [`since::updated_since`]),
+    /// before `limit` applies. Sessions without a time are left out.
+    pub updated_since: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Loaded {
-    /// Newest first, with their message counts: every session, or the
-    /// `limit` most recently updated.
+    /// Newest first, with their message counts: every session, or those
+    /// updated since `updated_since`, of which only the `limit` most recently
+    /// updated.
     pub sessions: Vec<SessionSummary>,
-    /// The IDs of every session, newest first, also of those `limit` leaves
-    /// out.
+    /// The IDs of every session, newest first, also of those `limit` and
+    /// `updated_since` leave out.
     pub ids: Vec<String>,
     /// Rows and files that were skipped; the binary prints them with `-v`.
     pub warnings: Vec<String>,
@@ -42,21 +48,24 @@ pub struct Loaded {
 
 /// Lists the sessions of both stores, or of `opts.source`, newest first, with
 /// how many messages each has. No session's messages are kept: transcripts
-/// are read a line at a time and IDE chats one at a time. With `opts.limit`,
-/// only the messages of the sessions listed are counted.
+/// are read a line at a time and IDE chats one at a time. With `opts.limit`
+/// or `opts.updated_since`, only the messages of the sessions listed are
+/// counted.
 pub fn load_sessions(paths: &StoragePaths, opts: &LoadOptions) -> Result<Loaded> {
     let (mut warnings, mut notices) = (Vec::new(), Vec::new());
     let index = Index::new(paths, opts.source, &mut warnings, &mut notices)?;
-    let ids: Vec<String> = model::merge_sessions(index.sessions())
-        .into_iter()
-        .map(|session| session.id)
-        .collect();
-    let listed: HashSet<&str> = ids
+    let merged = model::merge_sessions(index.sessions());
+    let listed: HashSet<&str> = merged
         .iter()
+        .filter(|session| {
+            opts.updated_since
+                .is_none_or(|cutoff| since::updated_since(session, cutoff))
+        })
         .take(opts.limit.unwrap_or(usize::MAX))
-        .map(String::as_str)
+        .map(|session| session.id.as_str())
         .collect();
     let counted = index.count(&|id| listed.contains(id), &mut warnings, &mut notices)?;
+    let ids = merged.into_iter().map(|session| session.id).collect();
     Ok(Loaded {
         sessions: model::merge_sessions(counted),
         ids,

@@ -735,6 +735,39 @@ fn load_options_default_to_both_stores() {
 }
 
 #[test]
+fn updated_since_lists_only_recent_sessions_and_keeps_every_id() {
+    let fixture = standard();
+    let load = |updated_since, limit| {
+        load_sessions(
+            &fixture.paths(),
+            &LoadOptions {
+                updated_since,
+                limit,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    };
+    let listed = |loaded: &cursor_session::Loaded| -> Vec<String> {
+        loaded.sessions.iter().map(|s| s.id.clone()).collect()
+    };
+    // By the time the UPDATED column shows: IDE_UNTITLED_ID was only created.
+    let recent = load(Some(1_757_250_000_000), None);
+    assert_eq!(listed(&recent), [SHARED_ID, IDE_BLOB_ID, IDE_UNTITLED_ID]);
+    assert_eq!(recent.ids, STANDARD_IDS);
+    let counts: Vec<usize> = recent.sessions.iter().map(|s| s.message_count).collect();
+    assert_eq!(counts, [2, 2, 0]);
+    // The limit applies to the sessions kept.
+    let limited = load(Some(1_757_250_000_000), Some(2));
+    assert_eq!(listed(&limited), [SHARED_ID, IDE_BLOB_ID]);
+    assert_eq!(limited.ids, STANDARD_IDS);
+    // A session without any time is never recent.
+    let all = load(Some(i64::MIN), None);
+    assert_eq!(listed(&all), &STANDARD_IDS[..6]);
+    assert!(load(Some(i64::MAX), None).sessions.is_empty());
+}
+
+#[test]
 fn visiting_messages_gives_the_messages_loaded() {
     let fixture = standard();
     for session in fixture.load().sessions {

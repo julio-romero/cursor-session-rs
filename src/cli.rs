@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cursor_session::export::Format;
 use cursor_session::model::Source;
+use cursor_session::since::{Since, parse_since};
 
 const LONG_ABOUT: &str = "\
 List, show, and export Cursor IDE and Agent CLI chat sessions.
@@ -23,6 +24,7 @@ const LIST_EXAMPLES: &str = "\
 Examples:
   cursor-session list
   cursor-session list --source ide --limit 5
+  cursor-session list --since 7d
   cursor-session list --json | jq -r '.[].id'";
 
 const SHOW_EXAMPLES: &str = "\
@@ -35,7 +37,8 @@ const EXPORT_EXAMPLES: &str = "\
 Examples:
   cursor-session export
   cursor-session export --format json --session-id f4eea6d2 --out sessions
-  cursor-session export --workspace ~/src/billing-api --limit 5";
+  cursor-session export --workspace ~/src/billing-api --limit 5
+  cursor-session export --since 2w --format json";
 
 const HEALTHCHECK_EXAMPLES: &str = "\
 Examples:
@@ -130,6 +133,9 @@ pub struct ListArgs {
         allow_negative_numbers = true
     )]
     pub limit: Option<usize>,
+    /// Keep only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)
+    #[arg(long, value_name = "DURATION", value_parser = parse_since)]
+    pub since: Option<Since>,
     /// Print a JSON array of session summaries
     #[arg(long)]
     pub json: bool,
@@ -191,6 +197,14 @@ pub struct ExportArgs {
         conflicts_with = "session_id"
     )]
     pub limit: Option<usize>,
+    /// Export only the sessions updated within this long: a number and s, m, h, d or w (30d, 12h)
+    #[arg(
+        long,
+        value_name = "DURATION",
+        value_parser = parse_since,
+        conflicts_with = "session_id"
+    )]
+    pub since: Option<Since>,
     #[arg(from_global)]
     pub verbose: bool,
 }
@@ -294,6 +308,45 @@ mod tests {
             );
             assert_eq!(err.exit_code(), 2);
         }
+    }
+
+    #[test]
+    fn since_takes_a_duration_and_not_with_one_session() {
+        for command in [&["list"][..], &["export"]] {
+            let parse = |since: &str| {
+                let argv: Vec<&str> = ["cursor-session"]
+                    .into_iter()
+                    .chain(command.iter().copied())
+                    .chain(["--since", since])
+                    .collect();
+                Cli::try_parse_from(argv)
+            };
+            for since in ["30d", "12h", "90m", "45s", "2w"] {
+                assert!(parse(since).is_ok(), "{command:?} {since}");
+            }
+            for since in ["", "0d", "30", "d", "1.5h", "30y", "30 d", "30D"] {
+                let err = parse(since).err().unwrap();
+                assert_eq!(
+                    err.kind(),
+                    clap::error::ErrorKind::ValueValidation,
+                    "{since:?}"
+                );
+                assert_eq!(err.exit_code(), 2);
+            }
+            // Taken for an option, which it is not.
+            assert_eq!(parse("-1d").err().unwrap().exit_code(), 2);
+        }
+        let err = Cli::try_parse_from([
+            "cursor-session",
+            "export",
+            "--since",
+            "1d",
+            "--session-id",
+            "abc",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]

@@ -1538,3 +1538,94 @@ mod tty {
         assert_eq!(shown["messages"].as_array().unwrap().len(), 3);
     }
 }
+
+/// An agent session `id` in workspace `/w`, updated `updated` (epoch ms), with
+/// a user message for each of `messages`.
+fn write_agent_session(fixture: &Fixture, id: &str, updated: Option<i64>, messages: &[&str]) {
+    let mut meta = serde_json::json!({"title": format!("Title {id}"), "cwd": "/w"});
+    if let Some(updated) = updated {
+        meta["createdAtMs"] = (updated - 1000).into();
+        meta["updatedAtMs"] = updated.into();
+    }
+    fixture.write_meta_json("/w", id, &meta);
+    let lines: Vec<Value> = messages
+        .iter()
+        .enumerate()
+        .map(|(n, text)| plain_message(if n % 2 == 0 { "user" } else { "assistant" }, text))
+        .collect();
+    fixture.write_transcript("w", id, Layout::Nested, &lines);
+}
+
+/// Sessions updated an hour, ten days and a hundred days ago, and one without
+/// any time.
+fn recent_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    let now = chrono::Utc::now().timestamp_millis();
+    let hour = 3_600_000;
+    write_agent_session(&fixture, "hour", Some(now - hour), &["needle one"]);
+    write_agent_session(&fixture, "days", Some(now - 240 * hour), &["needle ten"]);
+    write_agent_session(
+        &fixture,
+        "months",
+        Some(now - 2400 * hour),
+        &["needle hundred"],
+    );
+    write_agent_session(&fixture, "never", None, &["needle"]);
+    fixture
+}
+
+#[test]
+fn since_keeps_only_recently_updated_sessions() {
+    let fixture = recent_fixture();
+    let listed = |args: &[&str]| ids(&json(&ok(&fixture, args))).join(" ");
+    assert_eq!(listed(&["list", "--json"]), "hour days months never");
+    assert_eq!(listed(&["list", "--json", "--since", "2d"]), "hour");
+    assert_eq!(listed(&["list", "--json", "--since", "30d"]), "hour days");
+    assert_eq!(listed(&["list", "--json", "--since", "720h"]), "hour days");
+    assert_eq!(
+        listed(&["list", "--json", "--since", "1000w"]),
+        "hour days months"
+    );
+    // The limit applies to the sessions kept.
+    assert_eq!(
+        listed(&["list", "--json", "--since", "30d", "--limit", "1"]),
+        "hour"
+    );
+    assert_eq!(ok(&fixture, &["list", "--json", "--since", "1m"]), "[]\n");
+    assert!(ok(&fixture, &["list", "--since", "2d"]).starts_with("Found 1 session(s)\n"));
+
+    let out = ok(&fixture, &["export", "--since", "30d", "--out", "recent"]);
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert_eq!(
+        exported_files(&fixture.home().join("recent")),
+        ["days.md", "hour.md"]
+    );
+    let out = ok(
+        &fixture,
+        &["export", "--since", "30d", "--limit", "1", "--out", "one"],
+    );
+    assert_eq!(
+        exported_files(&fixture.home().join("one")),
+        ["hour.md"],
+        "{out}"
+    );
+    assert_eq!(
+        fails(&fixture, &["export", "--since", "1m", "--out", "none"]),
+        "error: no sessions updated in the last 1m to export\n"
+    );
+    assert_eq!(
+        fails(
+            &fixture,
+            &[
+                "export",
+                "--since",
+                "1m",
+                "--workspace",
+                "/w",
+                "--out",
+                "none"
+            ]
+        ),
+        "error: no sessions of workspace `/w` were updated in the last 1m\n"
+    );
+}

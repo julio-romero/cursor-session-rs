@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use cursor_session::detect::{self, Env, StoragePaths};
 use cursor_session::export::{self, Format};
 use cursor_session::model::{self, Session, SessionSummary, Source, SummaryJson};
+use cursor_session::since::Since;
 use cursor_session::ui;
 use cursor_session::{
     Error, LoadOptions, Loaded, filter_workspace, load_messages, load_session, load_sessions,
@@ -108,6 +109,11 @@ fn print_warnings(warnings: &[String], verbose: bool, err: &mut dyn Write) -> Re
     Ok(())
 }
 
+/// The earliest updated time `--since` keeps, from the clock now.
+fn cutoff(since: Option<Since>) -> Option<i64> {
+    since.map(|since| since.cutoff(chrono::Utc::now().timestamp_millis()))
+}
+
 fn write_json(out: &mut dyn Write, value: &impl Serialize) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     writeln!(out, "{}", escape_controls(&json))?;
@@ -143,6 +149,7 @@ fn cmd_list(
     let load_opts = LoadOptions {
         source: args.source,
         limit: args.limit,
+        updated_since: cutoff(args.since),
     };
     let loaded = load(paths, &load_opts, args.verbose, err)?;
     if args.json {
@@ -202,6 +209,7 @@ fn cmd_export(
         None => {
             let load_opts = LoadOptions {
                 source: args.source,
+                updated_since: cutoff(args.since),
                 ..Default::default()
             };
             (None, Some(load(paths, &load_opts, args.verbose, err)?))
@@ -217,6 +225,14 @@ fn cmd_export(
         (None, None) => Vec::new(),
     };
     if selected.is_empty() {
+        if let Some(since) = args.since {
+            match &workspace {
+                Some(workspace) => {
+                    bail!("no sessions of workspace `{workspace}` were updated in the last {since}")
+                }
+                None => bail!("no sessions updated in the last {since} to export"),
+            }
+        }
         if let Some(workspace) = workspace {
             return Err(Error::NoWorkspaceMatch {
                 workspace: workspace.into_owned(),
