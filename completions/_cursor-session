@@ -108,7 +108,7 @@ _arguments "${_arguments_options[@]}" : \
 '--source=[Only read this store; the other one is never opened]:SOURCE:((agent\:"Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)"
 ide\:"Cursor IDE composer chats (state.vscdb)"))' \
 '--limit=[Keep only the last N messages \[default\: all\]]:N:_default' \
-'(--no-preamble)--preamble=[Start the transcript with TEXT instead of the default preamble (TEXT may start with "-")]:TEXT:_default' \
+'(--no-preamble)--preamble=[Start the transcript with TEXT instead of the default preamble (TEXT may start with "-"; one of handoff'\''s options is text only attached, as in --preamble=--stdout)]:TEXT:_default' \
 '--storage=[Read only this location\: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb]:PATH:_files' \
 '--color=[When to use color]:WHEN:(auto always never)' \
 '--stdout[Print the transcript instead of copying it]' \

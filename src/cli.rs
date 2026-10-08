@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
@@ -204,13 +205,21 @@ pub enum Commands {
     /// from where it ended; do not summarize it back."
     ///
     /// It is copied to the system clipboard: on macOS with /usr/bin/pbcopy;
-    /// on Linux through X11, where a copy of this program serves it in the
-    /// background until something else is copied, for at most 12 hours.
-    /// Without an X11 display (DISPLAY not set, as in a Wayland session
-    /// without XWayland, where `--stdout | wl-copy` copies it), or when
-    /// copying fails, it is printed to stdout instead, with a warning on
-    /// stderr, and the command still succeeds. A session without user or
-    /// assistant messages is not copied; a warning says so.
+    /// on Windows through the system clipboard; on Linux through X11, where a
+    /// copy of this program serves it in the background until something else
+    /// is copied, for at most 12 hours. Without an X11 display (DISPLAY not
+    /// set, as in a Wayland session without XWayland, where `--stdout |
+    /// wl-copy` copies it), or when copying fails, it is printed to stdout
+    /// instead, with a warning on stderr, and the command still succeeds. A
+    /// session without user or assistant messages is not copied; a warning
+    /// says so.
+    ///
+    /// On X11, handoff waits up to 5 seconds for that background copy to own
+    /// the clipboard. Interrupted in that time, it prints nothing, but the
+    /// background copy may still take the clipboard and serve the transcript.
+    /// Over `ssh -X` it keeps the connection to the X server open until
+    /// something else is copied, which can keep the session from closing:
+    /// there, use --stdout, or copy something else before logging out.
     #[command(
         after_help = HANDOFF_EXAMPLES,
         after_long_help = format!("{HANDOFF_EXAMPLES}\n\n{EXIT_CODES}")
@@ -420,7 +429,8 @@ pub struct HandoffArgs {
     #[arg(long)]
     pub stdout: bool,
     /// Start the transcript with TEXT instead of the default preamble (TEXT
-    /// may start with "-")
+    /// may start with "-"; one of handoff's options is text only attached, as
+    /// in --preamble=--stdout)
     #[arg(
         long,
         value_name = "TEXT",
@@ -523,6 +533,52 @@ impl Cli {
         }
         Ok(())
     }
+
+    /// Checks what only the raw arguments `args` show: that `handoff
+    /// --preamble` did not take one of handoff's own options for its text,
+    /// as in `--preamble --stdout`. A preamble may start with `-`, so clap
+    /// takes the next word whatever it is; given as `--preamble=--stdout`
+    /// the option is meant as text and is kept. The error is as
+    /// [`Cli::check`] gives one.
+    pub fn check_args(&self, args: &[OsString]) -> Result<(), (&'static str, String)> {
+        let Commands::Handoff(handoff) = &self.command else {
+            return Ok(());
+        };
+        let Some(preamble) = &handoff.preamble else {
+            return Ok(());
+        };
+        let separate = args
+            .windows(2)
+            .any(|pair| pair[0] == "--preamble" && pair[1] == preamble.as_str());
+        if separate && is_handoff_option(preamble) {
+            let message = format!(
+                "invalid value '{preamble}' for '--preamble <TEXT>': it is an option of \
+                 handoff, not text; give the text before it, or write \
+                 --preamble='{preamble}' to start the transcript with it"
+            );
+            return Err(("handoff", message));
+        }
+        Ok(())
+    }
+}
+
+/// Whether `word` is one of the options `handoff` takes, its own or a
+/// global one, alone or with an `=value`.
+fn is_handoff_option(word: &str) -> bool {
+    const SHORT: [&str; 2] = ["-v", "-h"];
+    const LONG: [&str; 9] = [
+        "--stdout",
+        "--no-preamble",
+        "--preamble",
+        "--limit",
+        "--source",
+        "--storage",
+        "--color",
+        "--verbose",
+        "--help",
+    ];
+    let name = word.split_once('=').map_or(word, |(name, _)| name);
+    SHORT.contains(&word) || LONG.contains(&name)
 }
 
 fn not_blank(value: &str) -> Result<String, String> {
@@ -693,6 +749,72 @@ mod tests {
             message.ends_with("the query has 65 terms; at most 64 are allowed"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_preamble_is_not_one_of_handoffs_options() {
+        let check = |argv: &[&str]| {
+            let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            let cli = Cli::try_parse_from(&args).unwrap();
+            cli.check_args(&args)
+        };
+        for option in [
+            "--stdout",
+            "--no-preamble",
+            "--preamble",
+            "--limit",
+            "--limit=5",
+            "--source=ide",
+            "--storage=/tmp",
+            "--color",
+            "--color=never",
+            "-v",
+            "--verbose",
+            "-h",
+            "--help",
+        ] {
+            for argv in [
+                &["cursor-session", "handoff", "abc", "--preamble", option][..],
+                &["cursor-session", "handoff", "--preamble", option, "abc"],
+            ] {
+                let (name, message) = check(argv).unwrap_err();
+                assert_eq!(name, "handoff");
+                assert!(
+                    message.starts_with(&format!(
+                        "invalid value '{option}' for '--preamble <TEXT>': it is an option"
+                    )),
+                    "{message}"
+                );
+                assert!(
+                    message.ends_with(&format!(
+                        "write --preamble='{option}' to start the transcript with it"
+                    )),
+                    "{message}"
+                );
+            }
+            // Attached, it is text.
+            let attached = format!("--preamble={option}");
+            assert!(check(&["cursor-session", "handoff", "abc", &attached]).is_ok());
+        }
+        // Text that only starts with a hyphen, and words that are no option
+        // of handoff's.
+        for text in [
+            "- Continue the refactor",
+            "--- context ---",
+            "--stdout please",
+            "--json",
+            "--all",
+            "-x",
+            "-vv",
+        ] {
+            assert!(
+                check(&["cursor-session", "handoff", "abc", "--preamble", text]).is_ok(),
+                "{text}"
+            );
+        }
+        // Other commands and handoff without --preamble pass.
+        assert!(check(&["cursor-session", "handoff", "abc", "--stdout"]).is_ok());
+        assert!(check(&["cursor-session", "show", "abc"]).is_ok());
     }
 
     #[test]

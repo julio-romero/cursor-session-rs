@@ -84,11 +84,11 @@ fn main() -> ExitCode {
 
 fn parse_cli(args: Vec<OsString>) -> Result<Cli, clap::Error> {
     let mut command = Cli::command();
-    let mut matches = command.try_get_matches_from_mut(args)?;
+    let mut matches = command.try_get_matches_from_mut(args.iter())?;
     let cli =
         Cli::from_arg_matches_mut(&mut matches).map_err(|error| error.format(&mut command))?;
     // An invalid value clap could not see, reported as clap reports one.
-    if let Err((name, message)) = cli.check() {
+    if let Err((name, message)) = cli.check().and_then(|()| cli.check_args(&args)) {
         let kind = clap::error::ErrorKind::ValueValidation;
         return Err(match command.find_subcommand_mut(name) {
             Some(subcommand) => subcommand.error(kind, message),

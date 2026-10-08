@@ -1932,12 +1932,7 @@ fn handoff_cuts_messages_short_and_leaves_tools_out() {
 #[test]
 fn handoff_preambles_may_start_with_a_hyphen() {
     let fixture = standard();
-    for preamble in [
-        "- Continue the refactor",
-        "--- context ---",
-        "-v",
-        "--stdout",
-    ] {
+    for preamble in ["- Continue the refactor", "--- context ---", "-x"] {
         let out = ok(
             &fixture,
             &["handoff", AGENT_ID, "--stdout", "--preamble", preamble],
@@ -1954,6 +1949,38 @@ fn handoff_preambles_may_start_with_a_hyphen() {
         assert!(
             out.starts_with(&format!("{preamble}\n\n[user]\n")),
             "{preamble}: {out}"
+        );
+    }
+    // One of handoff's own options after --preamble is taken for that option
+    // left without its text: a usage error, which says how to pass it as
+    // text. Nothing is printed or copied.
+    for option in ["--stdout", "--no-preamble", "-v", "--limit=3", "--help"] {
+        for args in [
+            &["handoff", AGENT_ID, "--stdout", "--preamble", option][..],
+            &["handoff", "--preamble", option, AGENT_ID, "--stdout"],
+        ] {
+            let output = run(&fixture, args);
+            assert_eq!(output.status.code(), Some(2), "{args:?}");
+            assert_eq!(stdout(&output), "", "{args:?}");
+            let err = stderr(&output);
+            assert!(
+                err.starts_with(&format!(
+                    "error: invalid value '{option}' for '--preamble <TEXT>'"
+                )),
+                "{args:?}: {err}"
+            );
+            assert!(
+                err.contains(&format!("--preamble='{option}'")),
+                "{args:?}: {err}"
+            );
+            assert!(err.contains("try '--help'"), "{args:?}: {err}");
+        }
+        // Attached to the flag, it is the text.
+        let attached = format!("--preamble={option}");
+        let out = ok(&fixture, &["handoff", AGENT_ID, "--stdout", &attached]);
+        assert!(
+            out.starts_with(&format!("{option}\n\n[user]\n")),
+            "{option}: {out}"
         );
     }
 }

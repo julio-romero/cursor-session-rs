@@ -99,7 +99,7 @@ complete -c cursor-session -n "__fish_cursor_session_using_subcommand export" -s
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l source -d 'Only read this store; the other one is never opened' -r -f -a "agent\t'Cursor Agent CLI chats (~/.cursor/chats and agent transcripts)'
 ide\t'Cursor IDE composer chats (state.vscdb)'"
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l limit -d 'Keep only the last N messages [default: all]' -r
-complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l preamble -d 'Start the transcript with TEXT instead of the default preamble (TEXT may start with "-")' -r
+complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l preamble -d 'Start the transcript with TEXT instead of the default preamble (TEXT may start with "-"; one of handoff\'s options is text only attached, as in --preamble=--stdout)' -r
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l storage -d 'Read only this location: a home, .cursor, chats, workspace, session or projects directory, a store.db or state.vscdb file, or the directory that holds state.vscdb' -r -F
 complete -c cursor-session -n "__fish_cursor_session_using_subcommand handoff" -l color -d 'When to use color' -r -f -a "auto\t''
 always\t''
