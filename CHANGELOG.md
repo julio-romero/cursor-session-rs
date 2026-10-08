@@ -94,6 +94,14 @@ off to another agent when a Cursor session runs out of credits.
 
 ### Fixed
 
+- A Cursor IDE chat deleted while it is being read is left out of `list` and
+  `search`, and `show`, `handoff` and `export` stop with `changed while it was
+  being read`. Before, it listed with 0 messages, and `handoff` copied an empty
+  transcript.
+- Agent CLI transcript lines that cannot be read, or that are of an unknown
+  role, now give a `-v` warning (`skipped N unreadable lines in …`), so
+  `healthcheck` counts them under `load warnings`. A last line that is not
+  JSON, as a session still being written leaves, is still skipped quietly.
 - The `list` table no longer widens the `TITLE` column beyond its content at
   some narrow widths, a comfy-table 7 bug that measured the `…` of a cut title
   in bytes.

@@ -70,8 +70,11 @@ there. A database in WAL mode is read depending on the files next to it:
 - **While Cursor is running**, the database has `-wal` and `-shm` files next to
   it, even when the `-wal` is empty. cursor-session reads it in place like any
   other SQLite reader and sees everything Cursor has committed, each chat with
-  its messages from the same commit. Readers do not block Cursor's writes, and
-  if the database is locked it waits up to 5 seconds before giving up.
+  its messages from the same commit. A chat that Cursor deletes while it is
+  being read is left out of `list` and `search`, and `show`, `handoff` and
+  `export` stop with `changed while it was being read`, rather than showing it
+  without messages. Readers do not block Cursor's writes, and if the database
+  is locked it waits up to 5 seconds before giving up.
 - **When Cursor is closed**, the database is opened as immutable. SQLite then
   creates no `-wal` or `-shm` files next to it, and reading works even in a
   read-only directory. If Cursor starts and changes the file during the read,
@@ -169,7 +172,11 @@ of other kinds in a database without chats.
 The Agent CLI gets the same treatment. When transcripts hold lines but none of
 them yields a message, for example because their roles are no longer `user` and
 `assistant`, the error reads `unrecognized Cursor Agent CLI storage
-format` and `--source ide` skips those sessions. When no `store.db` can be read
+format` and `--source ide` skips those sessions. Lines of a transcript that
+cannot be read, because they are not JSON or their role is neither `user`,
+`assistant`, `system` nor `tool`, are skipped with a `-v` warning (`skipped 2
+unreadable lines in …`); a last line that is not JSON, as a session still being
+written can leave, is skipped without one. When no `store.db` can be read
 because its tables or values changed, the sessions still list, without a model
 and under their `meta.json` title or else their ID, and a `warning:` line says
 so. When no `meta.json` can be read, because it holds none of the keys this
