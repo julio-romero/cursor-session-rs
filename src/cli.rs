@@ -130,7 +130,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub storage: Option<PathBuf>,
 
-    /// Print the storage paths in use and the rows and files that were skipped to stderr
+    /// Print the storage paths in use and the rows, lines and files that were skipped to stderr
     #[arg(short, long, global = true)]
     pub verbose: bool,
 
@@ -289,8 +289,7 @@ pub struct ListArgs {
     #[arg(
         long,
         value_name = "DURATION",
-        value_parser = parse_since,
-        allow_hyphen_values = true
+        value_parser = parse_since
     )]
     pub since: Option<Since>,
     /// Print a JSON array of session summaries
@@ -330,8 +329,7 @@ pub struct SearchArgs {
     #[arg(
         long,
         value_name = "DURATION",
-        value_parser = parse_since,
-        allow_hyphen_values = true
+        value_parser = parse_since
     )]
     pub since: Option<Since>,
     /// Print a JSON array of the matching sessions, best first
@@ -415,7 +413,6 @@ pub struct ExportArgs {
         long,
         value_name = "DURATION",
         value_parser = parse_since,
-        allow_hyphen_values = true,
         conflicts_with = "session_id"
     )]
     pub since: Option<Since>,
@@ -574,6 +571,42 @@ impl Cli {
         }
         Ok(())
     }
+}
+
+/// The arguments `args` with a negative span given to `--since` attached
+/// to it: `--since -1d` becomes `--since=-1d`, so that clap reports the span
+/// as a `--since` value that is not valid rather than as an option it does
+/// not know. Only a word of `-` and a digit is attached, so a flag that
+/// follows a `--since` without a value is still read as a flag, and clap
+/// says the value is missing. Nothing after `--` is changed, nor a
+/// `--since` that is itself the text of `--preamble`.
+pub fn attach_negative_since(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut attached: Vec<OsString> = Vec::new();
+    let mut after_dashes = false;
+    for arg in args {
+        let follows_since = !after_dashes
+            && attached.last().is_some_and(|last| last == "--since")
+            && attached
+                .len()
+                .checked_sub(2)
+                .is_none_or(|before| attached[before] != "--preamble");
+        if follows_since && is_negative_span(&arg) {
+            if let Some(since) = attached.last_mut() {
+                since.push("=");
+                since.push(&arg);
+            }
+            continue;
+        }
+        after_dashes |= arg == "--";
+        attached.push(arg);
+    }
+    attached
+}
+
+/// Whether `word` reads as a negative number: `-` and then a digit.
+fn is_negative_span(word: &OsString) -> bool {
+    let bytes = word.as_encoded_bytes();
+    bytes.len() > 1 && bytes[0] == b'-' && bytes[1].is_ascii_digit()
 }
 
 /// Whether `word` is one of the options `handoff` takes, its own or a
@@ -832,6 +865,32 @@ mod tests {
     }
 
     #[test]
+    fn attach_negative_since_attaches_only_a_negative_span() {
+        let attach = |argv: &[&str]| -> Vec<String> {
+            attach_negative_since(argv.iter().map(OsString::from))
+                .into_iter()
+                .map(|arg| arg.into_string().unwrap())
+                .collect()
+        };
+        assert_eq!(
+            attach(&["cs", "list", "--since", "-1d", "--json"]),
+            ["cs", "list", "--since=-1d", "--json"]
+        );
+        for argv in [
+            &["cs", "list", "--since", "1d"][..],
+            &["cs", "list", "--since", "--json"],
+            &["cs", "list", "--since", "-v"],
+            &["cs", "list", "--since", "-"],
+            &["cs", "list", "--since=-1d"],
+            &["cs", "list", "--since"],
+            &["cs", "search", "--", "--since", "-1d"],
+            &["cs", "handoff", "abc", "--preamble", "--since", "-1d"],
+        ] {
+            assert_eq!(attach(argv), argv, "{argv:?}");
+        }
+    }
+
+    #[test]
     fn since_takes_a_duration_and_not_with_one_session() {
         for command in [&["list"][..], &["export"], &["search", "x"]] {
             let parse = |since: &str| {
@@ -840,7 +899,7 @@ mod tests {
                     .chain(command.iter().copied())
                     .chain(["--since", since])
                     .collect();
-                Cli::try_parse_from(argv)
+                Cli::try_parse_from(attach_negative_since(argv.iter().map(OsString::from)))
             };
             for since in ["30d", "12h", "90m", "45s", "2w"] {
                 assert!(parse(since).is_ok(), "{command:?} {since}");
@@ -854,12 +913,45 @@ mod tests {
                 );
                 assert_eq!(err.exit_code(), 2);
             }
-            // Taken for an option, which it is not.
-            assert_eq!(parse("-1d").err().unwrap().exit_code(), 2);
             // A negative span is a span that is not valid, not an unknown option.
-            let err = parse("-1d").err().unwrap();
-            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
-            assert!(err.to_string().contains("'--since <DURATION>'"), "{err}");
+            for since in ["-1d", "-30", "-0d"] {
+                let err = parse(since).err().unwrap();
+                assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+                assert_eq!(err.exit_code(), 2);
+                assert!(err.to_string().contains("'--since <DURATION>'"), "{err}");
+            }
+            // A flag after a --since without a value stays a flag: the value
+            // is missing, whether the flag takes a value or not.
+            let own: &[&str] = if command[0] == "export" {
+                &["--out", "x"]
+            } else {
+                &["--json"]
+            };
+            for next in [
+                own,
+                &["--limit", "3"],
+                &["--source", "agent"],
+                &["-v"],
+                &["-h"],
+                &["--help"],
+            ] {
+                let argv: Vec<&str> = ["cursor-session"]
+                    .into_iter()
+                    .chain(command.iter().copied())
+                    .chain(["--since"])
+                    .chain(next.iter().copied())
+                    .collect();
+                let err =
+                    Cli::try_parse_from(attach_negative_since(argv.iter().map(OsString::from)))
+                        .err()
+                        .unwrap();
+                assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{argv:?}");
+                let message = err.to_string();
+                assert!(
+                    message.contains("a value is required for '--since <DURATION>'"),
+                    "{argv:?}: {message}"
+                );
+            }
         }
         let err = Cli::try_parse_from([
             "cursor-session",

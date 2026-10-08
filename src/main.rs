@@ -83,6 +83,7 @@ fn main() -> ExitCode {
 }
 
 fn parse_cli(args: Vec<OsString>) -> Result<Cli, clap::Error> {
+    let args = cli::attach_negative_since(args);
     let mut command = Cli::command();
     let mut matches = command.try_get_matches_from_mut(args.iter())?;
     let cli =

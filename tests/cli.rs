@@ -2554,6 +2554,29 @@ fn search_usage_errors_exit_2() {
         assert!(err.starts_with("error: "), "{args:?}: {err}");
         assert!(err.contains("try '--help'"), "{args:?}: {err}");
     }
+    // A --since without a value does not take the flag after it, and a
+    // negative span is a value that is not valid.
+    for args in [
+        &["list", "--since", "--json"][..],
+        &["list", "--since", "--limit", "3"],
+        &["export", "--since", "--out", "x"],
+        &["search", "x", "--since", "--source", "agent"],
+    ] {
+        let output = run(&fixture, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let err = stderr(&output);
+        assert!(
+            err.starts_with("error: a value is required for '--since <DURATION>'"),
+            "{args:?}: {err}"
+        );
+    }
+    let output = run(&fixture, &["list", "--since", "-1d"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).starts_with("error: invalid value '-1d' for '--since <DURATION>'"),
+        "{}",
+        stderr(&output)
+    );
     let output = run(&fixture, &["search", "\"\"", "\" \""]);
     assert!(
         stderr(&output).starts_with(&format!(
