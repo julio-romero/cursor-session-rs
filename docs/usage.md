@@ -114,8 +114,9 @@ a71d0e58-2c39-4f7b-b6a4-19e8c3d5f027  agent       4       175  2026-10-05 14:12 
   `90m`, `12h`, `30d`, `2w`). The time compared is the one `UPDATED` shows (the
   update time, else the creation time); sessions with neither are left out. It
   is applied before `--limit`, and the sessions it leaves out are not read. The
-  same flag works for `search` and `export`. An invalid value, such as `30D` or
-  `1.5h`, exits 2.
+  same flag works for `search` and `export`. An invalid value, such as `30D`,
+  `1.5h` or `-1d`, exits 2, as does a `--since` without a value: in
+  `--since --json` the flag after it is not taken for its value.
 
 Run on 2026-10-08, `list --since 7d` keeps the sessions updated since
 2026-10-01:
@@ -456,6 +457,12 @@ that stops early (`| head`), every file is still written.
   export`, or with `--workspace`, ``no sessions of workspace `<w>` were updated
   in the last 1h``. A file or directory that cannot be written gives
   `could not write <path>` or `could not create <dir>` with the reason. All exit 1.
+- A session deleted after the sessions were listed, as when Cursor deletes an
+  IDE chat during the export, is skipped with `warning: session <id> was
+  deleted while it was being read; it is not exported`, printed also without
+  `-v`, and the other sessions are still written; the export exits 0 unless
+  something else fails. With `--session-id`, such a session stops the export
+  with `session <id> was deleted while it was being read` and exits 1.
 - Exports contain the stored text unchanged. Times in `json` and `yaml` exports
   are epoch milliseconds; this is not the `--json` format described below.
   Markdown exports show times like `show` does.
@@ -542,7 +549,7 @@ prints that subcommand's options.
 | Flag                          | Effect                                                                                               |
 | ----------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `--storage <PATH>`            | Read only this location instead of detecting Cursor's data. See [`--storage`](storage.md#--storage). |
-| `-v`, `--verbose`             | Print the storage paths in use and the rows and files that were skipped to stderr.                  |
+| `-v`, `--verbose`             | Print the storage paths in use and the rows, lines and files that were skipped to stderr.            |
 | `--color <auto\|always\|never>` | `auto` (default) colors only a terminal, and only when `NO_COLOR` is unset or empty and `TERM` is not `dumb`. `always` colors even when piped and overrides `NO_COLOR`. `never` prints no color codes. Help and usage errors follow the same rules. |
 | `-h`, `--help`                | `-h` prints a summary with examples. `--help` adds the data sources and exit codes.                  |
 | `-V`, `--version`             | Print the version.                                                                                   |
@@ -704,7 +711,7 @@ $ cursor-session list --json | jq '[.[] | (.updated_at // .created_at) | select(
 | Code | Meaning                                                                                                     |
 | ---- | ----------------------------------------------------------------------------------------------------------- |
 | 0    | Success, including `--help`, `--version`, an empty list, and output cut short by a closed pipe (`cursor-session list \| head`), which prints nothing on stderr |
-| 1    | Runtime error: session not found or ambiguous, no sessions match (`search`), unreadable storage, changed storage format, failed healthcheck, nothing to export |
+| 1    | Runtime error: session not found or ambiguous, session deleted while it was being read, no sessions match (`search`), unreadable storage, changed storage format, failed healthcheck, nothing to export |
 | 2    | Usage error: unknown command or flag, invalid value (`list --limit 0`, `--source web`, `--since 30D`, an empty session ID or `--workspace`, a search query without terms, `--context 1001`), `--limit` together with `--all`, `--since` together with `export --session-id`, one of handoff's options as `--preamble`, missing subcommand |
 
 Errors go to stderr as `error: <message>`, then one `caused by:` line per

@@ -28,7 +28,8 @@ off to another agent when a Cursor session runs out of credits.
   `30d`, `2w`): only the sessions updated within that span, applied before
   `--limit`. It cannot be combined with `export --session-id`, and an export
   that selects nothing exits 1 with `no sessions updated in the last <since>
-  to export`.
+  to export`. An invalid value, such as `30D` or `-1d`, and a `--since`
+  without a value, as in `--since --json`, exit 2.
 - A token estimate, ceil(characters / 4) of the messages `show` prints by
   default (tool calls and results not counted): a `TOKENS` column in `list`
   (in a terminal table from 79 columns wide, always in piped output), a
@@ -94,14 +95,24 @@ off to another agent when a Cursor session runs out of credits.
 
 ### Fixed
 
-- A Cursor IDE chat deleted while it is being read is left out of `list` and
-  `search`, and `show`, `handoff` and `export` stop with `changed while it was
-  being read`. Before, it listed with 0 messages, and `handoff` copied an empty
-  transcript.
-- Agent CLI transcript lines that cannot be read, or that are of an unknown
-  role, now give a `-v` warning (`skipped N unreadable lines in …`), so
-  `healthcheck` counts them under `load warnings`. A last line that is not
-  JSON, as a session still being written leaves, is still skipped quietly.
+- A Cursor IDE chat deleted between listing the chats and reading its
+  messages is left out of `list` and `search`. `show`, `handoff` and
+  `export --session-id` stop with `session <id> was deleted while it was being
+  read` (exit 1), or `session not found` when the chat was already gone when
+  they looked the ID up. An `export` of many sessions skips it with a
+  `warning:` line, also without `-v`, and writes the others. Before, it listed
+  with 0 messages, and `handoff` copied an empty transcript.
+- Agent CLI transcript lines that cannot be read now give a `-v` warning, one
+  per transcript (`skipped N unreadable lines in …`, or `… in M transcripts
+  (first: …)`), so `healthcheck` counts them under `load warnings`. A line
+  cannot be read when it is not JSON, has no role, has a role other than
+  `user`, `assistant`, `system` and `tool`, or is a `user` or `assistant` line
+  of another shape. `system` and `tool` lines are never reported, whatever
+  they hold, and neither is a last line cut off, as a session still being
+  written leaves.
+- A transcript of only `system` and `tool` lines whose `message` is not an
+  object, such as a tool result written as a string, is no longer reported as
+  an unrecognized Agent CLI storage format.
 - The `list` table no longer widens the `TITLE` column beyond its content at
   some narrow widths, a comfy-table 7 bug that measured the `…` of a cut title
   in bytes.

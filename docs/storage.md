@@ -70,11 +70,15 @@ there. A database in WAL mode is read depending on the files next to it:
 - **While Cursor is running**, the database has `-wal` and `-shm` files next to
   it, even when the `-wal` is empty. cursor-session reads it in place like any
   other SQLite reader and sees everything Cursor has committed, each chat with
-  its messages from the same commit. A chat that Cursor deletes while it is
-  being read is left out of `list` and `search`, and `show`, `handoff` and
-  `export` stop with `changed while it was being read`, rather than showing it
-  without messages. Readers do not block Cursor's writes, and if the database
-  is locked it waits up to 5 seconds before giving up.
+  its messages from the same commit. A chat that Cursor deletes between the
+  read that lists the chats and the read of its messages is left out of `list`
+  and `search`, rather than shown without messages. `show`, `handoff` and
+  `export --session-id` then stop with `session <id> was deleted while it was
+  being read` and exit 1, and a chat already gone when they look the ID up
+  gives `session not found`. An `export` of many sessions skips it with a
+  `warning:` line, also without `-v`, and writes the others. Readers do not
+  block Cursor's writes, and if the database is locked it waits up to 5
+  seconds before giving up.
 - **When Cursor is closed**, the database is opened as immutable. SQLite then
   creates no `-wal` or `-shm` files next to it, and reading works even in a
   read-only directory. If Cursor starts and changes the file during the read,
@@ -173,10 +177,15 @@ The Agent CLI gets the same treatment. When transcripts hold lines but none of
 them yields a message, for example because their roles are no longer `user` and
 `assistant`, the error reads `unrecognized Cursor Agent CLI storage
 format` and `--source ide` skips those sessions. Lines of a transcript that
-cannot be read, because they are not JSON or their role is neither `user`,
-`assistant`, `system` nor `tool`, are skipped with a `-v` warning (`skipped 2
-unreadable lines in …`); a last line that is not JSON, as a session still being
-written can leave, is skipped without one. When no `store.db` can be read
+cannot be read are skipped with one `-v` warning per transcript (`skipped 2
+unreadable lines in …`, or `skipped 5 unreadable lines in 3 transcripts
+(first: …)`, naming the first by path). A line cannot be read when it is not
+JSON, has no role, has a role other than `user`, `assistant`, `system` and
+`tool`, or is a `user` or `assistant` line whose JSON has another shape, such
+as a `message` that is not an object. Lines of the roles never shown,
+`system` and `tool`, are skipped quietly whatever they hold. A last line that
+is cut off, not JSON or ending early, as a session still being written can
+leave, is skipped without a warning too. When no `store.db` can be read
 because its tables or values changed, the sessions still list, without a model
 and under their `meta.json` title or else their ID, and a `warning:` line says
 so. When no `meta.json` can be read, because it holds none of the keys this
@@ -214,6 +223,10 @@ warning: skipped 1 unreadable composer row in /Users/dana/Library/Application Su
 
 **`could not read SQLite database`** with the hint `try again in a moment`:
 Cursor held a lock for more than 5 seconds. Run the command again.
+
+**`session … was deleted while it was being read`**: Cursor deleted that IDE
+chat after it was found and before its messages were read. Run
+`cursor-session list` to see the sessions there now.
 
 **`could not copy … to a temporary directory for reading`**: the temporary
 directory is not writable or is full. Point `TMPDIR` (`TMP` on Windows)
