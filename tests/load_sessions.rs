@@ -582,6 +582,45 @@ fn agent_problems_are_warnings_and_the_rest_loads() {
 }
 
 #[test]
+fn unreadable_transcript_lines_are_a_warning_but_a_half_written_last_line_is_not() {
+    let fixture = Fixture::new();
+    let line = |value: serde_json::Value| format!("{value}\n");
+    let mid = fixture.write_transcript(
+        "Users-demo-project-x",
+        "mid",
+        Layout::Flat,
+        &[plain_message("user", "first")],
+    );
+    let mut text = fs::read_to_string(&mid).unwrap();
+    // Cut mid-line, a line of an unknown role, then lines that read.
+    text.push_str("{\"role\":\"assistant\",\"message\":{\"content\":\"sec\n");
+    text.push_str(&line(plain_message("bogusrole", "x")));
+    text.push_str(&line(plain_message("user", "third")));
+    write(&mid, &text);
+    // A session still being written, cut in its last line.
+    let tail = fixture.write_transcript(
+        "Users-demo-project-x",
+        "tail",
+        Layout::Flat,
+        &[
+            plain_message("user", "first"),
+            plain_message("assistant", "reply"),
+        ],
+    );
+    let mut text = fs::read_to_string(&tail).unwrap();
+    text.push_str("{\"role\":\"user\",\"mess");
+    write(&tail, &text);
+
+    let loaded = fixture.load();
+    assert_eq!(contents(get(&loaded.sessions, "mid")), ["first", "third"]);
+    assert_eq!(contents(get(&loaded.sessions, "tail")), ["first", "reply"]);
+    assert_eq!(
+        loaded.warnings,
+        [format!("skipped 2 unreadable lines in {}", mid.display())]
+    );
+}
+
+#[test]
 fn transcripts_whose_roles_were_renamed_are_an_unrecognized_format() {
     let fixture = Fixture::new();
     for id in ["a", "b"] {

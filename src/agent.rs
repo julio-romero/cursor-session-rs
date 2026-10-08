@@ -212,6 +212,7 @@ pub(crate) fn count(
     warnings: &mut Vec<String>,
 ) -> Vec<SessionSummary> {
     let mut unreadable = Unreadable::new("transcript");
+    let mut skipped = SkippedLines::default();
     let counted = index
         .sessions
         .iter()
@@ -231,6 +232,7 @@ pub(crate) fn count(
                         TranscriptCandidate {
                             messages: scan.messages,
                             chars: scan.chars,
+                            skipped_lines: scan.skipped_lines(),
                             modified: file.modified,
                             path: file.path.clone(),
                         },
@@ -240,6 +242,7 @@ pub(crate) fn count(
                 }
             }
             if let Some(best) = best {
+                skipped.add(&best.path, best.skipped_lines);
                 session.message_count = best.messages;
                 session.content_chars = best.chars;
                 session.messages_at = MessagesAt::Transcript(best.path);
@@ -248,7 +251,45 @@ pub(crate) fn count(
         })
         .collect();
     unreadable.report(warnings);
+    warnings.extend(skipped.warning());
     counted
+}
+
+/// Lines of the transcripts counted that could not be read.
+#[derive(Debug, Default)]
+struct SkippedLines {
+    lines: usize,
+    transcripts: usize,
+    first: Option<PathBuf>,
+}
+
+impl SkippedLines {
+    fn add(&mut self, path: &Path, lines: usize) {
+        if lines == 0 {
+            return;
+        }
+        self.lines += lines;
+        self.transcripts += 1;
+        self.first.get_or_insert_with(|| path.to_path_buf());
+    }
+
+    /// The `-v` warning about them, if any were skipped.
+    fn warning(&self) -> Option<String> {
+        let first = self.first.as_ref()?;
+        let lines = if self.lines == 1 { "line" } else { "lines" };
+        Some(match self.transcripts {
+            1 => format!(
+                "skipped {} unreadable {lines} in {}",
+                self.lines,
+                first.display()
+            ),
+            transcripts => format!(
+                "skipped {} unreadable {lines} in {transcripts} transcripts (first: {})",
+                self.lines,
+                first.display()
+            ),
+        })
+    }
 }
 
 /// What scanning the location `dir` found, or `None` when `dir` could not be
@@ -625,6 +666,8 @@ struct TranscriptCandidate {
     messages: usize,
     /// The characters of their content.
     chars: usize,
+    /// Lines that could not be read (see [`Scan::skipped_lines`]).
+    skipped_lines: usize,
     modified: Option<SystemTime>,
     path: PathBuf,
 }
@@ -820,9 +863,19 @@ struct Scan {
     /// Lines that should hold a message: the user's, the assistant's, and
     /// those this version cannot read, such as lines of an unknown role.
     expected: usize,
+    /// Lines that are not JSON or not of a known role.
+    unreadable: usize,
+    /// Whether the last line that is not blank is not JSON.
+    ends_unreadable: bool,
 }
 
 impl Scan {
+    /// The lines that could not be read, but for a last one that is not
+    /// JSON: a session still being written may end in a line half written.
+    fn skipped_lines(&self) -> usize {
+        self.unreadable - usize::from(self.ends_unreadable)
+    }
+
     /// Whether it holds lines but no message could be read from them, which
     /// lines of the roles that are never shown (system, tool) alone do not
     /// make it.
@@ -851,9 +904,15 @@ fn scan_transcript(path: &Path, mut keep: Option<Keep<'_>>, until_first: bool) -
             continue;
         }
         let mut built = None;
-        match read_line(line, keep.is_some()) {
+        let read = read_line(line, keep.is_some());
+        scan.ends_unreadable = matches!(read, Line::Unreadable { json: false });
+        match read {
             Line::Nothing => {}
             Line::NoMessage => scan.expected += 1,
+            Line::Unreadable { .. } => {
+                scan.expected += 1;
+                scan.unreadable += 1;
+            }
             Line::Message { message, chars } => {
                 scan.expected += 1;
                 scan.messages += 1;
@@ -881,8 +940,11 @@ enum Line {
     /// only tool calls or images.
     Nothing,
     /// A line that should hold a message but holds none this version can
-    /// show: unreadable, of an unknown role, or without text.
+    /// show: one without text.
     NoMessage,
+    /// A line this version cannot read: not JSON, without a role, or of an
+    /// unknown role. `json` tells whether it is JSON.
+    Unreadable { json: bool },
     /// A message, built when asked for, and the characters of the content it
     /// shows.
     Message {
@@ -892,10 +954,13 @@ enum Line {
 }
 
 fn read_line(line: &str, build: bool) -> Line {
-    let entry = json::from_str::<TranscriptLine>(line).ok();
-    let Some((role, message)) = entry.and_then(|entry| Some((entry.role?, entry.message))) else {
-        return Line::NoMessage;
+    let Ok(entry) = json::from_str::<TranscriptLine>(line) else {
+        return Line::Unreadable { json: false };
     };
+    let Some(role) = entry.role else {
+        return Line::Unreadable { json: true };
+    };
+    let message = entry.message;
     if matches!(role.as_str(), "system" | "tool") {
         return Line::Nothing;
     }
@@ -906,7 +971,7 @@ fn read_line(line: &str, build: bool) -> Line {
         return Line::Nothing;
     }
     if !known {
-        return Line::NoMessage;
+        return Line::Unreadable { json: true };
     }
     if !build {
         return match shown_chars(&role, &content) {
@@ -1219,6 +1284,7 @@ mod tests {
         TranscriptCandidate {
             messages: count,
             chars: 0,
+            skipped_lines: 0,
             modified: modified
                 .map(|seconds| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
             path: path.into(),
