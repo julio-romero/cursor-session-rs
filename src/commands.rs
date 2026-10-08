@@ -237,7 +237,7 @@ fn cmd_handoff(
         args.verbose,
         err,
     )?;
-    let messages = view.apply(std::mem::take(&mut session.messages));
+    let messages = handoff::select(std::mem::take(&mut session.messages));
     let opts = HandoffOptions {
         preamble: match (&args.preamble, args.no_preamble) {
             (_, true) => None,

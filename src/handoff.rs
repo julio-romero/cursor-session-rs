@@ -4,9 +4,11 @@
 //! transcript's token estimate. A function of the messages alone, so that
 //! the clipboard and stdout get the same text.
 
+use std::borrow::Cow;
+
 use crate::model::{Message, content_chars, token_estimate};
 use crate::ui;
-use crate::view::{Role, View};
+use crate::view::{self, Role, View};
 
 /// The preamble a transcript starts with unless it is replaced or left out.
 pub const DEFAULT_PREAMBLE: &str = "The following is a transcript from a Cursor session that ran \
@@ -52,7 +54,27 @@ pub fn view() -> View {
     }
 }
 
-/// The transcript of `messages`, which are those [`view`] keeps of a
+/// The messages of a session's `messages` that a transcript holds: those
+/// [`view`] keeps, in order, each without escape sequences and control
+/// characters (see [`ui::plain_text`]) and then cut short as
+/// [`view::shorten`] cuts it. Removing them first makes the cut count only
+/// characters that are kept, so that its `…` is never lost inside a
+/// sequence that is then removed.
+pub fn select(messages: Vec<Message>) -> Vec<Message> {
+    let view = view();
+    messages
+        .into_iter()
+        .filter(|message| view.shows(&message.role))
+        .map(|mut message| {
+            if let Cow::Owned(plain) = ui::plain_text(&message.content) {
+                message.content = plain;
+            }
+            view::shorten(message)
+        })
+        .collect()
+}
+
+/// The transcript of `messages`, which are those [`select`] keeps of a
 /// session, in order: the preamble, each message under a `[role]` line (as
 /// `show` prints it, without the time), then a trailer that counts the
 /// messages and estimates the transcript's tokens. `opts.limit` keeps only
@@ -441,15 +463,64 @@ mod tests {
         let view = view();
         assert!(view.short);
         assert!(!view.read_options().tools);
-        let kept = view.apply(vec![
+        let conversation = vec![
             message("user", "q"),
             message("tool", "Grep {}"),
             message("unknown", "?"),
             message("assistant", &"a".repeat(301)),
-        ]);
+        ];
+        let kept = select(conversation.clone());
         let roles: Vec<&str> = kept.iter().map(|m| m.role.as_str()).collect();
         assert_eq!(roles, ["user", "assistant"]);
         assert_eq!(kept[1].content, format!("{}…", "a".repeat(300)));
+        // Without escape sequences, it keeps what `show --short --only
+        // user,assistant` keeps.
+        let contents = |messages: &[Message]| -> Vec<(String, String)> {
+            messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect()
+        };
+        assert_eq!(contents(&kept), contents(&view.apply(conversation)));
+    }
+
+    #[test]
+    fn the_cut_counts_only_the_characters_kept() {
+        let a = "a".repeat(295);
+        // Sequences that straddle character 300: an OSC (which a cut there
+        // would leave unterminated, swallowing the rest of the line), a CSI,
+        // and an OSC that never ends.
+        for sequence in [
+            "\u{1b}]8;;https://example.com\u{7}",
+            "\u{1b}[38;5;196m",
+            "\u{1b}]0;title",
+        ] {
+            let content = format!("{a}{sequence}{}\nnext line", "b".repeat(20));
+            let kept = select(vec![message("assistant", &content)]);
+            let expected = if sequence.ends_with("title") {
+                // An unterminated string runs to the end of its line; the
+                // next one counts.
+                format!("{a}\nnext…")
+            } else {
+                format!("{a}bbbbb…")
+            };
+            assert_eq!(kept[0].content, expected, "{sequence:?}");
+            let handoff = render_handoff(&kept, &HandoffOptions::default());
+            assert!(
+                handoff
+                    .text
+                    .contains(&format!("[assistant]\n{expected}\n\n")),
+                "{:?}",
+                handoff.text
+            );
+        }
+        // Short enough once the sequences are gone: nothing is cut.
+        let content = format!("{}\u{1b}[1m{}\u{1b}[0m", "a".repeat(290), "b".repeat(10));
+        let kept = select(vec![message("user", &content)]);
+        assert_eq!(
+            kept[0].content,
+            format!("{}{}", "a".repeat(290), "b".repeat(10))
+        );
     }
 
     #[test]
