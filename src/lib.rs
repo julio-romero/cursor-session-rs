@@ -89,7 +89,7 @@ pub fn load_session(
     warnings: &mut Vec<String>,
     notices: &mut Vec<String>,
 ) -> Result<Session> {
-    load_session_with(
+    read_session(
         paths,
         opts,
         query,
@@ -99,8 +99,34 @@ pub fn load_session(
     )
 }
 
-/// [`load_session`], with its messages read as `read` says.
+/// What [`load_session_with`] loaded.
+#[derive(Debug)]
+pub struct LoadedSession {
+    /// The session with its messages, or why it could not be loaded.
+    pub session: Result<Session>,
+    /// As in [`Loaded`], also when loading failed.
+    pub warnings: Vec<String>,
+    pub notices: Vec<String>,
+}
+
+/// [`load_session`], with its messages read as `read` says, and what loading
+/// skipped or left out returned with it.
 pub fn load_session_with(
+    paths: &StoragePaths,
+    opts: &LoadOptions,
+    query: &str,
+    read: ReadOptions,
+) -> LoadedSession {
+    let (mut warnings, mut notices) = (Vec::new(), Vec::new());
+    let session = read_session(paths, opts, query, read, &mut warnings, &mut notices);
+    LoadedSession {
+        session,
+        warnings,
+        notices,
+    }
+}
+
+fn read_session(
     paths: &StoragePaths,
     opts: &LoadOptions,
     query: &str,

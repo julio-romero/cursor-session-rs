@@ -61,15 +61,14 @@ fn load_one(
     err: &mut dyn Write,
 ) -> Result<Session> {
     warn_unread_source(paths, source, err)?;
-    let (mut warnings, mut notices) = (Vec::new(), Vec::new());
     let opts = LoadOptions {
         source,
         ..Default::default()
     };
-    let session = load_session_with(paths, &opts, query, read, &mut warnings, &mut notices);
-    print_warnings(&notices, true, err)?;
-    print_warnings(&warnings, verbose, err)?;
-    let session = session.map_err(|error| match error {
+    let loaded = load_session_with(paths, &opts, query, read);
+    print_warnings(&loaded.notices, true, err)?;
+    print_warnings(&loaded.warnings, verbose, err)?;
+    let session = loaded.session.map_err(|error| match error {
         Error::SessionNotFound { query, .. } => Error::SessionNotFound {
             query,
             unsearched: source.map(Source::other).filter(|other| paths.has(*other)),
