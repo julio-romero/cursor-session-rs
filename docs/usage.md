@@ -510,8 +510,8 @@ the paths it looked in. A location reads `(incomplete)` when its store loaded bu
 a `warning:` line on stderr says what is missing or may be wrong, such as chats
 or titles in a format this version does not know. It exits 1 when no storage is
 found at all, or when a store that was found fails to load; the report then
-includes the reason and what to do about it. When rows or files were skipped, a
-`load warnings: N` line says so; `-v` lists them.
+includes the reason and what to do about it. When rows, lines or files were
+skipped, a `load warnings: N` line says so; `-v` lists them.
 
 ## Shell completions and man pages
 

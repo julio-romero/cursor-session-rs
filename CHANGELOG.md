@@ -107,7 +107,7 @@ off to another agent when a Cursor session runs out of credits.
   naming the first by path), so `healthcheck` counts them under `load
   warnings`. A line cannot be read when it is not JSON, has no role, has a
   role other than `user`, `assistant`, `system` and `tool`, or is a `user` or
-  `assistant` line of another shape. `system` and `tool` lines are never
+  `assistant` line whose `message` is not an object. `system` and `tool` lines are never
   reported, whatever they hold, and neither is a last line cut off, as a
   session still being written leaves.
 - A transcript of only `system` and `tool` lines whose `message` is not an
