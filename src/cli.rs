@@ -290,11 +290,13 @@ pub struct HandoffArgs {
     /// Print the transcript instead of copying it
     #[arg(long)]
     pub stdout: bool,
-    /// Start the transcript with TEXT instead of the default preamble
+    /// Start the transcript with TEXT instead of the default preamble (TEXT
+    /// may start with "-")
     #[arg(
         long,
         value_name = "TEXT",
         value_parser = not_blank,
+        allow_hyphen_values = true,
         conflicts_with = "no_preamble"
     )]
     pub preamble: Option<String>,

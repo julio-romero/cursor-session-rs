@@ -1887,6 +1887,35 @@ fn handoff_cuts_messages_short_and_leaves_tools_out() {
 }
 
 #[test]
+fn handoff_preambles_may_start_with_a_hyphen() {
+    let fixture = standard();
+    for preamble in [
+        "- Continue the refactor",
+        "--- context ---",
+        "-v",
+        "--stdout",
+    ] {
+        let out = ok(
+            &fixture,
+            &["handoff", AGENT_ID, "--stdout", "--preamble", preamble],
+        );
+        assert!(
+            out.starts_with(&format!("{preamble}\n\n[user]\n")),
+            "{preamble}: {out}"
+        );
+        // Before the other options as well.
+        let out = ok(
+            &fixture,
+            &["handoff", "--preamble", preamble, AGENT_ID, "--stdout"],
+        );
+        assert!(
+            out.starts_with(&format!("{preamble}\n\n[user]\n")),
+            "{preamble}: {out}"
+        );
+    }
+}
+
+#[test]
 fn handoff_finds_sessions_as_show_does() {
     let fixture = standard();
     assert_eq!(
