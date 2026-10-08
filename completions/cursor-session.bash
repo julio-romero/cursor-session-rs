@@ -40,9 +40,6 @@ _cursor__session() {
             cursor__session,search)
                 cmd="cursor__session__subcmd__search"
                 ;;
-            cursor__session,serve-clipboard)
-                cmd="cursor__session__subcmd__serve__subcmd__clipboard"
-                ;;
             cursor__session,show)
                 cmd="cursor__session__subcmd__show"
                 ;;
@@ -70,9 +67,6 @@ _cursor__session() {
             cursor__session__subcmd__help,search)
                 cmd="cursor__session__subcmd__help__subcmd__search"
                 ;;
-            cursor__session__subcmd__help,serve-clipboard)
-                cmd="cursor__session__subcmd__help__subcmd__serve__subcmd__clipboard"
-                ;;
             cursor__session__subcmd__help,show)
                 cmd="cursor__session__subcmd__help__subcmd__show"
                 ;;
@@ -83,7 +77,7 @@ _cursor__session() {
 
     case "${cmd}" in
         cursor__session)
-            opts="-v -h -V --storage --verbose --color --help --version list show search export handoff serve-clipboard healthcheck completions man help"
+            opts="-v -h -V --storage --verbose --color --help --version list show search export handoff healthcheck completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -236,7 +230,7 @@ _cursor__session() {
             return 0
             ;;
         cursor__session__subcmd__help)
-            opts="list show search export handoff serve-clipboard healthcheck completions man help"
+            opts="list show search export handoff healthcheck completions man help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -361,20 +355,6 @@ _cursor__session() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        cursor__session__subcmd__help__subcmd__serve__subcmd__clipboard)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
         cursor__session__subcmd__help__subcmd__show)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -472,28 +452,6 @@ _cursor__session() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                --storage)
-                    COMPREPLY=($(compgen -f "${cur}"))
-                    return 0
-                    ;;
-                --color)
-                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
-                    return 0
-                    ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        cursor__session__subcmd__serve__subcmd__clipboard)
-            opts="-v -h --storage --verbose --color --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
                 --storage)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

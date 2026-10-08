@@ -5,7 +5,7 @@
 
 use std::io::{self, Write};
 
-use clap::CommandFactory;
+use clap::{Command, CommandFactory};
 use clap_mangen::Man;
 use clap_mangen::roff::{Roff, roman};
 
@@ -24,14 +24,44 @@ pub fn completions(shell: Shell) -> Vec<u8> {
     };
     // clap_complete panics when its writer fails, which a Vec never does. A
     // closed stdout is then reported like any other output's.
-    // The hidden `man` subcommand is offered too: clap_complete completes
-    // every subcommand, and dropping one from its output would be fragile.
     let mut script = Vec::new();
-    clap_complete::generate(shell, &mut Cli::command(), NAME, &mut script);
+    clap_complete::generate(shell, &mut completed_command(), NAME, &mut script);
     if shell == clap_complete::Shell::Bash {
         script = fix_bash_case_labels(&script);
     }
     script
+}
+
+/// The subcommand `handoff` starts on its own, which no one types.
+const INTERNAL: &str = "serve-clipboard";
+
+/// The command line the scripts complete: the program's, without
+/// [`INTERNAL`]. clap_complete completes every subcommand, hidden ones too,
+/// so the hidden `man`, which people do run, is offered as well. Clap cannot
+/// remove a subcommand, so the others, the global options and the texts that
+/// decide how `-h` is described are copied into a new command.
+fn completed_command() -> Command {
+    let program = Cli::command();
+    let mut command = Command::new(NAME).version(env!("CARGO_PKG_VERSION"));
+    if let Some(about) = program.get_about() {
+        command = command.about(about.clone());
+    }
+    if let Some(about) = program.get_long_about() {
+        command = command.long_about(about.clone());
+    }
+    if let Some(help) = program.get_after_help() {
+        command = command.after_help(help.clone());
+    }
+    if let Some(help) = program.get_after_long_help() {
+        command = command.after_long_help(help.clone());
+    }
+    let command = program
+        .get_arguments()
+        .fold(command, |command, arg| command.arg(arg.clone()));
+    program
+        .get_subcommands()
+        .filter(|sub| sub.get_name() != INTERNAL)
+        .fold(command, |command, sub| command.subcommand(sub.clone()))
 }
 
 /// Makes the case labels of a Bash script match the commands they complete.
@@ -199,6 +229,21 @@ mod tests {
                 assert!(script.contains(&command), "{shell:?}: {command}");
             }
             assert!(script.contains("storage"), "{shell:?}");
+        }
+    }
+
+    #[test]
+    fn scripts_offer_man_but_not_the_internal_subcommand() {
+        assert!(Cli::command().find_subcommand(INTERNAL).is_some());
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let script = String::from_utf8(completions(shell)).unwrap();
+            assert!(!script.contains(INTERNAL), "{shell:?}");
+            assert!(script.contains("man"), "{shell:?}");
+            // The copy keeps what decides how `-h` is described, in the
+            // shells whose scripts describe options.
+            if shell != Shell::Bash {
+                assert!(script.contains("see more with"), "{shell:?}");
+            }
         }
     }
 
